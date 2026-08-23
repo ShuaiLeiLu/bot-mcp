@@ -120,6 +120,47 @@ def _validate_time_range(start: datetime, end: datetime) -> tuple[datetime, date
     return start_utc, end_utc
 
 
+def _log_item_identity(
+    item: dict[str, Any],
+    *,
+    field_name: str,
+    fallback_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    for key in ("id", "request_id"):
+        value = item.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        text = str(value).strip()
+        if text and len(text) <= 256:
+            return (key, text)
+    fallback = tuple(str(item.get(key))[:256] for key in fallback_fields)
+    if not any(value and value != "None" for value in fallback):
+        raise MonitorDataError(f"{field_name} item identifier is missing")
+    return ("fallback", *fallback)
+
+
+def _log_item_is_duplicate(
+    item: dict[str, Any],
+    seen_items: dict[tuple[str, ...], tuple[str, ...]],
+    *,
+    field_name: str,
+    fingerprint_fields: tuple[str, ...],
+) -> bool:
+    identity = _log_item_identity(
+        item,
+        field_name=field_name,
+        fallback_fields=fingerprint_fields,
+    )
+    fingerprint = tuple(str(item.get(key))[:256] for key in fingerprint_fields)
+    previous = seen_items.get(identity)
+    if previous is None:
+        seen_items[identity] = fingerprint
+        return False
+    if previous != fingerprint:
+        raise MonitorDataError(f"{field_name} item changed while paginating")
+    return True
+
+
 class MaintenanceApiAdapter:
     """Adapts untrusted Sub2API maintenance responses to domain records."""
 
@@ -270,7 +311,8 @@ class MaintenanceApiAdapter:
         records: list[UsageLogRecord] = []
         start_date = start_utc.astimezone(zone).date().isoformat()
         end_date = end_utc.astimezone(zone).date().isoformat()
-        expected_pages: int | None = None
+        seen_items: dict[tuple[str, ...], tuple[str, ...]] = {}
+        previous_created_at: datetime | None = None
         for page in range(1, self._config.max_usage_pages + 1):
             query = urllib_parse.urlencode(
                 [
@@ -290,14 +332,27 @@ class MaintenanceApiAdapter:
                 expected_page=page,
                 field_name="usage logs",
             )
-            if expected_pages is None:
-                expected_pages = returned_pages
-            elif returned_pages != expected_pages:
-                raise MonitorDataError("usage log pagination changed")
             for item in items:
+                if _log_item_is_duplicate(
+                    item,
+                    seen_items,
+                    field_name="usage logs",
+                    fingerprint_fields=(
+                        "account_id",
+                        "created_at",
+                        "first_token_ms",
+                        "duration_ms",
+                    ),
+                ):
+                    continue
                 account_id = _positive_id_text(item.get("account_id"), "usage account id")
                 created_at = _parse_external_datetime(item.get("created_at"), "usage created_at")
-                if not start_utc <= created_at < end_utc:
+                if previous_created_at is not None and created_at > previous_created_at:
+                    raise MonitorDataError("usage log ordering changed")
+                previous_created_at = created_at
+                if created_at < start_utc:
+                    return records
+                if created_at >= end_utc:
                     continue
                 records.append(
                     UsageLogRecord(
@@ -313,7 +368,11 @@ class MaintenanceApiAdapter:
                         ),
                     )
                 )
-            if page >= returned_pages:
+            # Sub2API defaults exact_total=false, so total/pages may grow while
+            # walking a busy log. Stop on the time boundary or a short/final page
+            # and deduplicate shifted rows instead of trusting a stable total.
+            # Source: https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/handler/admin/usage_handler.go#L62-L72
+            if page >= returned_pages or len(items) < 100:
                 return records
         raise MonitorDataError("too many usage log pages")
 
@@ -337,7 +396,8 @@ class MaintenanceApiAdapter:
     ) -> list[RequestLogRecord]:
         start_utc, end_utc = _validate_time_range(start, end)
         records: list[RequestLogRecord] = []
-        expected_pages: int | None = None
+        seen_items: dict[tuple[str, ...], tuple[str, ...]] = {}
+        previous_created_at: datetime | None = None
         for page in range(1, self._config.max_request_pages + 1):
             query = urllib_parse.urlencode(
                 [
@@ -355,11 +415,20 @@ class MaintenanceApiAdapter:
                 expected_page=page,
                 field_name="request logs",
             )
-            if expected_pages is None:
-                expected_pages = returned_pages
-            elif returned_pages != expected_pages:
-                raise MonitorDataError("request log pagination changed")
             for item in items:
+                if _log_item_is_duplicate(
+                    item,
+                    seen_items,
+                    field_name="request logs",
+                    fingerprint_fields=(
+                        "account_id",
+                        "created_at",
+                        "kind",
+                        "status_code",
+                        "phase",
+                    ),
+                ):
+                    continue
                 raw_account_id = item.get("account_id")
                 account_id = (
                     None
@@ -370,7 +439,12 @@ class MaintenanceApiAdapter:
                     item.get("created_at"),
                     "request created_at",
                 )
-                if not start_utc <= created_at < end_utc:
+                if previous_created_at is not None and created_at > previous_created_at:
+                    raise MonitorDataError("request log ordering changed")
+                previous_created_at = created_at
+                if created_at < start_utc:
+                    return records
+                if created_at >= end_utc:
                     continue
                 kind = str(item.get("kind") or "").strip().lower()
                 if kind not in {"success", "error"}:
@@ -388,7 +462,7 @@ class MaintenanceApiAdapter:
                         phase=str(item.get("phase") or "").strip().lower()[:200],
                     )
                 )
-            if page >= returned_pages:
+            if page >= returned_pages or len(items) < 100:
                 return records
         raise MonitorDataError("too many request log pages")
 
