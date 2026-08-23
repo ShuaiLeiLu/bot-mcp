@@ -58,7 +58,10 @@ class DeliveryService:
             if payload.image_base64:
                 return [
                     {"type": "Plain", "text": payload.text},
-                    {"type": "Image", "base64": payload.image_base64},
+                    {
+                        "type": "Image",
+                        "base64": f"data:image/png;base64,{payload.image_base64}",
+                    },
                 ]
             if payload.image_url:
                 return [

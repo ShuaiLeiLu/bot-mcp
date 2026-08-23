@@ -96,6 +96,34 @@ async def test_delivery_uses_common_person_group_message_chain_contract() -> Non
 
 
 @pytest.mark.asyncio
+async def test_inline_png_is_sent_as_a_data_uri() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"sent": True}})
+
+    client = LangBotClient(
+        "https://langbot.example",
+        "api-key",
+        transport=httpx.MockTransport(handler),
+    )
+    service = DeliveryService(client)
+
+    await service.deliver(
+        _target(MediaPolicy.IMAGE),
+        NotificationPayload(text="status", image_base64="aGVsbG8="),
+    )
+
+    chain = requests[0]["message_chain"]  # type: ignore[index]
+    assert chain[1] == {  # type: ignore[index]
+        "type": "Image",
+        "base64": "data:image/png;base64,aGVsbG8=",
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_auto_media_policy_falls_back_only_for_explicit_unsupported_media() -> None:
     requests: list[dict[str, object]] = []
 
