@@ -76,7 +76,7 @@ rollback() {
 trap rollback ERR
 
 compose config --quiet
-compose build --pull
+compose build
 compose up -d --remove-orphans
 
 healthy=false

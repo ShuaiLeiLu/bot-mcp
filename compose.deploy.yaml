@@ -1,5 +1,9 @@
 services:
   sub2api-mcp:
+    build:
+      args:
+        UV_IMAGE: ghcr.io/astral-sh/uv:0.11.1
+        PYTHON_IMAGE: python:3.12.7-slim
     networks:
       - langbot
 
