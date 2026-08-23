@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="light">
     <title>Sub2API Guardian</title>
     <link rel="stylesheet" href="/guardian/assets/app.css">
     <script type="module" src="/guardian/assets/app.js"></script>
@@ -26,7 +26,7 @@
           <button class="primary wide" type="submit">连接 Guardian</button>
         </form>
         <p class="form-message" id="login-message" role="status" aria-live="polite"></p>
-        <div class="security-note"><span aria-hidden="true">◆</span> 密钥仅存在当前页面内存，刷新页面后自动清除。</div>
+        <div class="security-note"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 7.8 7.5 9.5 4.4-1.7 7.5-4.9 7.5-9.5V6L12 3Z"/><path d="m9.5 12 1.7 1.7 3.6-4"/></svg> 密钥仅存在当前页面内存，刷新页面后自动清除。</div>
       </div>
     </section>
 
@@ -35,21 +35,21 @@
         <div class="sidebar-brand">
           <div class="brand-mark small" aria-hidden="true">G</div>
           <div><strong>Guardian</strong><span>Sub2API Scheduler</span></div>
-          <button class="mobile-close" id="close-sidebar" type="button" aria-label="关闭菜单">×</button>
+          <button class="mobile-close" id="close-sidebar" type="button" aria-label="关闭菜单"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
         <nav aria-label="Guardian 主菜单">
           <p class="nav-label">监控</p>
-          <button class="nav-item active" data-page="overview" type="button"><span>◫</span>总览</button>
-          <button class="nav-item" data-page="groups" type="button"><span>⌘</span>分组调度</button>
-          <button class="nav-item" data-page="channels" type="button"><span>◉</span>渠道池</button>
-          <button class="nav-item" data-page="routing" type="button"><span>⇄</span>实时路由</button>
-          <button class="nav-item" data-page="spend" type="button"><span>◇</span>探测费用</button>
+          <button class="nav-item active" data-page="overview" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z"/></svg>总览</button>
+          <button class="nav-item" data-page="groups" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="17" r="2.5"/><path d="m8.2 8.2 2.4 6.2m5.2-6.2-2.4 6.2M8.5 7h7"/></svg>分组调度</button>
+          <button class="nav-item" data-page="channels" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 5h14v4H5V5Zm0 10h14v4H5v-4Z"/><path d="M8 9v6m8-6v6"/></svg>渠道池</button>
+          <button class="nav-item" data-page="routing" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h13m0 0-3-3m3 3-3 3M20 17H7m0 0 3-3m-3 3 3 3"/></svg>实时路由</button>
+          <button class="nav-item" data-page="spend" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z"/><path d="M9 10.5c0-1 1-1.8 3-1.8s3 .8 3 1.8-1 1.5-3 1.5-3 .6-3 1.7 1 1.8 3 1.8 3-.8 3-1.8M12 7v10"/></svg>探测费用</button>
           <p class="nav-label">管理</p>
-          <button class="nav-item" data-page="guide" type="button"><span>?</span>调度说明</button>
-          <button class="nav-item" data-page="events" type="button"><span>≡</span>事件日志</button>
-          <button class="nav-item" data-page="policy" type="button"><span>⚙</span>策略配置</button>
-          <button class="nav-item" data-page="connection" type="button"><span>⌁</span>连接设置</button>
-          <button class="nav-item" data-page="info" type="button"><span>ⓘ</span>信息与通知</button>
+          <button class="nav-item" data-page="guide" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3.6 2.1c-.9.5-1.4 1-1.4 2.1M12 17h.01"/></svg>调度说明</button>
+          <button class="nav-item" data-page="events" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>事件日志</button>
+          <button class="nav-item" data-page="policy" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>策略配置</button>
+          <button class="nav-item" data-page="connection" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M9 15 15 9M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0"/></svg>连接设置</button>
+          <button class="nav-item" data-page="info" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg>信息与通知</button>
         </nav>
         <div class="sidebar-footer">
           <div><span class="status-dot" id="sidebar-dot"></span><span id="sidebar-status">观察模式</span></div>
@@ -59,7 +59,7 @@
 
       <div class="workspace">
         <header class="topbar">
-          <button class="menu-button" id="open-sidebar" type="button" aria-label="打开菜单">☰</button>
+          <button class="menu-button" id="open-sidebar" type="button" aria-label="打开菜单"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
           <div class="page-heading"><h1 id="page-title">总览</h1><p id="page-subtitle">Guardian 全局运行状态与健康快照</p></div>
           <div class="top-actions">
             <span class="mode-pill"><span class="status-dot amber"></span><span id="mode-label">观察模式</span></span>
@@ -70,7 +70,7 @@
 
         <main id="main-content" tabindex="-1">
           <section class="page active" id="page-overview" aria-labelledby="page-title">
-            <div class="notice safe"><span class="notice-icon">✓</span><div><strong>生产写回已锁定</strong><p>当前只会同步、评分和生成期望动作，不会修改 Sub2API 渠道。</p></div></div>
+            <div class="notice safe"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><div><strong>生产写回已锁定</strong><p>当前只会同步、评分和生成期望动作，不会修改 Sub2API 渠道。</p></div></div>
             <div class="metric-grid five">
               <article class="metric"><span>运行模式</span><strong id="metric-mode">观察</strong><small id="metric-engine">引擎待命</small></article>
               <article class="metric"><span>渠道总数</span><strong id="metric-channels">0</strong><small id="metric-groups">0 个分组</small></article>
@@ -118,7 +118,7 @@
           <section class="page" id="page-spend">
             <div class="section-intro"><div><h2>探测费用</h2><p>主动探测 token 与费用估算；真实流量采样不计入探测费用。</p></div></div>
             <div class="metric-grid three"><article class="metric"><span>主动探测次数</span><strong id="spend-count">0</strong><small>累计账本</small></article><article class="metric"><span>估算费用</span><strong id="spend-cost">$0.0000</strong><small id="spend-currency">USD</small></article><article class="metric"><span>未计价记录</span><strong id="spend-unpriced">0</strong><small>缺少模型单价</small></article></div>
-            <div class="notice info"><span class="notice-icon">i</span><div><strong>费用数据如何产生</strong><p>仅当主动探测响应提供 token 用量且模型有单价时才累计估算费用；未知价格会单独标记，不会按 0 元掩盖。</p></div></div>
+            <div class="notice info"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg></span><div><strong>费用数据如何产生</strong><p>仅当主动探测响应提供 token 用量且模型有单价时才累计估算费用；未知价格会单独标记，不会按 0 元掩盖。</p></div></div>
           </section>
 
           <section class="page" id="page-guide">
@@ -174,7 +174,7 @@
           <section class="page" id="page-connection">
             <div class="section-intro"><div><h2>连接设置</h2><p>连接信息只展示状态，不返回 Admin Key 或访问令牌。</p></div></div>
             <div class="dashboard-grid"><article class="panel connection-card"><span class="connection-icon">S2</span><div><h3>Sub2API 上游</h3><p>通过服务端受信任环境配置读取</p><span class="badge success" id="connection-upstream">已配置</span></div></article><article class="panel connection-card"><span class="connection-icon">API</span><div><h3>Guardian REST / MCP</h3><p>复用当前 API Key scope 鉴权</p><span class="badge success" id="connection-api">连接正常</span></div></article><article class="panel connection-card"><span class="connection-icon">WR</span><div><h3>生产写回适配器</h3><p>在观察期与单组灰度批准前保持锁定</p><span class="badge warning" id="connection-writer">未启用</span></div></article><article class="panel connection-card"><span class="connection-icon">DB</span><div><h3>Guardian 状态库</h3><p>策略、样本、运行和事件使用 SQLite 持久化</p><span class="badge success">运行正常</span></div></article></div>
-            <div class="notice safe"><span class="notice-icon">✓</span><div><strong>密钥防泄漏</strong><p>管理页面、REST 响应、MCP 输出和 Guardian 事件均不回显 Sub2API Admin Key。</p></div></div>
+            <div class="notice safe"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 7.8 7.5 9.5 4.4-1.7 7.5-4.9 7.5-9.5V6L12 3Z"/><path d="m9.5 12 1.7 1.7 3.6-4"/></svg></span><div><strong>密钥防泄漏</strong><p>管理页面、REST 响应、MCP 输出和 Guardian 事件均不回显 Sub2API Admin Key。</p></div></div>
           </section>
 
           <section class="page" id="page-info">
@@ -187,14 +187,14 @@
 
     <dialog id="group-dialog" aria-labelledby="group-dialog-title">
       <form method="dialog" class="dialog-card" id="group-form">
-        <div class="dialog-heading"><div><p class="eyebrow">GROUP OVERRIDE</p><h2 id="group-dialog-title">分组策略</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div>
+        <div class="dialog-heading"><div><p class="eyebrow">GROUP OVERRIDE</p><h2 id="group-dialog-title">分组策略</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
         <input id="group-id" type="hidden">
         <div class="form-grid"><label><span>策略</span><select id="group-strategy"><option value="">继承全局</option><option value="PRICE">价格优先</option><option value="SPEED">速度优先</option><option value="BALANCED">均衡</option></select></label><label><span>最低可用渠道</span><input id="group-min-pool" type="number" min="0" placeholder="继承全局"></label><label><span>权重预算</span><input id="group-budget" type="number" min="1" placeholder="继承全局"></label><label><span>探测间隔（秒）</span><input id="group-probe-interval" type="number" min="30" step="30" placeholder="继承全局"></label></div>
         <div class="dialog-actions"><button class="danger-text" id="group-clear" type="button">清除覆盖</button><span></span><button class="secondary" value="cancel">取消</button><button class="primary" id="group-save" type="button">保存覆盖</button></div>
       </form>
     </dialog>
 
-    <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><div class="dialog-card wide-dialog"><div class="dialog-heading"><div><p class="eyebrow">CHANNEL DETAIL</p><h2 id="channel-dialog-title">渠道详情</h2></div><button class="icon-button" id="close-channel-dialog" type="button" aria-label="关闭">×</button></div><div id="channel-detail"></div><form id="channel-settings"><input id="channel-settings-id" type="hidden"><h3>渠道覆盖参数</h3><p class="muted">留空字段继承全局/分组策略；倍率 0 表示不分配候选权重。</p><div class="form-grid channel-settings-grid"><label><span>优先级（1～5）</span><input id="channel-priority" type="number" min="1" max="5" placeholder="继承"></label><label><span>负载因子</span><input id="channel-load-factor" type="number" min="1" placeholder="继承"></label><label><span>并发上限</span><input id="channel-concurrency" type="number" min="1" placeholder="继承"></label><label><span>调度倍率</span><input id="channel-multiplier" type="number" min="0" step="0.01" placeholder="继承"></label><label><span>探测模型</span><input id="channel-probe-model" maxlength="200" placeholder="继承"></label><label><span>火箭时长（分钟）</span><select id="channel-boost-minutes"><option value="10">10 分钟</option><option value="30" selected>30 分钟</option><option value="60">60 分钟</option><option value="180">180 分钟</option></select></label></div><div class="dialog-actions channel-dialog-actions"><button class="danger-text" id="channel-unboost" type="button">取消火箭</button><button class="secondary" id="channel-boost" type="button">启动火箭</button><span></span><button class="primary" type="submit">保存渠道设置</button></div></form></div></dialog>
+    <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><div class="dialog-card wide-dialog"><div class="dialog-heading"><div><p class="eyebrow">CHANNEL DETAIL</p><h2 id="channel-dialog-title">渠道详情</h2></div><button class="icon-button" id="close-channel-dialog" type="button" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><div id="channel-detail"></div><form id="channel-settings"><input id="channel-settings-id" type="hidden"><h3>渠道覆盖参数</h3><p class="muted">留空字段继承全局/分组策略；倍率 0 表示不分配候选权重。</p><div class="form-grid channel-settings-grid"><label><span>优先级（1～5）</span><input id="channel-priority" type="number" min="1" max="5" placeholder="继承"></label><label><span>负载因子</span><input id="channel-load-factor" type="number" min="1" placeholder="继承"></label><label><span>并发上限</span><input id="channel-concurrency" type="number" min="1" placeholder="继承"></label><label><span>调度倍率</span><input id="channel-multiplier" type="number" min="0" step="0.01" placeholder="继承"></label><label><span>探测模型</span><input id="channel-probe-model" maxlength="200" placeholder="继承"></label><label><span>火箭时长（分钟）</span><select id="channel-boost-minutes"><option value="10">10 分钟</option><option value="30" selected>30 分钟</option><option value="60">60 分钟</option><option value="180">180 分钟</option></select></label></div><div class="dialog-actions channel-dialog-actions"><button class="danger-text" id="channel-unboost" type="button">取消火箭</button><button class="secondary" id="channel-boost" type="button">启动火箭</button><span></span><button class="primary" type="submit">保存渠道设置</button></div></form></div></dialog>
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
     <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
   </body>

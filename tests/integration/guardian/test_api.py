@@ -108,6 +108,24 @@ def test_guardian_ui_and_read_api_authentication(tmp_path: Path) -> None:
     assert overview.json()["data"]["observe_only"] is True
 
 
+def test_guardian_ui_uses_the_persisted_light_design_system(tmp_path: Path) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+
+    with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
+        page = client.get("/guardian/")
+        styles = client.get("/guardian/assets/app.css")
+
+    normalized_css = styles.text.casefold()
+    assert page.text.count('class="nav-icon"') == 10
+    assert "color-scheme: light" in normalized_css
+    assert "--color-background: #f8fafc" in normalized_css
+    assert "#07101c" not in normalized_css
+
+
 def test_policy_revision_and_writeback_safety_gate(tmp_path: Path) -> None:
     runtime = build_runtime(
         _settings(tmp_path),
