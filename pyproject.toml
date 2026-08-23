@@ -1,0 +1,61 @@
+[project]
+name = "sub2api-scheduler-mcp"
+version = "0.1.0"
+description = "Deployment-neutral MCP service for the Sub2API scheduler and all LangBot delivery channels"
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "httpx==0.28.1",
+    "mcp==1.28.1",
+    "Pillow>=10,<13",
+    "prometheus-client>=0.21,<1",
+    "pydantic==2.12.5",
+    "pydantic-settings>=2.7,<3",
+    "starlette==1.3.1",
+    "tzdata>=2026.1",
+    "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx2==2.9.1",
+    "pip-audit>=2.8,<3",
+    "pyright>=1.1.400,<2",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+sub2api-mcp = "sub2api_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sub2api_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:Field 'lifespan' has an incomplete definition.*:pydantic_settings.exceptions.IncompleteFieldDefinitionWarning",
+]
+pythonpath = ["src", "core"]
+testpaths = ["tests"]
+
+[tool.ruff]
+exclude = ["core"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["core"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false

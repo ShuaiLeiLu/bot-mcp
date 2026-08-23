@@ -1,0 +1,55 @@
+name: Rollback Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full 40-character commit SHA already present on the server
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: bot-mcp-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      SSHPASS: ${{ secrets.DEPLOY_PASSWORD }}
+      RELEASE_SHA: ${{ inputs.release_sha }}
+    steps:
+      - name: Validate requested release
+        run: |
+          if [[ ! ${RELEASE_SHA} =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'release_sha must be a full lowercase commit SHA' >&2
+            exit 2
+          fi
+
+      - name: Install SSH password helper
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Configure pinned server host key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' '${{ secrets.DEPLOY_KNOWN_HOSTS }}' > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Activate previous release
+        run: |
+          script="/opt/bot-mcp/releases/${RELEASE_SHA}/scripts/rollback-release.sh"
+          sshpass -e ssh \
+            -p "${DEPLOY_PORT}" \
+            -o StrictHostKeyChecking=yes \
+            -o LogLevel=ERROR \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "bash '${script}' '${RELEASE_SHA}'"

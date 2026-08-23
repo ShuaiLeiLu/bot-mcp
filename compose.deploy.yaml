@@ -1,0 +1,9 @@
+services:
+  sub2api-mcp:
+    networks:
+      - langbot
+
+networks:
+  langbot:
+    name: ${LANGBOT_DOCKER_NETWORK:-docker_langbot_network}
+    external: true

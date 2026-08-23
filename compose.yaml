@@ -1,0 +1,33 @@
+services:
+  sub2api-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sub2api-scheduler-mcp:${SUB2API_MCP_IMAGE_TAG:-0.1.0}
+    container_name: sub2api-scheduler-mcp
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SUB2API_MCP_HOST: 0.0.0.0
+      SUB2API_MCP_PORT: 5310
+      SUB2API_MCP_DATABASE_PATH: /data/sub2api-mcp.db
+      SUB2API_MCP_LEGACY_CORE_ROOT: /opt/sub2api-core
+    ports:
+      - "127.0.0.1:${SUB2API_MCP_PUBLISH_PORT:-5310}:5310"
+    volumes:
+      - sub2api_mcp_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  sub2api_mcp_data:

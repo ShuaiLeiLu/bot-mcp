@@ -1,0 +1,113 @@
+name: CI and Deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.7'
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.1
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Audit dependencies
+        run: uv run pip-audit
+
+      - name: Build local-only image
+        run: docker build --tag "bot-mcp-ci:${GITHUB_SHA}" .
+
+  deploy:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      group: bot-mcp-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      SSHPASS: ${{ secrets.DEPLOY_PASSWORD }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install SSH password helper
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: Configure pinned server host key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' '${{ secrets.DEPLOY_KNOWN_HOSTS }}' > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Package immutable release
+        id: package
+        run: |
+          archive="${RUNNER_TEMP}/bot-mcp-${GITHUB_SHA}.tar.gz"
+          tar \
+            --exclude=.git \
+            --exclude=.env \
+            --exclude=.venv \
+            --exclude=data \
+            -czf "${archive}" .
+          checksum=$(sha256sum "${archive}" | awk '{print $1}')
+          printf 'archive=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
+          printf 'checksum=%s\n' "${checksum}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload and activate release
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          remote_archive="/opt/bot-mcp/incoming/${GITHUB_SHA}.tar.gz"
+          sshpass -e ssh \
+            -p "${DEPLOY_PORT}" \
+            -o StrictHostKeyChecking=yes \
+            -o LogLevel=ERROR \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            'install -d -m 700 /opt/bot-mcp/incoming /opt/bot-mcp/releases /opt/bot-mcp/shared'
+          sshpass -e scp \
+            -P "${DEPLOY_PORT}" \
+            -o StrictHostKeyChecking=yes \
+            -o LogLevel=ERROR \
+            "${ARCHIVE}" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${remote_archive}"
+          sshpass -e ssh \
+            -p "${DEPLOY_PORT}" \
+            -o StrictHostKeyChecking=yes \
+            -o LogLevel=ERROR \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "tar -xOf '${remote_archive}' './scripts/deploy-release.sh' | bash -s -- '${GITHUB_SHA}' '${remote_archive}' '${CHECKSUM}'"
