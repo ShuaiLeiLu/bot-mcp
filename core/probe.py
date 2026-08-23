@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -146,6 +146,17 @@ class AccountGroupState:
 class ChannelProbe:
     channel: ChannelHealth
     accounts: GroupAccountCounts | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeUsageRecord:
+    log_id: str
+    api_key_id: str
+    group_id: str | None
+    model: str
+    created_at: datetime
+    duration_ms: int | None
+    user_agent: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +390,73 @@ def parse_group_definitions(payload: Any) -> list[GroupDefinition]:
     return groups
 
 
+def parse_probe_usage_page(
+    payload: Any,
+    *,
+    expected_page: int,
+) -> tuple[list[ProbeUsageRecord], int, int, int]:
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        raise MonitorDataError("Sub2API probe usage request failed")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise MonitorDataError("probe usage data.items must be a list")
+    total = _non_negative_int(data.get("total"), "probe usage total")
+    page = _non_negative_int(data.get("page"), "probe usage page")
+    page_size = _non_negative_int(data.get("page_size"), "probe usage page_size")
+    pages = _non_negative_int(data.get("pages"), "probe usage pages")
+    expected_pages = max(1, (total + page_size - 1) // page_size) if page_size else 0
+    if (
+        page != expected_page
+        or page < 1
+        or page_size < 1
+        or pages != expected_pages
+        or page > pages
+        or len(data["items"]) > page_size
+        or len(data["items"]) > total
+    ):
+        raise MonitorDataError("invalid probe usage pagination")
+
+    records: list[ProbeUsageRecord] = []
+    for item in data["items"]:
+        if not isinstance(item, dict):
+            raise MonitorDataError("probe usage item must be an object")
+        raw_group_id = item.get("group_id")
+        created_at_raw = item.get("created_at")
+        if not isinstance(created_at_raw, str) or len(created_at_raw) > 100:
+            raise MonitorDataError("invalid probe usage created_at")
+        try:
+            created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise MonitorDataError("invalid probe usage created_at") from exc
+        if created_at.tzinfo is None:
+            raise MonitorDataError("invalid probe usage created_at")
+        duration_ms = _optional_non_negative_int(
+            item.get("duration_ms"),
+            "probe usage duration_ms",
+        )
+        records.append(
+            ProbeUsageRecord(
+                log_id=_positive_id_text(item.get("id"), "probe usage id"),
+                api_key_id=_positive_id_text(
+                    item.get("api_key_id"),
+                    "probe usage api key id",
+                ),
+                # API keys carry their stable group_id in Sub2API usage logs.
+                # Source: https://github.com/Wei-Shaw/sub2api/blob/main/backend/ent/schema/api_key.go
+                group_id=(
+                    None
+                    if raw_group_id is None
+                    else _positive_id_text(raw_group_id, "probe usage group id")
+                ),
+                model=_bounded_text(item.get("model"), "probe usage model", required=True),
+                created_at=created_at,
+                duration_ms=duration_ms,
+                user_agent=_bounded_text(item.get("user_agent"), "probe usage user_agent"),
+            )
+        )
+    return records, pages, page_size, len(data["items"])
+
+
 def parse_account_group_state_page(
     payload: Any,
     *,
@@ -511,10 +589,14 @@ def aggregate_group_account_counts(
 def build_channel_probes(
     channels: Iterable[ChannelHealth],
     groups: Iterable[GroupAccountCounts],
+    *,
+    group_ids_by_monitor: Mapping[str, str] | None = None,
 ) -> list[ChannelProbe]:
+    group_list = list(groups)
+    group_by_id = {group.group_id: group for group in group_list}
     group_lookup: dict[str, GroupAccountCounts | None] = {}
     semantic_lookup: dict[str, GroupAccountCounts | None] = {}
-    for group in groups:
+    for group in group_list:
         key = group.name.casefold()
         group_lookup[key] = None if key in group_lookup else group
         semantic_key = _semantic_group_key(group.name)
@@ -526,6 +608,15 @@ def build_channel_probes(
     probes: list[ChannelProbe] = []
     for channel in channels:
         if not channel.enabled:
+            continue
+        resolved_group_id = (group_ids_by_monitor or {}).get(channel.monitor_id)
+        if resolved_group_id is not None:
+            probes.append(
+                ChannelProbe(
+                    channel=channel,
+                    accounts=group_by_id.get(resolved_group_id),
+                )
+            )
             continue
         accounts = None
         candidates: list[str] = []
@@ -551,6 +642,54 @@ def build_channel_probes(
         probes.append(ChannelProbe(channel=channel, accounts=accounts))
     probes.sort(key=lambda probe: (probe.channel.name.casefold(), probe.channel.monitor_id))
     return probes
+
+
+def resolve_channel_group_ids(
+    channels: Iterable[ChannelHealth],
+    records: Iterable[ProbeUsageRecord],
+) -> dict[str, str]:
+    record_list = list(records)
+    bindings: dict[str, str] = {}
+    for channel in channels:
+        if channel.latency_ms is None or channel.latency_ms < 0 or not channel.model:
+            continue
+        try:
+            checked_at = datetime.fromisoformat(
+                channel.last_checked_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if checked_at.tzinfo is None:
+            continue
+        best_by_group: dict[str, int] = {}
+        for record in record_list:
+            if (
+                record.model != channel.model
+                or "go-http-client" not in record.user_agent.casefold()
+                or record.created_at.tzinfo is None
+                or record.group_id is None
+                or not record.group_id.isdigit()
+                or int(record.group_id) <= 0
+                or record.duration_ms is None
+            ):
+                continue
+            offset_ms = int((record.created_at - checked_at).total_seconds() * 1000)
+            if not 0 <= offset_ms <= 2000:
+                continue
+            duration_difference = abs(record.duration_ms - channel.latency_ms)
+            threshold = max(1000, channel.latency_ms // 4)
+            if duration_difference > threshold:
+                continue
+            current = best_by_group.get(record.group_id)
+            if current is None or duration_difference < current:
+                best_by_group[record.group_id] = duration_difference
+        ranked = sorted(best_by_group.items(), key=lambda item: (item[1], int(item[0])))
+        if not ranked:
+            continue
+        if len(ranked) > 1 and ranked[1][1] - ranked[0][1] <= 100:
+            continue
+        bindings[channel.monitor_id] = ranked[0][0]
+    return bindings
 
 
 def parse_channel_monitor_page(
@@ -589,19 +728,42 @@ def format_status_report(probes: Iterable[ChannelProbe]) -> str:
     if not probe_list:
         return "暂无启用的渠道探测结果。"
 
-    blocks: list[str] = []
+    status_labels = {
+        "operational": ("✅", "正常"),
+        "degraded": ("⚠️", "降级"),
+        "failed": ("❌", "失败"),
+        "error": ("❌", "异常"),
+        "unknown": ("❔", "未知"),
+    }
+    normal_count = sum(
+        probe.channel.status == "operational" for probe in probe_list
+    )
+    blocks = [
+        f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜异常 {len(probe_list) - normal_count}"
+    ]
     for probe in probe_list:
         channel = probe.channel
         latency = "--" if channel.latency_ms is None else f"{channel.latency_ms}ms"
+        availability = (
+            "--"
+            if channel.availability_7d is None
+            else f"{channel.availability_7d:.1f}%"
+        )
+        icon, status_label = status_labels.get(channel.status, ("❔", "未知"))
         if probe.accounts is None:
-            available = error = temporary = closed = "--"
+            group_line = "分组：未关联账号组"
+            account_line = "账号：暂无可核对的分组数据"
         else:
-            available = str(probe.accounts.available_count)
-            error = str(probe.accounts.error_count)
-            temporary = str(probe.accounts.temporary_unavailable_count)
-            closed = str(probe.accounts.closed_count)
+            group_line = f"分组：{probe.accounts.name} (#{probe.accounts.group_id})"
+            account_line = (
+                f"账号：可用 {probe.accounts.available_count}｜错误 {probe.accounts.error_count}｜"
+                f"临时不可调度 {probe.accounts.temporary_unavailable_count}｜关闭 {probe.accounts.closed_count}"
+            )
         blocks.append(
-            f"{channel.name}｜延迟 {latency}\n"
-            f"可用 {available}｜错误 {error}｜临时不可调度 {temporary}｜关闭 {closed}"
+            f"{icon} {channel.name}\n"
+            f"状态：{status_label}｜延迟：{latency}｜7日可用率：{availability}\n"
+            f"探测：{channel.provider or '--'}｜{channel.model or '--'}\n"
+            f"{group_line}\n"
+            f"{account_line}"
         )
     return "\n\n".join(blocks)

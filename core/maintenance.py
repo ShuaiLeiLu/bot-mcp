@@ -123,16 +123,15 @@ class _ChannelAccountSweepService:
         tested_ids: set[str] = set()
         for probe in probes:
             group = probe.accounts
-            if (
-                probe.channel.status != "error"
-                or group is None
-                or group.available_count <= 0
-            ):
+            if group is None or group.error_count <= 0:
                 continue
             candidates = [
                 account
                 for account in accounts
                 if group.group_id in account.group_ids
+                and account.bucket == "error"
+                and account.status == "error"
+                and account.schedulable
                 and not account.expired
                 and account.account_id not in tested_ids
                 and account.account_id not in already_adjusted

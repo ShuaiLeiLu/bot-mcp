@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -26,11 +27,14 @@ from probe import (
     GroupDefinition,
     GroupAccountCounts,
     MonitorDataError,
+    ProbeUsageRecord,
     aggregate_group_account_counts,
     build_channel_probes,
     format_status_report,
     parse_channel_monitor_page as _parse_channel_monitor_page,
     parse_group_definitions,
+    parse_probe_usage_page,
+    resolve_channel_group_ids,
 )
 from recovery import (
     RecoveryCandidate,
@@ -42,6 +46,8 @@ from recovery import (
     recovered_account_is_normal,
 )
 from video import VideoGenerationClient, normalize_video_api_url
+
+_LOGGER = logging.getLogger("sub2api_mcp")
 
 class _RejectRedirectHandler(urllib_request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -368,6 +374,7 @@ class Sub2APIClient:
     MAX_RECOVERY_ACCOUNT_PAGES = 100
     MAX_USAGE_LOG_PAGES = 100
     MAX_REQUEST_LOG_PAGES = 100
+    MAX_MONITOR_BINDING_PAGES = 3
 
     def __init__(
         self,
@@ -574,7 +581,108 @@ class Sub2APIClient:
     def fetch_probe_sync(self) -> list[ChannelProbe]:
         channels = self.fetch_sync()
         groups = self.fetch_group_account_counts_sync()
-        return build_channel_probes(channels, groups)
+        try:
+            usage_records = self.fetch_probe_usage_records_sync(channels)
+        except (MonitorDataError, MonitorRequestError) as exc:
+            _LOGGER.warning(
+                "probe_group_binding_unavailable errorType=%s",
+                type(exc).__name__,
+            )
+            usage_records = []
+        bindings = resolve_channel_group_ids(channels, usage_records)
+        return build_channel_probes(
+            channels,
+            groups,
+            group_ids_by_monitor=bindings,
+        )
+
+    def fetch_probe_usage_records_sync(
+        self,
+        channels: list[ChannelHealth],
+    ) -> list[ProbeUsageRecord]:
+        oldest_by_model: dict[str, datetime] = {}
+        for channel in channels:
+            if (
+                not channel.enabled
+                or channel.group_name
+                or not channel.model
+                or not channel.last_checked_at
+            ):
+                continue
+            try:
+                checked_at = datetime.fromisoformat(
+                    channel.last_checked_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if checked_at.tzinfo is None:
+                continue
+            current = oldest_by_model.get(channel.model)
+            if current is None or checked_at < current:
+                oldest_by_model[channel.model] = checked_at
+
+        zone = ZoneInfo(self.USAGE_TIMEZONE)
+        end_date = self._now_provider().astimezone(zone).date().isoformat()
+        collected: list[ProbeUsageRecord] = []
+        for model, checked_at in oldest_by_model.items():
+            cutoff = checked_at - timedelta(seconds=1)
+            start_date = cutoff.astimezone(zone).date().isoformat()
+            seen: dict[str, tuple[object, ...]] = {}
+            previous_created_at: datetime | None = None
+            for page in range(1, self.MAX_MONITOR_BINDING_PAGES + 1):
+                query = urllib_parse.urlencode(
+                    [
+                        ("start_date", start_date),
+                        ("end_date", end_date),
+                        ("timezone", self.USAGE_TIMEZONE),
+                        ("model", model),
+                        ("page", page),
+                        ("page_size", 100),
+                        ("sort_by", "created_at"),
+                        ("sort_order", "desc"),
+                    ]
+                )
+                records, returned_pages, page_size, item_count = parse_probe_usage_page(
+                    self._request_json(f"{self.ADMIN_USAGE_URL}?{query}"),
+                    expected_page=page,
+                )
+                reached_cutoff = False
+                for record in records:
+                    fingerprint = (
+                        record.api_key_id,
+                        record.group_id,
+                        record.model,
+                        record.created_at,
+                        record.duration_ms,
+                        record.user_agent,
+                    )
+                    previous = seen.get(record.log_id)
+                    if previous is not None:
+                        if previous != fingerprint:
+                            raise MonitorDataError(
+                                "probe usage item changed while paginating"
+                            )
+                        continue
+                    seen[record.log_id] = fingerprint
+                    if (
+                        previous_created_at is not None
+                        and record.created_at > previous_created_at
+                    ):
+                        raise MonitorDataError("probe usage ordering changed")
+                    previous_created_at = record.created_at
+                    if record.created_at < cutoff:
+                        reached_cutoff = True
+                        break
+                    collected.append(record)
+                if (
+                    reached_cutoff
+                    or page >= returned_pages
+                    or item_count < page_size
+                ):
+                    break
+            else:
+                raise MonitorDataError("too many probe usage pages")
+        return collected
 
     async def fetch_probe(self) -> list[ChannelProbe]:
         return await asyncio.to_thread(self.fetch_probe_sync)
