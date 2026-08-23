@@ -121,7 +121,11 @@ def build_runtime(
     jobs.register(JobType.PROBE, scheduler.handle_probe)
     jobs.register(JobType.RECOVERY, scheduler.handle_recovery)
     jobs.register(JobType.MAINTENANCE, scheduler.handle_maintenance)
-    mcp = Sub2APIMCPServer(service, metrics)
+    mcp = Sub2APIMCPServer(
+        service,
+        metrics,
+        allowed_hosts=settings.allowed_hosts,
+    )
 
     actor_verifier = None
     actor_service = None

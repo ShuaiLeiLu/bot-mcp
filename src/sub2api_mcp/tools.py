@@ -12,10 +12,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import ValidationError
 
 from .auth import current_request_id, require_scope
-from .config import Scope
+from .config import DEFAULT_ALLOWED_HOSTS, Scope
 from .contracts import DeliveryTargetCreate, JobStatus, JobType, SubmitVideoInput
 from .errors import ServiceError
 from .logging import log_event
@@ -31,7 +32,13 @@ mutations. All identifiers are opaque. Never infer or invent platform user IDs.
 
 
 class Sub2APIMCPServer:
-    def __init__(self, service: Sub2APIService, metrics: Metrics) -> None:
+    def __init__(
+        self,
+        service: Sub2APIService,
+        metrics: Metrics,
+        *,
+        allowed_hosts: list[str] | None = None,
+    ) -> None:
         self.service = service
         self.metrics = metrics
         self._logger = logging.getLogger("sub2api_mcp")
@@ -40,6 +47,11 @@ class Sub2APIMCPServer:
             instructions=INSTRUCTIONS,
             stateless_http=True,
             json_response=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed_hosts or list(DEFAULT_ALLOWED_HOSTS),
+                allowed_origins=[],
+            ),
         )
         self._register_tools()
 

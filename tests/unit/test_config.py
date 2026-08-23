@@ -31,6 +31,7 @@ def test_settings_are_deployment_neutral_and_safe_by_default(tmp_path: Path) -> 
 
     assert settings.host == "127.0.0.1"
     assert settings.port == 5310
+    assert "sub2api-scheduler-mcp:*" in settings.allowed_hosts
     assert settings.scheduler_enabled is False
     assert settings.langbot_base_url is None
     assert settings.database_path == tmp_path / "state.db"

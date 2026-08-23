@@ -35,29 +35,29 @@ class FakeVideoGenerator:
         return VideoOutput(url="https://video.example/outputs/a.mp4", filename="a.mp4")
 
 
-def _settings(tmp_path: Path) -> Settings:
-    return Settings.model_validate(
-        {
-            "access_tokens": [
-                AccessTokenConfig(
-                    name="test",
-                    token=SecretStr("t" * 32),
-                    scopes=frozenset[Scope](
-                        {"sub2api:read", "sub2api:write", "sub2api:admin"}
-                    ),
+def _settings(tmp_path: Path, **overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "access_tokens": [
+            AccessTokenConfig(
+                name="test",
+                token=SecretStr("t" * 32),
+                scopes=frozenset[Scope](
+                    {"sub2api:read", "sub2api:write", "sub2api:admin"}
                 ),
-                AccessTokenConfig(
-                    name="actor",
-                    token=SecretStr("a" * 32),
-                    scopes=frozenset[Scope]({"sub2api:actor"}),
-                ),
-            ],
-            "sub2api_admin_key": "k" * 32,
-            "database_path": tmp_path / "state.db",
-            "scheduler_enabled": False,
-            "video_enabled": True,
-        }
-    )
+            ),
+            AccessTokenConfig(
+                name="actor",
+                token=SecretStr("a" * 32),
+                scopes=frozenset[Scope]({"sub2api:actor"}),
+            ),
+        ],
+        "sub2api_admin_key": "k" * 32,
+        "database_path": tmp_path / "state.db",
+        "scheduler_enabled": False,
+        "video_enabled": True,
+    }
+    values.update(overrides)
+    return Settings.model_validate(values)
 
 
 def test_health_auth_and_metrics_routes(tmp_path: Path) -> None:
@@ -104,3 +104,33 @@ def test_actor_route_is_not_exposed_when_disabled(tmp_path: Path) -> None:
         response = client.post("/bridge/v1/actor", json={})
 
     assert response.status_code == 404
+
+
+def test_mcp_accepts_a_configured_container_host(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        allowed_hosts=[
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "sub2api-scheduler-mcp:*",
+        ],
+    )
+    runtime = build_runtime(
+        settings,
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+
+    with TestClient(
+        create_app(runtime),
+        base_url="http://sub2api-scheduler-mcp:5310",
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={"X-API-Key": "t" * 32},
+            json={},
+        )
+
+    assert response.status_code != 421
+    assert response.status_code != 401

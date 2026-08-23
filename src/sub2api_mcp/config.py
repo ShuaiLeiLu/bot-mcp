@@ -24,6 +24,13 @@ Scope = Literal[
     "sub2api:actor",
 ]
 
+DEFAULT_ALLOWED_HOSTS = (
+    "127.0.0.1:*",
+    "localhost:*",
+    "[::1]:*",
+    "sub2api-scheduler-mcp:*",
+)
+
 
 class AccessTokenConfig(BaseModel):
     """One opaque API token and its fixed authorization scopes."""
@@ -52,6 +59,10 @@ class Settings(BaseSettings):
 
     host: str = Field(default="127.0.0.1", min_length=1, max_length=255)
     port: int = Field(default=5310, ge=1, le=65535)
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS),
+        min_length=1,
+    )
     database_path: Path = Path("data/sub2api-mcp.db")
     legacy_core_root: Path = Field(default_factory=_default_core_root)
 
