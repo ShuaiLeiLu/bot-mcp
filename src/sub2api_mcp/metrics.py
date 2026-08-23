@@ -17,6 +17,8 @@ class Metrics:
     job_transitions: Counter
     job_queue_depth: Gauge
     scheduler_runs: Counter
+    guardian_runs: Counter
+    guardian_duration: Histogram
     outbox_backlog: Gauge
     outbox_oldest_age_seconds: Gauge
 
@@ -65,6 +67,18 @@ class Metrics:
                 "sub2api_scheduler_runs_total",
                 "Scheduler cycle results",
                 ("status",),
+                registry=registry,
+            ),
+            guardian_runs=Counter(
+                "sub2api_guardian_runs_total",
+                "Guardian evaluation results",
+                ("status", "mode"),
+                registry=registry,
+            ),
+            guardian_duration=Histogram(
+                "sub2api_guardian_run_duration_seconds",
+                "Guardian evaluation duration",
+                ("mode",),
                 registry=registry,
             ),
             outbox_backlog=Gauge(

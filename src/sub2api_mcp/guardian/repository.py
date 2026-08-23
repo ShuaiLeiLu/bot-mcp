@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from ..errors import ServiceError
 from .contracts import (
+    ChannelPolicyOverride,
     GuardianHealth,
     GuardianPolicy,
     GuardianSample,
@@ -36,6 +37,12 @@ CREATE TABLE IF NOT EXISTS guardian_policy (
 CREATE TABLE IF NOT EXISTS guardian_group_overrides (
     group_id TEXT PRIMARY KEY,
     policy_json TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS guardian_channel_overrides (
+    channel_id TEXT PRIMARY KEY,
+    override_json TEXT NOT NULL,
     revision INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -128,6 +135,14 @@ CREATE TABLE IF NOT EXISTS guardian_original_config (
     channel_id TEXT PRIMARY KEY,
     config_json TEXT NOT NULL,
     captured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS guardian_idempotency (
+    idempotency_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(idempotency_key, action, subject)
 );
 """
 
@@ -310,6 +325,45 @@ class GuardianRepository:
             for row in rows
         }
 
+    async def upsert_channel_override(
+        self, channel_id: str, override: ChannelPolicyOverride
+    ) -> ChannelPolicyOverride:
+        return await asyncio.to_thread(self._upsert_channel_override_sync, channel_id, override)
+
+    def _upsert_channel_override_sync(
+        self, channel_id: str, override: ChannelPolicyOverride
+    ) -> ChannelPolicyOverride:
+        now = _iso(self._clock())
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT revision FROM guardian_channel_overrides WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            revision = int(row["revision"]) + 1 if row is not None else 1
+            connection.execute(
+                "INSERT INTO guardian_channel_overrides"
+                "(channel_id, override_json, revision, updated_at) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(channel_id) DO UPDATE SET override_json = excluded.override_json, "
+                "revision = excluded.revision, updated_at = excluded.updated_at",
+                (channel_id, override.model_dump_json(), revision, now),
+            )
+        return override
+
+    async def get_channel_override(self, channel_id: str) -> ChannelPolicyOverride | None:
+        return await asyncio.to_thread(self._get_channel_override_sync, channel_id)
+
+    def _get_channel_override_sync(self, channel_id: str) -> ChannelPolicyOverride | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT override_json FROM guardian_channel_overrides WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+        return (
+            ChannelPolicyOverride.model_validate_json(row["override_json"])
+            if row is not None
+            else None
+        )
+
     async def upsert_channel(
         self,
         *,
@@ -406,7 +460,10 @@ class GuardianRepository:
     def _get_channel_sync(self, channel_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM guardian_channels WHERE channel_id = ?", (channel_id,)
+                "SELECT c.*, o.override_json AS channel_override_json "
+                "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
+                "ON o.channel_id = c.channel_id WHERE c.channel_id = ?",
+                (channel_id,),
             ).fetchone()
         return self._channel(row) if row is not None else None
 
@@ -436,24 +493,27 @@ class GuardianRepository:
         conditions: list[str] = []
         params: list[object] = []
         if group_id:
-            conditions.append("group_id = ?")
+            conditions.append("c.group_id = ?")
             params.append(group_id)
         if health:
-            conditions.append("health = ?")
+            conditions.append("c.health = ?")
             params.append(health)
         if query:
-            conditions.append("(name LIKE ? OR channel_id LIKE ?)")
+            conditions.append("(c.name LIKE ? OR c.channel_id LIKE ?)")
             pattern = f"%{query[:100]}%"
             params.extend((pattern, pattern))
         if cursor:
             channel_cursor, _ = _decode_cursor(cursor)
-            conditions.append("channel_id > ?")
+            conditions.append("c.channel_id > ?")
             params.append(channel_cursor)
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit + 1)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM guardian_channels {where} ORDER BY channel_id LIMIT ?",
+                "SELECT c.*, o.override_json AS channel_override_json "
+                "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
+                f"ON o.channel_id = c.channel_id {where} "
+                "ORDER BY c.channel_id LIMIT ?",
                 params,
             ).fetchall()
         selected = rows[:limit]
@@ -474,7 +534,9 @@ class GuardianRepository:
         overrides = self._list_group_overrides_sync()
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT COALESCE(group_id, 'ungrouped') AS group_id, COUNT(*) AS channel_count, "
+                "SELECT COALESCE(group_id, 'ungrouped') AS group_id, "
+                "MAX(json_extract(details_json, '$.group_name')) AS group_name, "
+                "COUNT(*) AS channel_count, "
                 "SUM(CASE WHEN desired_schedulable = 1 THEN 1 ELSE 0 END) AS available_count, "
                 "AVG(score) AS score, AVG(latency_ms) AS latency_ms "
                 "FROM guardian_channels GROUP BY COALESCE(group_id, 'ungrouped') "
@@ -483,7 +545,7 @@ class GuardianRepository:
         return [
             {
                 "group_id": row["group_id"],
-                "name": f"分组 {row['group_id']}",
+                "name": row["group_name"] or f"分组 {row['group_id']}",
                 "channel_count": int(row["channel_count"]),
                 "available_count": int(row["available_count"] or 0),
                 "score": round(float(row["score"] or 0), 6),
@@ -504,11 +566,25 @@ class GuardianRepository:
         self, channel_id: str, control: ManualControl | str
     ) -> dict[str, Any]:
         parsed = ManualControl(control)
+        health_by_control = {
+            ManualControl.NONE: GuardianHealth.PENDING,
+            ManualControl.PAUSED: GuardianHealth.MANUALLY_PAUSED,
+            ManualControl.EXCLUDED: GuardianHealth.EXCLUDED,
+            ManualControl.FUSED: GuardianHealth.FUSED,
+        }
         with self._connect() as connection:
             updated = connection.execute(
-                "UPDATE guardian_channels SET manual_control = ?, updated_at = ? "
+                "UPDATE guardian_channels SET manual_control = ?, health = ?, "
+                "desired_schedulable = CASE WHEN ? = 'NONE' "
+                "THEN upstream_schedulable ELSE 0 END, updated_at = ? "
                 "WHERE channel_id = ?",
-                (parsed.value, _iso(self._clock()), channel_id),
+                (
+                    parsed.value,
+                    health_by_control[parsed].value,
+                    parsed.value,
+                    _iso(self._clock()),
+                    channel_id,
+                ),
             )
             if updated.rowcount != 1:
                 raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
@@ -517,6 +593,37 @@ class GuardianRepository:
             ).fetchone()
         assert row is not None
         return self._channel(row)
+
+    async def merge_channel_details(
+        self, channel_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._merge_channel_details_sync, channel_id, updates)
+
+    def _merge_channel_details_sync(
+        self, channel_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT details_json FROM guardian_channels WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            if row is None:
+                raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
+            details = cast(dict[str, Any], json.loads(row["details_json"]))
+            details.update(updates)
+            connection.execute(
+                "UPDATE guardian_channels SET details_json = ?, updated_at = ? "
+                "WHERE channel_id = ?",
+                (_json(details), _iso(self._clock()), channel_id),
+            )
+            saved = connection.execute(
+                "SELECT c.*, o.override_json AS channel_override_json "
+                "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
+                "ON o.channel_id = c.channel_id WHERE c.channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+        assert saved is not None
+        return self._channel(saved)
 
     async def append_sample(self, sample: GuardianSample) -> None:
         await asyncio.to_thread(self._append_sample_sync, sample)
@@ -539,13 +646,19 @@ class GuardianRepository:
                     sample.message,
                 ),
             )
+            connection.execute(
+                "DELETE FROM guardian_samples WHERE channel_id = ? AND sample_id NOT IN "
+                "(SELECT sample_id FROM guardian_samples WHERE channel_id = ? "
+                "ORDER BY occurred_at DESC, sample_id DESC LIMIT 10000)",
+                (sample.channel_id, sample.channel_id),
+            )
 
     async def list_samples(self, channel_id: str, *, limit: int = 60) -> list[GuardianSample]:
         return await asyncio.to_thread(self._list_samples_sync, channel_id, limit)
 
     def _list_samples_sync(self, channel_id: str, limit: int) -> list[GuardianSample]:
-        if not 1 <= limit <= 1000:
-            raise ServiceError("INVALID_PAGE_SIZE", "Sample size must be between 1 and 1000")
+        if not 1 <= limit <= 10_000:
+            raise ServiceError("INVALID_PAGE_SIZE", "Sample size must be between 1 and 10000")
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM guardian_samples WHERE channel_id = ? "
@@ -747,6 +860,11 @@ class GuardianRepository:
                     now,
                 ),
             )
+            connection.execute(
+                "DELETE FROM guardian_events WHERE event_id NOT IN "
+                "(SELECT event_id FROM guardian_events "
+                "ORDER BY created_at DESC, event_id DESC LIMIT 100000)"
+            )
         return {
             "event_id": event_id,
             "event_type": event_type[:64],
@@ -848,22 +966,32 @@ class GuardianRepository:
             )
 
     async def overview(self) -> dict[str, Any]:
-        channels = await self.list_channels(limit=200)
-        items = cast(list[dict[str, Any]], channels["items"])
-        groups = await self.list_groups()
+        counts = await asyncio.to_thread(self._overview_counts_sync)
         runs = await self.list_runs(limit=1)
         policy = await self.get_policy()
-        by_health: dict[str, int] = {}
-        for item in items:
-            health = cast(str, item["health"])
-            by_health[health] = by_health.get(health, 0) + 1
         return {
             "observe_only": policy.observe_only,
             "policy_revision": policy.revision,
-            "channel_count": len(items),
-            "group_count": len(groups),
-            "health_counts": by_health,
+            "channel_count": counts["channel_count"],
+            "group_count": counts["group_count"],
+            "health_counts": counts["health_counts"],
             "last_run": runs[0] if runs else None,
+        }
+
+    def _overview_counts_sync(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            totals = connection.execute(
+                "SELECT COUNT(*) AS channel_count, "
+                "COUNT(DISTINCT COALESCE(group_id, 'ungrouped')) AS group_count "
+                "FROM guardian_channels"
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT health, COUNT(*) AS count FROM guardian_channels GROUP BY health"
+            ).fetchall()
+        return {
+            "channel_count": int(totals["channel_count"] if totals else 0),
+            "group_count": int(totals["group_count"] if totals else 0),
+            "health_counts": {str(row["health"]): int(row["count"]) for row in rows},
         }
 
     async def probe_spend(self) -> dict[str, Any]:
@@ -905,8 +1033,74 @@ class GuardianRepository:
             "reason": "writeback_adapter_not_enabled",
         }
 
+    async def get_idempotent_result(
+        self, idempotency_key: str, action: str, subject: str | None
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._get_idempotent_result_sync,
+            idempotency_key,
+            action,
+            subject,
+        )
+
+    def _get_idempotent_result_sync(
+        self, idempotency_key: str, action: str, subject: str | None
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM guardian_idempotency "
+                "WHERE idempotency_key = ? AND action = ? AND subject = ?",
+                (idempotency_key, action, subject or ""),
+            ).fetchone()
+        return cast(dict[str, Any], json.loads(row["result_json"])) if row is not None else None
+
+    async def save_idempotent_result(
+        self,
+        idempotency_key: str,
+        action: str,
+        subject: str | None,
+        result: dict[str, Any],
+    ) -> None:
+        await asyncio.to_thread(
+            self._save_idempotent_result_sync,
+            idempotency_key,
+            action,
+            subject,
+            result,
+        )
+
+    def _save_idempotent_result_sync(
+        self,
+        idempotency_key: str,
+        action: str,
+        subject: str | None,
+        result: dict[str, Any],
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO guardian_idempotency"
+                "(idempotency_key, action, subject, result_json, created_at) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (
+                    idempotency_key,
+                    action,
+                    subject or "",
+                    _json(result),
+                    _iso(self._clock()),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM guardian_idempotency WHERE rowid NOT IN "
+                "(SELECT rowid FROM guardian_idempotency "
+                "ORDER BY created_at DESC LIMIT 10000)"
+            )
+
     @staticmethod
     def _channel(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            override_json = row["channel_override_json"]
+        except IndexError:
+            override_json = None
         return {
             "channel_id": row["channel_id"],
             "name": row["name"],
@@ -919,6 +1113,7 @@ class GuardianRepository:
             "desired_schedulable": bool(row["desired_schedulable"]),
             "manual_control": row["manual_control"],
             "details": json.loads(row["details_json"]),
+            "override": json.loads(override_json) if override_json else None,
             "first_seen_at": row["first_seen_at"],
             "last_seen_at": row["last_seen_at"],
             "updated_at": row["updated_at"],

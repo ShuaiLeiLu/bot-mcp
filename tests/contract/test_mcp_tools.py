@@ -18,6 +18,9 @@ from sub2api_mcp.contracts import (
     TargetType,
     VideoOutput,
 )
+from sub2api_mcp.guardian.engine import GuardianEngine
+from sub2api_mcp.guardian.repository import GuardianRepository
+from sub2api_mcp.guardian.service import GuardianService
 from sub2api_mcp.jobs import VideoJobService
 from sub2api_mcp.metrics import Metrics
 from sub2api_mcp.repository import SqliteRepository
@@ -70,7 +73,13 @@ async def _server(tmp_path: Path) -> Sub2APIMCPServer:
         langbot=None,
         delivery=None,
     )
-    return Sub2APIMCPServer(service, metrics)
+    guardian_repository = GuardianRepository(tmp_path / "state.db")
+    await guardian_repository.initialize()
+    guardian = GuardianService(
+        guardian_repository,
+        GuardianEngine(guardian_repository, operations),
+    )
+    return Sub2APIMCPServer(service, metrics, guardian=guardian)
 
 
 async def _call_json(
@@ -110,6 +119,19 @@ async def test_tool_inventory_is_curated_and_deterministic(tmp_path: Path) -> No
         "sub2api_upsert_delivery_target",
         "sub2api_delete_delivery_target",
         "sub2api_test_delivery_target",
+        "guardian_get_policy",
+        "guardian_update_policy",
+        "guardian_get_overview",
+        "guardian_list_groups",
+        "guardian_list_channels",
+        "guardian_get_channel",
+        "guardian_run_once",
+        "guardian_cancel_run",
+        "guardian_channel_action",
+        "guardian_list_events",
+        "guardian_get_probe_spend",
+        "guardian_preview_restore",
+        "guardian_execute_restore",
     ]
 
 
@@ -211,9 +233,7 @@ async def test_read_tools_redact_internal_account_and_platform_ids(tmp_path: Pat
     principal = Principal("reader", frozenset({"sub2api:read"}))
 
     with bind_principal(principal, "request-5"):
-        binding = await _call_json(
-            server, "sub2api_get_bound_account", {"actor_key": actor_key}
-        )
+        binding = await _call_json(server, "sub2api_get_bound_account", {"actor_key": actor_key})
         targets = await _call_json(server, "sub2api_list_delivery_targets", {})
 
     serialized = json.dumps([binding, targets])
@@ -221,3 +241,20 @@ async def test_read_tools_redact_internal_account_and_platform_ids(tmp_path: Pat
     assert "raw-platform-target-id" not in serialized
     assert binding["data"]["masked_email"] == "u***@example.com"
     assert targets["data"]["items"][0]["target_ref"]
+
+
+@pytest.mark.asyncio
+async def test_guardian_tools_keep_writeback_disabled(tmp_path: Path) -> None:
+    server = await _server(tmp_path)
+    principal = Principal("admin", frozenset({"sub2api:admin"}))
+
+    with bind_principal(principal, "request-guardian"):
+        run = await _call_json(
+            server,
+            "guardian_run_once",
+            {"dry_run": False, "idempotency_key": "mcp-cycle"},
+        )
+
+    assert run["ok"] is True
+    assert run["data"]["result"]["writes_applied"] == 0
+    assert run["data"]["result"]["observe_only"] is True

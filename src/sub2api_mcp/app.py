@@ -25,6 +25,10 @@ from .config import Settings
 from .contracts import JobType, ProbeResult
 from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
+from .guardian.api import GuardianAPI
+from .guardian.engine import GuardianEngine
+from .guardian.repository import GuardianRepository
+from .guardian.service import GuardianService
 from .jobs import JobManager, VideoJobService
 from .logging import configure_logging
 from .metrics import Metrics
@@ -52,6 +56,8 @@ class Runtime:
     jobs: JobManager
     service: Sub2APIService
     mcp: Sub2APIMCPServer
+    guardian_repository: GuardianRepository
+    guardian: GuardianService
     langbot: LangBotClient | None
     outbox: OutboxWorker | None
     actor_verifier: ActorRequestVerifier | None
@@ -76,6 +82,7 @@ def build_runtime(
         video_generator = LegacyVideoGenerator(settings.video_api_url)
 
     repository = SqliteRepository(settings.database_path)
+    guardian_repository = GuardianRepository(settings.database_path)
     metrics = Metrics.create()
     authenticator = ApiKeyAuthenticator(settings.access_tokens)
     scheduler_policy = SchedulerPolicy(
@@ -84,8 +91,7 @@ def build_runtime(
         lease_seconds=settings.scheduler_lease_seconds,
         recovery_enabled=settings.recovery_enabled,
         maintenance_enabled=(
-            settings.channel_account_sweep_enabled
-            or settings.log_account_guard_enabled
+            settings.channel_account_sweep_enabled or settings.log_account_guard_enabled
         ),
         quiet_hours_enabled=settings.quiet_hours_enabled,
         quiet_hours_start=settings.quiet_hours_start,
@@ -121,9 +127,16 @@ def build_runtime(
     jobs.register(JobType.PROBE, scheduler.handle_probe)
     jobs.register(JobType.RECOVERY, scheduler.handle_recovery)
     jobs.register(JobType.MAINTENANCE, scheduler.handle_maintenance)
+    guardian = GuardianService(
+        guardian_repository,
+        GuardianEngine(guardian_repository, operations),
+        metrics,
+        repository,
+    )
     mcp = Sub2APIMCPServer(
         service,
         metrics,
+        guardian=guardian,
         allowed_hosts=settings.allowed_hosts,
     )
 
@@ -153,6 +166,8 @@ def build_runtime(
         jobs=jobs,
         service=service,
         mcp=mcp,
+        guardian_repository=guardian_repository,
+        guardian=guardian,
         langbot=langbot,
         outbox=outbox,
         actor_verifier=actor_verifier,
@@ -200,6 +215,12 @@ class SecurityHeadersASGI:
                     (b"x-frame-options", b"DENY"),
                     (b"referrer-policy", b"no-referrer"),
                     (b"cache-control", b"no-store"),
+                    (
+                        b"content-security-policy",
+                        b"default-src 'self'; script-src 'self'; style-src 'self'; "
+                        b"img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                        b"base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                    ),
                 )
                 headers.extend(item for item in additions if item[0] not in existing)
                 message["headers"] = headers
@@ -242,10 +263,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
         request_id = _request_id(request.scope.get("headers", []))
         if principal is None:
             return _unauthorized(request_id)
-        if not (
-            "sub2api:admin" in principal.scopes
-            or "sub2api:read" in principal.scopes
-        ):
+        if not ("sub2api:admin" in principal.scopes or "sub2api:read" in principal.scopes):
             return JSONResponse(
                 {"error": "forbidden", "message": "The API key lacks the required scope"},
                 status_code=403,
@@ -285,10 +303,12 @@ def create_app(runtime: Runtime) -> ASGIApp:
     @asynccontextmanager
     async def lifespan(_: Starlette):
         await runtime.repository.initialize()
+        await runtime.guardian_repository.initialize()
         session_manager = runtime.mcp.session_manager.run()
         await session_manager.__aenter__()
         await runtime.jobs.start(video_workers=runtime.settings.video_concurrency)
         await runtime.scheduler.start()
+        await runtime.guardian.start()
         if runtime.outbox is not None:
             await runtime.outbox.start()
         runtime.started = True
@@ -296,6 +316,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
             yield
         finally:
             runtime.started = False
+            await runtime.guardian.stop()
             await runtime.scheduler.stop()
             await runtime.jobs.stop()
             if runtime.outbox is not None:
@@ -304,14 +325,18 @@ def create_app(runtime: Runtime) -> ASGIApp:
                 await runtime.langbot.close()
             await session_manager.__aexit__(None, None, None)
 
-    mcp_app = AuthenticatedASGI(
-        runtime.mcp.streamable_http_app(), runtime.authenticator
+    mcp_app = AuthenticatedASGI(runtime.mcp.streamable_http_app(), runtime.authenticator)
+    guardian_api = GuardianAPI(
+        runtime.guardian,
+        runtime.authenticator,
+        runtime.repository.audit,
     )
     application = Starlette(
         routes=[
             Route("/healthz", health, methods=["GET"]),
             Route("/metrics", metrics, methods=["GET"]),
             Route("/bridge/v1/actor", actor, methods=["POST"]),
+            *guardian_api.routes(),
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,

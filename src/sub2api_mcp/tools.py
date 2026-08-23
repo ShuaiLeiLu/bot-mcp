@@ -19,6 +19,7 @@ from .auth import current_request_id, require_scope
 from .config import DEFAULT_ALLOWED_HOSTS, Scope
 from .contracts import DeliveryTargetCreate, JobStatus, JobType, SubmitVideoInput
 from .errors import ServiceError
+from .guardian.service import GuardianService
 from .logging import log_event
 from .metrics import Metrics
 from .service import Sub2APIService
@@ -37,10 +38,12 @@ class Sub2APIMCPServer:
         service: Sub2APIService,
         metrics: Metrics,
         *,
+        guardian: GuardianService | None = None,
         allowed_hosts: list[str] | None = None,
     ) -> None:
         self.service = service
         self.metrics = metrics
+        self.guardian = guardian
         self._logger = logging.getLogger("sub2api_mcp")
         self.mcp = FastMCP(
             name="Sub2API Scheduler",
@@ -176,9 +179,7 @@ class Sub2APIMCPServer:
             )
 
         @mcp.tool(description="List platform-neutral LangBot delivery targets.")
-        async def sub2api_list_delivery_targets(
-            limit: int = 20, cursor: str | None = None
-        ) -> str:
+        async def sub2api_list_delivery_targets(limit: int = 20, cursor: str | None = None) -> str:
             return await self._execute(
                 "sub2api_list_delivery_targets",
                 "sub2api:read",
@@ -305,6 +306,156 @@ class Sub2APIMCPServer:
                 subject=delivery_target_id,
             )
 
+        @mcp.tool(description="Get Guardian policy, defaults, and writeback approval state.")
+        async def guardian_get_policy() -> str:
+            return await self._execute(
+                "guardian_get_policy",
+                "sub2api:read",
+                self._guardian().get_policy,
+            )
+
+        @mcp.tool(description="Update Guardian policy with optimistic revision locking.")
+        async def guardian_update_policy(
+            expected_revision: int,
+            patch: dict[str, Any],
+        ) -> str:
+            return await self._execute(
+                "guardian_update_policy",
+                "sub2api:admin",
+                lambda: self._guardian().update_policy(patch, expected_revision=expected_revision),
+                mutation=True,
+            )
+
+        @mcp.tool(description="Get Guardian health, groups, channel counts, and last run.")
+        async def guardian_get_overview() -> str:
+            return await self._execute(
+                "guardian_get_overview",
+                "sub2api:read",
+                self._guardian().overview,
+            )
+
+        @mcp.tool(description="List every Guardian group and its effective override.")
+        async def guardian_list_groups() -> str:
+            return await self._execute(
+                "guardian_list_groups",
+                "sub2api:read",
+                self._guardian().list_groups,
+            )
+
+        @mcp.tool(description="List Guardian channels with bounded filters and pagination.")
+        async def guardian_list_channels(
+            limit: int = 100,
+            cursor: str | None = None,
+            group_id: str | None = None,
+            health: str | None = None,
+            query: str | None = None,
+        ) -> str:
+            return await self._execute(
+                "guardian_list_channels",
+                "sub2api:read",
+                lambda: self._guardian().list_channels(
+                    limit=limit,
+                    cursor=cursor,
+                    group_id=group_id,
+                    health=health,
+                    query=query,
+                ),
+            )
+
+        @mcp.tool(description="Get one Guardian channel with its recent scored samples.")
+        async def guardian_get_channel(channel_id: str) -> str:
+            return await self._execute(
+                "guardian_get_channel",
+                "sub2api:read",
+                lambda: self._guardian().get_channel(channel_id),
+                subject=channel_id,
+            )
+
+        @mcp.tool(description="Run one Guardian evaluation; writeback remains safety-gated.")
+        async def guardian_run_once(
+            dry_run: bool = True,
+            idempotency_key: str | None = None,
+        ) -> str:
+            return await self._execute(
+                "guardian_run_once",
+                "sub2api:admin",
+                lambda: self._guardian().run_once(dry_run=dry_run, idempotency_key=idempotency_key),
+                mutation=True,
+            )
+
+        @mcp.tool(description="Request cancellation of a running Guardian evaluation.")
+        async def guardian_cancel_run(run_id: str) -> str:
+            return await self._execute(
+                "guardian_cancel_run",
+                "sub2api:admin",
+                lambda: self._guardian().cancel_run(run_id),
+                mutation=True,
+                subject=run_id,
+            )
+
+        @mcp.tool(description="Pause, resume, exclude, include, fuse, recover, or probe a channel.")
+        async def guardian_channel_action(
+            channel_id: str,
+            action: str,
+            idempotency_key: str | None = None,
+            minutes: int | None = None,
+        ) -> str:
+            return await self._execute(
+                "guardian_channel_action",
+                "sub2api:admin",
+                lambda: self._guardian().channel_action(
+                    channel_id,
+                    action,
+                    idempotency_key=idempotency_key,
+                    minutes=minutes,
+                ),
+                mutation=True,
+                subject=channel_id,
+            )
+
+        @mcp.tool(description="List Guardian events with bounded cursor pagination.")
+        async def guardian_list_events(
+            limit: int = 50,
+            cursor: str | None = None,
+            event_type: str | None = None,
+            severity: str | None = None,
+        ) -> str:
+            return await self._execute(
+                "guardian_list_events",
+                "sub2api:read",
+                lambda: self._guardian().list_events(
+                    limit=limit,
+                    cursor=cursor,
+                    event_type=event_type,
+                    severity=severity,
+                ),
+            )
+
+        @mcp.tool(description="Get Guardian active-probe cost estimates and unpriced count.")
+        async def guardian_get_probe_spend() -> str:
+            return await self._execute(
+                "guardian_get_probe_spend",
+                "sub2api:read",
+                self._guardian().probe_spend,
+            )
+
+        @mcp.tool(description="Preview original channel settings available for restoration.")
+        async def guardian_preview_restore() -> str:
+            return await self._execute(
+                "guardian_preview_restore",
+                "sub2api:admin",
+                self._guardian().restore_preview,
+            )
+
+        @mcp.tool(description="Restore original settings only with explicit confirmation.")
+        async def guardian_execute_restore(confirm: bool = False) -> str:
+            return await self._execute(
+                "guardian_execute_restore",
+                "sub2api:admin",
+                lambda: self._guardian().execute_restore(confirm=confirm),
+                mutation=True,
+            )
+
     async def _submit_video(
         self,
         prompt: str,
@@ -362,6 +513,11 @@ class Sub2APIMCPServer:
             }
         )
         return await self.service.upsert_delivery_target(target)
+
+    def _guardian(self) -> GuardianService:
+        if self.guardian is None:
+            raise ServiceError("GUARDIAN_NOT_CONFIGURED", "Guardian scheduling is not configured")
+        return self.guardian
 
     def streamable_http_app(self):  # type: ignore[no-untyped-def]
         return self.mcp.streamable_http_app()

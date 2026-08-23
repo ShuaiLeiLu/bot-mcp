@@ -58,8 +58,33 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
             can_auto_recover=False,
             reason="manual_pause",
         )
+    if value.manual_control is ManualControl.FUSED:
+        return ChannelDecision(
+            health=GuardianHealth.FUSED,
+            should_schedule=False,
+            should_probe=True,
+            can_auto_recover=False,
+            reason="manual_fuse",
+        )
+
+    if not value.schedulable:
+        return ChannelDecision(
+            health=GuardianHealth.UPSTREAM_DISABLED,
+            should_schedule=False,
+            should_probe=False,
+            can_auto_recover=False,
+            reason="upstream_disabled",
+        )
 
     if value.current_health is GuardianHealth.FUSED:
+        if value.fused_until is not None and value.now < value.fused_until:
+            return ChannelDecision(
+                health=GuardianHealth.FUSED,
+                should_schedule=False,
+                should_probe=value.recovery.enabled,
+                can_auto_recover=value.recovery.enabled,
+                reason="fused_cooldown",
+            )
         held_long_enough = bool(
             value.healthy_since is not None
             and (value.now - value.healthy_since).total_seconds() >= value.recovery.hold_seconds

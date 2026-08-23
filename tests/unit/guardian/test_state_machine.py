@@ -44,6 +44,16 @@ def test_manual_pause_and_exclude_override_all_automatic_rules() -> None:
     assert excluded.should_probe is False
 
 
+def test_upstream_disabled_is_never_automatically_reenabled_or_probed() -> None:
+    decision = decide_channel_state(_input(schedulable=False, score=100))
+
+    assert decision.health is GuardianHealth.UPSTREAM_DISABLED
+    assert decision.should_schedule is False
+    assert decision.should_probe is False
+    assert decision.can_auto_recover is False
+    assert decision.reason == "upstream_disabled"
+
+
 def test_fatal_event_fuses_but_minimum_pool_forces_keep() -> None:
     fused = decide_channel_state(_input(score=0, recent_events=[GuardianEventType.FATAL]))
     forced = decide_channel_state(
@@ -84,7 +94,6 @@ def test_recovery_requires_score_streak_and_hold_duration() -> None:
             score=90,
             success_streak=3,
             healthy_since=NOW - timedelta(seconds=30),
-            schedulable=False,
         )
     )
     recovered = decide_channel_state(
@@ -93,10 +102,24 @@ def test_recovery_requires_score_streak_and_hold_duration() -> None:
             score=90,
             success_streak=3,
             healthy_since=NOW - timedelta(seconds=61),
-            schedulable=False,
         )
     )
 
     assert not_held.health is GuardianHealth.FUSED
     assert recovered.health is GuardianHealth.HEALTHY
     assert recovered.should_schedule is True
+
+
+def test_fused_channel_cannot_recover_before_cooldown_expires() -> None:
+    decision = decide_channel_state(
+        _input(
+            current_health=GuardianHealth.FUSED,
+            score=90,
+            success_streak=3,
+            healthy_since=NOW - timedelta(seconds=90),
+            fused_until=NOW + timedelta(seconds=1),
+        )
+    )
+
+    assert decision.health is GuardianHealth.FUSED
+    assert decision.reason == "fused_cooldown"

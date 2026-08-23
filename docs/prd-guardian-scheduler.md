@@ -327,6 +327,7 @@ SQLite 新增表：
 |---|---|
 | `guardian_policy` | 全局策略 JSON、revision、更新时间。 |
 | `guardian_group_overrides` | 分组覆盖。 |
+| `guardian_channel_overrides` | 渠道优先级、负载、并发、倍率、探测模型与火箭覆盖。 |
 | `guardian_channels` | 当前状态、期望值、原始值、冷却、streak 和人工状态。 |
 | `guardian_samples` | 探测与真实流量样本。 |
 | `guardian_runs` | 每轮开始/结束、统计与结果。 |

@@ -43,6 +43,7 @@ class ManualControl(StrEnum):
     NONE = "NONE"
     PAUSED = "PAUSED"
     EXCLUDED = "EXCLUDED"
+    FUSED = "FUSED"
 
 
 class GuardianStrategy(StrEnum):
@@ -192,6 +193,7 @@ class ScopePolicy(StrictModel):
 
 class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
+    enabled: bool = False
     observe_only: bool = True
     scan_interval_seconds: int = Field(default=15, ge=5, le=3600)
     strategy: GuardianStrategy = GuardianStrategy.PRICE
@@ -261,6 +263,7 @@ class WeightCandidate(StrictModel):
     score: float = Field(ge=0, le=100)
     effective_rate: float | None = Field(default=None, ge=0)
     ttfb_p95_ms: int | None = Field(default=None, ge=0)
+    schedule_multiplier: float = Field(default=1, ge=0, le=10_000)
 
 
 class UpstreamProbeEntry(StrictModel):
@@ -268,6 +271,7 @@ class UpstreamProbeEntry(StrictModel):
     name: str = Field(min_length=1, max_length=200)
     status: str = Field(pattern=r"^(operational|degraded|failed|error|unknown)$")
     group_id: str | None = Field(default=None, max_length=128)
+    group_name: str | None = Field(default=None, max_length=200)
     available_count: int | None = Field(default=None, ge=0)
     error_count: int | None = Field(default=None, ge=0)
     temporary_unavailable_count: int | None = Field(default=None, ge=0)
@@ -294,3 +298,27 @@ class UpstreamProbeEntry(StrictModel):
 class UpstreamProbeSnapshot(StrictModel):
     version: int = Field(default=1, ge=1, le=1)
     entries: tuple[UpstreamProbeEntry, ...] = Field(max_length=10_000)
+
+
+class GroupPolicyOverride(StrictModel):
+    enabled: bool | None = None
+    strategy: GuardianStrategy | None = None
+    min_pool_size: int | None = Field(default=None, ge=0, le=10_000)
+    weight_budget: float | None = Field(default=None, gt=0, le=1_000_000)
+    balanced_price_ratio: float | None = Field(default=None, ge=0, le=1)
+    breaker_enabled: bool | None = None
+    recovery_enabled: bool | None = None
+    weights_enabled: bool | None = None
+    probe_enabled: bool | None = None
+    probe_interval_seconds: int | None = Field(default=None, ge=30, le=86_400)
+    probe_model: str | None = Field(default=None, max_length=200)
+
+
+class ChannelPolicyOverride(StrictModel):
+    priority: int | None = Field(default=None, ge=1, le=5)
+    load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
+    concurrency: int | None = Field(default=None, ge=1, le=10_000)
+    schedule_multiplier: float | None = Field(default=None, ge=0, le=10_000)
+    probe_model: str | None = Field(default=None, max_length=200)
+    boost_until: datetime | None = None
+    boost_load_delta: int | None = Field(default=None, ge=1, le=100_000)

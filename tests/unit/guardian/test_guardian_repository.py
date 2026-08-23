@@ -7,6 +7,7 @@ import pytest
 
 from sub2api_mcp.errors import ServiceError
 from sub2api_mcp.guardian.contracts import (
+    ChannelPolicyOverride,
     GuardianEventType,
     GuardianHealth,
     GuardianPolicy,
@@ -133,3 +134,41 @@ def test_policy_json_round_trip_is_strict() -> None:
     restored = GuardianPolicy.model_validate_json(policy.model_dump_json())
 
     assert restored == policy
+
+
+@pytest.mark.asyncio
+async def test_channel_override_is_durable_and_attached_to_channel(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    repository = GuardianRepository(path)
+    await repository.initialize()
+    now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+    await repository.upsert_channel(
+        channel_id="11",
+        name="Claude",
+        group_id="3",
+        upstream_status="operational",
+        upstream_schedulable=True,
+        health=GuardianHealth.HEALTHY,
+        score=100,
+        latency_ms=100,
+        desired_schedulable=True,
+        manual_control=ManualControl.NONE,
+        details={},
+        seen_at=now,
+    )
+    override = ChannelPolicyOverride(
+        priority=2,
+        load_factor=80,
+        concurrency=4,
+        schedule_multiplier=1.25,
+        probe_model="claude-test",
+    )
+
+    await repository.upsert_channel_override("11", override)
+    reopened = GuardianRepository(path)
+    await reopened.initialize()
+    channel = await reopened.get_channel("11")
+
+    assert channel is not None
+    assert channel["override"]["priority"] == 2
+    assert channel["override"]["schedule_multiplier"] == 1.25

@@ -584,11 +584,24 @@ class SqliteRepository:
         with self._connect() as connection:
             connection.execute("DELETE FROM account_bindings WHERE actor_key = ?", (actor_key,))
 
-    async def claim_actor_nonce(self, nonce: str, expires_at: datetime) -> bool:
-        return await asyncio.to_thread(self._claim_actor_nonce_sync, nonce, expires_at)
+    async def claim_actor_nonce(
+        self,
+        nonce: str,
+        expires_at: datetime,
+        *,
+        claimed_at: datetime | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._claim_actor_nonce_sync, nonce, expires_at, claimed_at
+        )
 
-    def _claim_actor_nonce_sync(self, nonce: str, expires_at: datetime) -> bool:
-        now = _iso(self._clock())
+    def _claim_actor_nonce_sync(
+        self,
+        nonce: str,
+        expires_at: datetime,
+        claimed_at: datetime | None,
+    ) -> bool:
+        now = _iso(claimed_at or self._clock())
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")

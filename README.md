@@ -19,6 +19,33 @@ server, domain, public port, or reverse proxy is assumed.
 - Multi-target fan-out across different LangBot adapters.
 - Signed platform-neutral actor bridge for bind, unbind, and account queries.
 - Scoped MCP API keys, audit records, structured logs, metrics, and health checks.
+- Guardian health scoring, group/channel overrides, minimum-pool protection,
+  fuse/recovery state, candidate weights, and a responsive management console.
+
+## Guardian management console
+
+Open the same-origin console after the service starts:
+
+```text
+http://127.0.0.1:5310/guardian/
+```
+
+Enter an access token carrying `sub2api:admin`. The browser keeps it only in
+page memory and clears it on refresh. The console contains ten sections:
+overview, group scheduling, channel pool, live routing, probe spend,
+scheduling guide, events, policy, connections, and information/notifications.
+
+Guardian starts with background scheduling disabled, `observe_only=true`, and
+all `auto_apply` switches off. An administrator can enable periodic evaluation
+from **策略配置**, but this build still blocks production writeback at the
+service boundary. It reads and scores real state, persists candidate actions,
+and never re-enables or actively probes a channel already paused upstream.
+State transitions are queued to existing `STATUS` delivery targets, so the same
+LangBot fan-out can notify WeChat and every other configured adapter.
+
+The authenticated REST API is rooted at `/api/guardian/v1`. Policy updates
+require an `If-Match` revision; run and action requests accept an
+`Idempotency-Key`.
 
 ## MCP transport and authentication
 
@@ -70,6 +97,12 @@ errors retry the original representation.
   `sub2api_submit_recovery`, `sub2api_submit_maintenance`.
 - Bindings: `sub2api_bind_account`, `sub2api_unbind_account`.
 - Video/jobs: `sub2api_submit_video`, `sub2api_cancel_job`.
+- Guardian/read: `guardian_get_policy`, `guardian_get_overview`,
+  `guardian_list_groups`, `guardian_list_channels`, `guardian_get_channel`,
+  `guardian_list_events`, `guardian_get_probe_spend`.
+- Guardian/admin: `guardian_update_policy`, `guardian_run_once`,
+  `guardian_cancel_run`, `guardian_channel_action`,
+  `guardian_preview_restore`, `guardian_execute_restore`.
 
 Every tool returns a compact JSON string with an `ok`, `requestId`, and `data`
 or stable `error` object.

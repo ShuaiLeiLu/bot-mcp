@@ -41,18 +41,14 @@ class LegacySub2APIAdapter:
         self._recovery_window_end = recovery_window_end
         self._recovery_max_accounts = recovery_max_accounts
         self._maintenance_policy = maintenance_policy or MaintenancePolicy()
-        self._maintenance = MaintenanceServiceFactory.create(
-            client, self._maintenance_policy
-        )
+        self._maintenance = MaintenanceServiceFactory.create(client, self._maintenance_policy)
         self._last_probes: list[ChannelProbe] = []
         self._recovery_rotation: list[str] = []
 
     async def probe(self) -> ProbeResult:
         probes = await self._client.fetch_probe()
         self._last_probes = probes
-        snapshot = _SNAPSHOT_ADAPTER.validate_json(
-            ProbeSnapshot.from_probes(probes).to_bytes()
-        )
+        snapshot = _SNAPSHOT_ADAPTER.validate_json(ProbeSnapshot.from_probes(probes).to_bytes())
         image_base64: str | None = None
         try:
             image_data_uri = render_status_report_image(probes)
@@ -66,6 +62,34 @@ class LegacySub2APIAdapter:
             report=format_status_report(probes),
             image_base64=image_base64,
         )
+
+    async def guardian_snapshot(self) -> dict[str, Any]:
+        """Return the richer, still-secret-free snapshot used by Guardian."""
+        probes = await self._client.fetch_probe()
+        self._last_probes = probes
+        entries: list[dict[str, Any]] = []
+        for probe in probes:
+            channel = probe.channel
+            accounts = probe.accounts
+            entries.append(
+                {
+                    "monitor_id": channel.monitor_id,
+                    "name": channel.name,
+                    "status": channel.status,
+                    "group_id": accounts.group_id if accounts is not None else None,
+                    "group_name": accounts.name if accounts is not None else None,
+                    "available_count": (accounts.available_count if accounts is not None else None),
+                    "error_count": accounts.error_count if accounts is not None else None,
+                    "temporary_unavailable_count": (
+                        accounts.temporary_unavailable_count if accounts is not None else None
+                    ),
+                    "closed_count": accounts.closed_count if accounts is not None else None,
+                    "latency_ms": channel.latency_ms,
+                    "upstream_schedulable": channel.enabled,
+                }
+            )
+        entries.sort(key=lambda item: (str(item["monitor_id"]), str(item["name"])))
+        return {"version": 1, "entries": entries}
 
     async def recover(self) -> list[dict[str, object]]:
         if not self._recovery_enabled:

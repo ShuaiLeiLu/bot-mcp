@@ -38,7 +38,7 @@ def allocate_weights(
                 1 - policy.balanced_price_ratio
             )
         health_signal = max(candidate.score, 0.01) / 100
-        raw[candidate.channel_id] = strategy_signal * health_signal
+        raw[candidate.channel_id] = strategy_signal * health_signal * candidate.schedule_multiplier
     total = sum(raw.values())
     if total <= 0:
         return {candidate.channel_id: 0.0 for candidate in candidates}

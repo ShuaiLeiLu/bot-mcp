@@ -126,6 +126,7 @@ class ActorRequestVerifier:
         claimed = await self._repository.claim_actor_nonce(
             nonce,
             current + timedelta(seconds=self._replay_window_seconds),
+            claimed_at=current,
         )
         if not claimed:
             raise ServiceError("ACTOR_REPLAY", "The actor request was already used")
