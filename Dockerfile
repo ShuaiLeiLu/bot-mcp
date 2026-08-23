@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/opt/sub2api-mcp/venv \
     UV_LINK_MODE=copy \
-    PYTHONPATH=/opt/sub2api-core \
+    PYTHONPATH=/opt/sub2api-mcp/src:/opt/sub2api-core \
     SUB2API_MCP_LEGACY_CORE_ROOT=/opt/sub2api-core
 
 COPY --from=uv /uv /uvx /usr/local/bin/
@@ -27,8 +27,6 @@ COPY --chown=sub2api:sub2api src ./src
 COPY --chown=sub2api:sub2api README.md ./README.md
 COPY --chown=sub2api:sub2api core/*.py /opt/sub2api-core/
 COPY --chown=sub2api:sub2api core/assets /opt/sub2api-core/assets
-
-RUN uv sync --frozen --no-dev --no-editable
 
 USER 10001:10001
 EXPOSE 5310
