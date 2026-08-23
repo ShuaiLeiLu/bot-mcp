@@ -1,8 +1,8 @@
 # Guardian Scheduler Tasks
 
-Status: Blocked on PRD approval (intentional specification gate)
+Status: In progress
 
-- [ ] Approve `docs/prd-guardian-scheduler.md` assumptions and open questions.
+- [x] Approve `docs/prd-guardian-scheduler.md` assumptions and open questions.
   - Acceptance: product owner confirms auth, visual parity, multi-upstream scope and observation period.
   - Verify: explicit approval in the task conversation.
 

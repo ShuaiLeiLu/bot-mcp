@@ -2,10 +2,10 @@
 
 ## 0. 文档信息
 
-- 状态：**Proposed — 等待产品确认后进入实现**
+- 状态：**Accepted — 已批准进入实现**
 - 版本：0.1
 - 日期：2026-08-23
-- 产品负责人：待确认
+- 产品负责人：已于 2026-08-23 在任务会话中批准
 - 实现仓库：`ShuaiLeiLu/bot-mcp`
 - 调研依据：[WogHub Guardian 调度规则调研](./woghub-guardian-scheduling-rules.md)
 - 目标参照：<https://schedule.woghub.com/policy>（页面版本 v0.0.31）

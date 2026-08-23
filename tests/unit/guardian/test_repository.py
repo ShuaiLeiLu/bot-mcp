@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from sub2api_mcp.errors import ServiceError
+from sub2api_mcp.guardian.contracts import (
+    GuardianEventType,
+    GuardianHealth,
+    GuardianPolicy,
+    GuardianSample,
+    GuardianSampleSource,
+    ManualControl,
+)
+from sub2api_mcp.guardian.repository import GuardianRepository
+
+
+@pytest.mark.asyncio
+async def test_repository_initializes_safe_policy_and_revision_updates(
+    tmp_path: Path,
+) -> None:
+    repository = GuardianRepository(tmp_path / "state.db")
+    await repository.initialize()
+
+    policy = await repository.get_policy()
+    updated = policy.model_copy(update={"scan_interval_seconds": 30})
+    saved = await repository.update_policy(updated, expected_revision=1)
+
+    assert policy.observe_only is True
+    assert policy.auto_apply.schedulable is False
+    assert saved.revision == 2
+    assert saved.scan_interval_seconds == 30
+    with pytest.raises(ServiceError, match="modified") as conflict:
+        await repository.update_policy(updated, expected_revision=1)
+    assert conflict.value.code == "POLICY_REVISION_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_repository_persists_channels_samples_and_paginated_events(
+    tmp_path: Path,
+) -> None:
+    repository = GuardianRepository(tmp_path / "state.db")
+    await repository.initialize()
+    now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+
+    await repository.upsert_channel(
+        channel_id="channel-1",
+        name="Claude",
+        group_id="group-1",
+        upstream_status="operational",
+        upstream_schedulable=True,
+        health=GuardianHealth.HEALTHY,
+        score=98.5,
+        latency_ms=1234,
+        desired_schedulable=True,
+        manual_control=ManualControl.NONE,
+        details={"reason": "healthy"},
+        seen_at=now,
+    )
+    await repository.append_sample(
+        GuardianSample(
+            channel_id="channel-1",
+            event_type=GuardianEventType.PERFECT,
+            score=100,
+            occurred_at=now,
+            source=GuardianSampleSource.PROBE,
+            ttfb_ms=1234,
+        )
+    )
+    first = await repository.add_event(
+        event_type="CHANNEL_SYNCED",
+        severity="INFO",
+        channel_id="channel-1",
+        group_id="group-1",
+        message="channel synced",
+        details={"score": 98.5},
+    )
+    await repository.add_event(
+        event_type="CHANNEL_HEALTHY",
+        severity="INFO",
+        channel_id="channel-1",
+        group_id="group-1",
+        message="channel healthy",
+        details={},
+    )
+
+    channel = await repository.get_channel("channel-1")
+    samples = await repository.list_samples("channel-1", limit=10)
+    page = await repository.list_events(limit=1)
+    next_page = await repository.list_events(limit=10, cursor=page["next_cursor"])
+
+    assert channel is not None
+    assert channel["manual_control"] == "NONE"
+    assert samples[0].event_type is GuardianEventType.PERFECT
+    assert len(page["items"]) == 1
+    assert page["next_cursor"] is not None
+    event_ids = {
+        page["items"][0]["event_id"],
+        next_page["items"][0]["event_id"],
+    }
+    assert first["event_id"] in event_ids
+
+
+@pytest.mark.asyncio
+async def test_run_idempotency_and_restart_durability(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    repository = GuardianRepository(path)
+    await repository.initialize()
+
+    first = await repository.create_run(dry_run=True, idempotency_key="run-once")
+    repeated = await repository.create_run(dry_run=True, idempotency_key="run-once")
+    await repository.finish_run(
+        first["run_id"],
+        status="SUCCEEDED",
+        result={"channels": 0, "writes": 0},
+    )
+
+    reopened = GuardianRepository(path)
+    await reopened.initialize()
+    loaded = await reopened.get_run(first["run_id"])
+
+    assert repeated["run_id"] == first["run_id"]
+    assert loaded is not None
+    assert loaded["status"] == "SUCCEEDED"
+    assert loaded["result"]["writes"] == 0
+
+
+def test_policy_json_round_trip_is_strict() -> None:
+    policy = GuardianPolicy()
+
+    restored = GuardianPolicy.model_validate_json(policy.model_dump_json())
+
+    assert restored == policy
