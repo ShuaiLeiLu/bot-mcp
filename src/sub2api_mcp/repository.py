@@ -640,16 +640,19 @@ class SqliteRepository:
     ) -> OutboxEventRecord:
         if not target_ids:
             raise ServiceError("NO_DELIVERY_TARGET", "At least one delivery target is required")
-        unique_target_ids = list(dict.fromkeys(target_ids))
         event_id = str(uuid.uuid4())
         now = _iso(self._clock())
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            for target_id in unique_target_ids:
+            connection.execute(
+                "INSERT INTO notification_outbox(event_id, event_type, payload_json, created_at) "
+                "VALUES(?, ?, ?, ?)",
+                (event_id, event_type.value, _json(payload), now),
+            )
+            for target_id in dict.fromkeys(target_ids):
                 exists = connection.execute(
-                    "SELECT 1 FROM delivery_targets "
-                    "WHERE delivery_target_id = ? AND enabled = 1",
+                    "SELECT 1 FROM delivery_targets WHERE delivery_target_id = ? AND enabled = 1",
                     (target_id,),
                 ).fetchone()
                 if exists is None:
@@ -657,36 +660,6 @@ class SqliteRepository:
                         "DELIVERY_TARGET_NOT_FOUND",
                         "A delivery target does not exist or is disabled",
                     )
-            if event_type is OutboxEventType.STATUS_CHANGED:
-                placeholders = ",".join("?" for _ in unique_target_ids)
-                connection.execute(
-                    "DELETE FROM notification_deliveries "
-                    "WHERE event_id IN ("
-                    "SELECT event_id FROM notification_outbox WHERE event_type = ?"
-                    ") "
-                    f"AND delivery_target_id IN ({placeholders}) "
-                    "AND status IN (?, ?)",
-                    (
-                        event_type.value,
-                        *unique_target_ids,
-                        DeliveryStatus.PENDING.value,
-                        DeliveryStatus.FAILED.value,
-                    ),
-                )
-                connection.execute(
-                    "DELETE FROM notification_outbox "
-                    "WHERE event_type = ? AND NOT EXISTS ("
-                    "SELECT 1 FROM notification_deliveries "
-                    "WHERE notification_deliveries.event_id = notification_outbox.event_id"
-                    ")",
-                    (event_type.value,),
-                )
-            connection.execute(
-                "INSERT INTO notification_outbox(event_id, event_type, payload_json, created_at) "
-                "VALUES(?, ?, ?, ?)",
-                (event_id, event_type.value, _json(payload), now),
-            )
-            for target_id in unique_target_ids:
                 connection.execute(
                     "INSERT INTO notification_deliveries(delivery_id, event_id, "
                     "delivery_target_id, status) VALUES(?, ?, ?, ?)",
