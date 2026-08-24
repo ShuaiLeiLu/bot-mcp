@@ -62,7 +62,9 @@ def normalize_daily_window(
 
 
 def normalize_recovery_window(start: str, end: str) -> tuple[str, str]:
-    return normalize_daily_window(start, end, field_name="recovery window")
+    _, normalized_start = _parse_clock(start, "recovery window start")
+    _, normalized_end = _parse_clock(end, "recovery window end")
+    return normalized_start, normalized_end
 
 
 def normalize_quiet_hours(start: str, end: str) -> tuple[str, str]:
@@ -129,10 +131,43 @@ def active_recovery_window(
     *,
     timezone_name: str = RECOVERY_TIMEZONE,
 ) -> ActiveDailyWindow | None:
+    if now.tzinfo is None:
+        raise ValueError("recovery window time must be timezone-aware")
+    normalized_start, normalized_end = normalize_recovery_window(start, end)
+    start_minute, _ = _parse_clock(normalized_start, "recovery window start")
+    end_minute, _ = _parse_clock(normalized_end, "recovery window end")
+    if start_minute == end_minute:
+        try:
+            zone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("invalid recovery window timezone") from exc
+        local_now = now.astimezone(zone)
+        start_hour, start_minute_value = (
+            int(part) for part in normalized_start.split(":")
+        )
+        window_date = local_now.date()
+        start_local = datetime.combine(
+            window_date,
+            datetime_time(start_hour, start_minute_value),
+            tzinfo=zone,
+        )
+        if local_now < start_local:
+            window_date -= timedelta(days=1)
+        end_local = datetime.combine(
+            window_date + timedelta(days=1),
+            datetime_time(start_hour, start_minute_value),
+            tzinfo=zone,
+        )
+        return ActiveDailyWindow(
+            window_id=(
+                f"{window_date.isoformat()}/{normalized_start}-{normalized_end}"
+            ),
+            ends_at=end_local.astimezone(timezone.utc),
+        )
     return active_daily_window(
         now,
-        start,
-        end,
+        normalized_start,
+        normalized_end,
         field_name="recovery window",
         timezone_name=timezone_name,
     )

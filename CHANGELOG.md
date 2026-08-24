@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Equal recovery-window start and end times now represent a true 24-hour window.
 - Status reports and Guardian transition notifications now show their trigger time in the
   Asia/Shanghai timezone.
 - A new status event now supersedes older undelivered status events for the same target to
