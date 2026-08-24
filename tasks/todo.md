@@ -4,7 +4,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
 
 ## Phase 1 — Shared evidence foundation
 
-- [ ] Task 1: Add V2 policy and evidence contracts.
+- [x] Task 1: Add V2 policy and evidence contracts.
   - Acceptance: V1 policy compatibility; strict V2 validation; safe disabled defaults.
   - Verify: focused contract tests, Ruff, Pyright.
   - Dependencies: none.

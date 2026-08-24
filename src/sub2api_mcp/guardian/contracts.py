@@ -23,12 +23,48 @@ class GuardianEventType(StrEnum):
 
 
 class GuardianSampleSource(StrEnum):
+    # PROBE is retained for persisted V1 samples and is not a V2 writeback source.
     PROBE = "PROBE"
     TRAFFIC = "TRAFFIC"
+    SHARED_MONITOR = "SHARED_MONITOR"
+    RECOVERY_PROBE = "RECOVERY_PROBE"
+    MANUAL_PROBE = "MANUAL_PROBE"
+
+
+class SamplingMode(StrEnum):
+    SHARED = "SHARED"
+    ACTIVE = "ACTIVE"
+
+
+class GuardianFreshness(StrEnum):
+    FRESH = "FRESH"
+    STALE = "STALE"
+    EXPIRED = "EXPIRED"
+
+
+class GuardianRolloutStage(StrEnum):
+    OBSERVE = "OBSERVE"
+    LOAD_FACTOR = "LOAD_FACTOR"
+    PRIORITY = "PRIORITY"
+    SCHEDULABLE = "SCHEDULABLE"
+
+
+class GuardianFieldName(StrEnum):
+    LOAD_FACTOR = "LOAD_FACTOR"
+    PRIORITY = "PRIORITY"
+    SCHEDULABLE = "SCHEDULABLE"
+
+
+class GuardianFieldOwner(StrEnum):
+    UPSTREAM = "UPSTREAM"
+    HUMAN = "HUMAN"
+    GUARDIAN = "GUARDIAN"
 
 
 class GuardianHealth(StrEnum):
     PENDING = "PENDING"
+    WARMING_UP = "WARMING_UP"
+    STALE = "STALE"
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
     RATE_LIMITED = "RATE_LIMITED"
@@ -164,7 +200,7 @@ class WeightsPolicy(StrictModel):
 
 
 class ProbePolicy(StrictModel):
-    enabled: bool = True
+    enabled: bool = False
     interval_seconds: int = Field(default=60, ge=30, le=86400)
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     concurrency: int = Field(default=4, ge=1, le=32)
@@ -179,6 +215,62 @@ class TrafficPolicy(StrictModel):
     refresh_seconds: int = Field(default=60, ge=10, le=86400)
     lookback_minutes: int = Field(default=120, ge=5, le=10080)
     max_samples_per_channel: int = Field(default=60, ge=5, le=200)
+
+
+class SamplingPolicy(StrictModel):
+    mode: SamplingMode = SamplingMode.SHARED
+    shared_snapshot_interval_seconds: int = Field(default=60, ge=30, le=3600)
+    bucket_seconds: int = Field(default=60, ge=30, le=300)
+    fresh_seconds: int = Field(default=180, ge=30, le=3600)
+    expire_seconds: int = Field(default=600, ge=60, le=86400)
+    min_warmup_buckets: int = Field(default=5, ge=1, le=60)
+
+    @model_validator(mode="after")
+    def validate_freshness_bounds(self) -> SamplingPolicy:
+        if self.fresh_seconds >= self.expire_seconds:
+            raise ValueError("fresh_seconds must be lower than expire_seconds")
+        if self.bucket_seconds > self.fresh_seconds:
+            raise ValueError("bucket_seconds cannot exceed fresh_seconds")
+        return self
+
+
+class ConfidencePolicy(StrictModel):
+    degrade_min: float = Field(default=0.60, ge=0, le=1)
+    weight_min: float = Field(default=0.75, ge=0, le=1)
+    fuse_min: float = Field(default=0.85, ge=0, le=1)
+    recover_min: float = Field(default=0.85, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self) -> ConfidencePolicy:
+        if self.degrade_min > self.weight_min:
+            raise ValueError("degrade_min cannot exceed weight_min")
+        if self.weight_min > self.fuse_min:
+            raise ValueError("weight_min cannot exceed fuse_min")
+        if self.weight_min > self.recover_min:
+            raise ValueError("weight_min cannot exceed recover_min")
+        return self
+
+
+class WritePolicy(StrictModel):
+    max_channels_per_run: int = Field(default=1, ge=1, le=1000)
+    load_cooldown_seconds: int = Field(default=600, ge=0, le=86400)
+    priority_cooldown_seconds: int = Field(default=900, ge=0, le=86400)
+    max_relative_step: float = Field(default=0.20, gt=0, le=1)
+    min_relative_change: float = Field(default=0.15, ge=0, le=1)
+    min_absolute_change: int = Field(default=2, ge=0, le=1_000_000)
+
+
+class RecoveryProbeBudgetPolicy(StrictModel):
+    enabled: bool = False
+    interval_seconds: int = Field(default=300, ge=30, le=86400)
+    concurrency: int = Field(default=1, ge=1, le=32)
+    per_channel_hourly_requests: int = Field(default=12, ge=1, le=1000)
+    daily_requests: int = Field(default=50, ge=1, le=100_000)
+    daily_tokens: int = Field(default=10_000, ge=1, le=1_000_000_000)
+
+
+class RolloutPolicy(StrictModel):
+    stage: GuardianRolloutStage = GuardianRolloutStage.OBSERVE
 
 
 class ScopePolicy(StrictModel):
@@ -205,6 +297,13 @@ class GuardianPolicy(StrictModel):
     weights: WeightsPolicy = Field(default_factory=WeightsPolicy)
     probe: ProbePolicy = Field(default_factory=ProbePolicy)
     traffic: TrafficPolicy = Field(default_factory=TrafficPolicy)
+    sampling: SamplingPolicy = Field(default_factory=SamplingPolicy)
+    confidence: ConfidencePolicy = Field(default_factory=ConfidencePolicy)
+    writes: WritePolicy = Field(default_factory=WritePolicy)
+    recovery_budget: RecoveryProbeBudgetPolicy = Field(
+        default_factory=RecoveryProbeBudgetPolicy
+    )
+    rollout: RolloutPolicy = Field(default_factory=RolloutPolicy)
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
 
 
@@ -224,6 +323,74 @@ class GuardianScore(StrictModel):
     long_score: float = Field(ge=0, le=100)
     final_score: float = Field(ge=0, le=100)
     sample_count: int = Field(ge=0)
+
+
+class GuardianEvidence(StrictModel):
+    source_event_id: str = Field(min_length=1, max_length=256)
+    channel_id: str = Field(min_length=1, max_length=128)
+    source: GuardianSampleSource
+    event_type: GuardianEventType
+    score: int = Field(ge=0, le=100)
+    occurred_at: datetime
+    reliability: float = Field(ge=0, le=1)
+    event_count: int = Field(default=1, ge=1, le=1_000_000_000)
+    ttfb_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    status_code: int | None = Field(default=None, ge=0, le=999)
+    message: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_occurred_at(self) -> GuardianEvidence:
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at must be timezone-aware")
+        return self
+
+
+class GuardianEvidenceBucket(StrictModel):
+    channel_id: str = Field(min_length=1, max_length=128)
+    bucket_at: datetime
+    score: float = Field(ge=0, le=100)
+    quality: float = Field(ge=0, le=1)
+    sources: frozenset[GuardianSampleSource] = Field(min_length=1)
+    event_count: int = Field(ge=1, le=1_000_000_000)
+
+    @model_validator(mode="after")
+    def validate_bucket_at(self) -> GuardianEvidenceBucket:
+        if self.bucket_at.tzinfo is None:
+            raise ValueError("bucket_at must be timezone-aware")
+        return self
+
+
+class GuardianScoreV2(StrictModel):
+    short_score: float = Field(ge=0, le=100)
+    long_score: float = Field(ge=0, le=100)
+    health_score: float = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    freshness: GuardianFreshness
+    evidence_bucket_count: int = Field(ge=0)
+    last_evidence_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence_time(self) -> GuardianScoreV2:
+        if self.evidence_bucket_count > 0 and self.last_evidence_at is None:
+            raise ValueError("last_evidence_at is required when evidence exists")
+        if self.last_evidence_at is not None and self.last_evidence_at.tzinfo is None:
+            raise ValueError("last_evidence_at must be timezone-aware")
+        return self
+
+
+class GuardianFieldOwnership(StrictModel):
+    channel_id: str = Field(min_length=1, max_length=128)
+    field_name: GuardianFieldName
+    owner: GuardianFieldOwner
+    baseline_value: int | float | bool | str | None = None
+    last_guardian_value: int | float | bool | str | None = None
+    last_write_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_last_write_at(self) -> GuardianFieldOwnership:
+        if self.last_write_at is not None and self.last_write_at.tzinfo is None:
+            raise ValueError("last_write_at must be timezone-aware")
+        return self
 
 
 class ClassifiedSample(StrictModel):

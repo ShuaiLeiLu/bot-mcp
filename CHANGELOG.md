@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Guardian V2 now has strict, backward-compatible contracts for shared sampling, evidence
+  reliability, confidence gates, rollout stages, recovery budgets, and field ownership; all
+  active probing and writeback capabilities remain disabled by default.
+
 ### Changed
 
 - Equal recovery-window start and end times now represent a true 24-hour window.
