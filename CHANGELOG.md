@@ -9,6 +9,8 @@
   active probing and writeback capabilities remain disabled by default.
 - Guardian databases now migrate transactionally to the additive V2 evidence schema while
   preserving V1 policy, channel, sample, run, event, and audit data.
+- Each successful existing scheduler probe now publishes one canonical rich Guardian snapshot
+  from the same validated response, without making an additional upstream probe request.
 
 ### Changed
 

@@ -16,6 +16,7 @@ from sub2api_mcp.contracts import (
     TargetType,
 )
 from sub2api_mcp.errors import ServiceError
+from sub2api_mcp.guardian.repository import GuardianRepository
 from sub2api_mcp.jobs import JobManager
 from sub2api_mcp.metrics import Metrics
 from sub2api_mcp.repository import SqliteRepository
@@ -103,6 +104,59 @@ async def test_scheduler_queues_only_one_probe_cycle_under_one_lease(tmp_path: P
     assert await service.queue_cycle() is True
     assert await service.queue_cycle() is False
     assert await repository.active_job_count(JobType.PROBE) == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_publishes_one_canonical_guardian_snapshot_without_extra_probe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    repository = SqliteRepository(path)
+    guardian_repository = GuardianRepository(path)
+    await repository.initialize()
+    await guardian_repository.initialize()
+    captured_at = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+    result = ProbeResult(
+        snapshot={"channels": []},
+        report="no channels",
+        guardian_snapshot={
+            "version": 1,
+            "entries": [
+                {
+                    "monitor_id": "7",
+                    "name": "Claude",
+                    "status": "operational",
+                    "group_id": "3",
+                    "group_name": "Claude",
+                    "available_count": 1,
+                    "error_count": 0,
+                    "temporary_unavailable_count": 0,
+                    "closed_count": 0,
+                    "latency_ms": 1200,
+                    "upstream_schedulable": True,
+                }
+            ],
+        },
+        captured_at=captured_at,
+    )
+    adapter = FakeSub2APIAdapter([result, result])
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, lease_seconds=60),
+        owner_id="scheduler-a",
+    )
+    manager = JobManager(repository, Metrics.create())
+    manager.register(JobType.PROBE, service.handle_probe)
+
+    await service.queue_cycle()
+    await manager.run_once({JobType.PROBE}, "worker-1")
+    await service.queue_cycle()
+    await manager.run_once({JobType.PROBE}, "worker-1")
+
+    assert adapter.calls == 2
+    assert await guardian_repository.pending_input_snapshot_count() == 1
 
 
 @pytest.mark.asyncio

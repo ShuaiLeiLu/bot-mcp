@@ -231,6 +231,16 @@ class ProbeResult(StrictModel):
     snapshot: dict[str, Any]
     report: str = Field(min_length=1, max_length=50000)
     image_base64: str | None = Field(default=None, max_length=16 * 1024 * 1024)
+    guardian_snapshot: dict[str, Any] | None = None
+    captured_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_guardian_snapshot_time(self) -> ProbeResult:
+        if (self.guardian_snapshot is None) != (self.captured_at is None):
+            raise ValueError("guardian_snapshot and captured_at must be supplied together")
+        if self.captured_at is not None and self.captured_at.tzinfo is None:
+            raise ValueError("captured_at must be timezone-aware")
+        return self
 
 
 class OutboxPayload(StrictModel):

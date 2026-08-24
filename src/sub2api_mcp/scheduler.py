@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ _RECOVERY_RESULT_LABELS = {
     "test_failed": "测试失败，未调整",
     "recovery_failed": "测试成功，但恢复失败",
 }
+_LOGGER = logging.getLogger("sub2api_mcp.scheduler")
 
 
 class Sub2APIOperations(Protocol):
@@ -126,6 +128,14 @@ class SchedulerService:
         del job
         result = await self._adapter.probe()
         self._latest_probe = result
+        if result.guardian_snapshot is not None and result.captured_at is not None:
+            try:
+                await self._repository.publish_guardian_snapshot(
+                    result.guardian_snapshot,
+                    captured_at=result.captured_at,
+                )
+            except Exception:
+                _LOGGER.exception("guardian_snapshot_publish_failed")
         previous = await self._repository.get_snapshot("pending")
         if previous is None:
             previous = await self._repository.get_snapshot("delivered")

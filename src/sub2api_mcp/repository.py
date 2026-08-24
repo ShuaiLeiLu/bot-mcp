@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -879,6 +880,51 @@ class SqliteRepository:
                 "updated_at = excluded.updated_at",
                 (key, _json(payload), _iso(self._clock())),
             )
+
+    async def publish_guardian_snapshot(
+        self,
+        payload: dict[str, Any],
+        *,
+        captured_at: datetime,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._publish_guardian_snapshot_sync,
+            payload,
+            captured_at,
+        )
+
+    def _publish_guardian_snapshot_sync(
+        self,
+        payload: dict[str, Any],
+        captured_at: datetime,
+    ) -> str:
+        if captured_at.tzinfo is None:
+            raise ValueError("captured_at must be timezone-aware")
+        serialized = _json(payload)
+        if len(serialized.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ServiceError(
+                "GUARDIAN_SNAPSHOT_TOO_LARGE",
+                "The Guardian snapshot exceeds the storage limit",
+            )
+        payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        captured = _iso(captured_at)
+        snapshot_id = hashlib.sha256(
+            f"1\0{captured}\0{payload_hash}".encode()
+        ).hexdigest()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO guardian_input_snapshots"
+                "(snapshot_id, schema_version, payload_json, payload_hash, captured_at, "
+                "created_at) VALUES(?, 1, ?, ?, ?, ?)",
+                (
+                    snapshot_id,
+                    serialized,
+                    payload_hash,
+                    captured,
+                    _iso(self._clock()),
+                ),
+            )
+        return snapshot_id
 
     async def get_snapshot(self, key: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._get_snapshot_sync, key)

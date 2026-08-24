@@ -12,7 +12,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: empty/V1/restart/idempotency/rollback tests.
   - Verify: Guardian repository tests.
   - Dependencies: Task 1.
-- [ ] Task 3: Publish canonical snapshots from the existing scheduler.
+- [x] Task 3: Publish canonical snapshots from the existing scheduler.
   - Acceptance: no extra upstream call; idempotent publication; notifications unchanged.
   - Verify: scheduler tests and fake adapter call counts.
   - Dependencies: Tasks 1–2.

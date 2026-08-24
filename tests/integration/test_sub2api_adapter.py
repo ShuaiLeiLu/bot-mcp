@@ -12,8 +12,10 @@ from sub2api_mcp.adapters.sub2api import LegacySub2APIAdapter
 class FakeClient:
     def __init__(self) -> None:
         self.latency = 10
+        self.calls = 0
 
     async def fetch_probe(self) -> list[ChannelProbe]:
+        self.calls += 1
         channels: list[ChannelProbe] = []
         for index, provider in enumerate(("openai", "anthropic", "gemini", "future-provider"), 1):
             channels.append(
@@ -23,7 +25,7 @@ class FakeClient:
                         name=f"{provider}-channel",
                         provider=provider,
                         model="model",
-                        status="active",
+                        status="operational",
                         latency_ms=self.latency,
                         availability_7d=99.0,
                         last_checked_at="2026-08-23T00:00:00Z",
@@ -56,6 +58,10 @@ async def test_adapter_supports_all_provider_channel_values_without_branching() 
         "gemini-channel",
         "future-provider-channel",
     ]
+    assert result.guardian_snapshot is not None
+    assert result.guardian_snapshot["entries"][0]["latency_ms"] == 10  # type: ignore[index]
+    assert result.captured_at is not None
+    assert fake.calls == 1
 
 
 @pytest.mark.asyncio

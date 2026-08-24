@@ -18,6 +18,7 @@ from recovery import active_recovery_window
 from ..actor_bridge import ActorAccount
 from ..config import Settings
 from ..contracts import ProbeResult
+from ..guardian.contracts import UpstreamProbeSnapshot
 
 _SNAPSHOT_ADAPTER = TypeAdapter(dict[str, Any])
 
@@ -65,12 +66,18 @@ class LegacySub2APIAdapter:
             snapshot=snapshot,
             report=format_status_report(probes, triggered_at=triggered_at),
             image_base64=image_base64,
+            guardian_snapshot=self._build_guardian_snapshot(probes),
+            captured_at=triggered_at,
         )
 
     async def guardian_snapshot(self) -> dict[str, Any]:
         """Return the richer, still-secret-free snapshot used by Guardian."""
         probes = await self._client.fetch_probe()
         self._last_probes = probes
+        return self._build_guardian_snapshot(probes)
+
+    @staticmethod
+    def _build_guardian_snapshot(probes: list[ChannelProbe]) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
         for probe in probes:
             channel = probe.channel
@@ -93,7 +100,10 @@ class LegacySub2APIAdapter:
                 }
             )
         entries.sort(key=lambda item: (str(item["monitor_id"]), str(item["name"])))
-        return {"version": 1, "entries": entries}
+        snapshot = UpstreamProbeSnapshot.model_validate(
+            {"version": 1, "entries": entries}
+        )
+        return snapshot.model_dump(mode="json")
 
     async def recover(self) -> list[dict[str, object]]:
         if not self._recovery_enabled:

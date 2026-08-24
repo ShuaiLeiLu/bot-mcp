@@ -408,6 +408,17 @@ class GuardianRepository:
         data["revision"] = int(row["revision"])
         return GuardianPolicy.model_validate(data)
 
+    async def pending_input_snapshot_count(self) -> int:
+        return await asyncio.to_thread(self._pending_input_snapshot_count_sync)
+
+    def _pending_input_snapshot_count_sync(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NULL"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
     async def update_policy(
         self, policy: GuardianPolicy, *, expected_revision: int
     ) -> GuardianPolicy:
