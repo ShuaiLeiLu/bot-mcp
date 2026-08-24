@@ -7,6 +7,8 @@
 - Guardian V2 now has strict, backward-compatible contracts for shared sampling, evidence
   reliability, confidence gates, rollout stages, recovery budgets, and field ownership; all
   active probing and writeback capabilities remain disabled by default.
+- Guardian databases now migrate transactionally to the additive V2 evidence schema while
+  preserving V1 policy, channel, sample, run, event, and audit data.
 
 ### Changed
 

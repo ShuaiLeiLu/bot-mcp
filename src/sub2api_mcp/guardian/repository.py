@@ -21,7 +21,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 1
+GUARDIAN_SCHEMA_VERSION = 2
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS guardian_channels (
     desired_schedulable INTEGER NOT NULL,
     manual_control TEXT NOT NULL,
     details_json TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    freshness_state TEXT NOT NULL DEFAULT 'EXPIRED',
+    last_evidence_at TEXT,
+    warmup_buckets INTEGER NOT NULL DEFAULT 0,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -73,7 +77,12 @@ CREATE TABLE IF NOT EXISTS guardian_samples (
     occurred_at TEXT NOT NULL,
     ttfb_ms INTEGER,
     status_code INTEGER,
-    message TEXT NOT NULL
+    message TEXT NOT NULL,
+    source_event_id TEXT,
+    bucket_at TEXT,
+    reliability REAL NOT NULL DEFAULT 1.0,
+    ingested_at TEXT,
+    legacy INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_samples_channel
     ON guardian_samples(channel_id, occurred_at DESC, sample_id DESC);
@@ -124,6 +133,9 @@ CREATE TABLE IF NOT EXISTS guardian_probe_ledger (
     output_tokens INTEGER,
     estimated_cost REAL,
     priced INTEGER NOT NULL,
+    budget_date TEXT,
+    request_source TEXT,
+    blocked_reason TEXT,
     occurred_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_leases (
@@ -143,6 +155,40 @@ CREATE TABLE IF NOT EXISTS guardian_idempotency (
     result_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY(idempotency_key, action, subject)
+);
+CREATE TABLE IF NOT EXISTS guardian_input_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_claim
+    ON guardian_input_snapshots(consumed_at, captured_at, snapshot_id);
+CREATE TABLE IF NOT EXISTS guardian_traffic_buckets (
+    channel_id TEXT NOT NULL,
+    bucket_at TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    score_sum REAL NOT NULL,
+    ttfb_p95_ms INTEGER,
+    details_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(channel_id, bucket_at)
+);
+CREATE INDEX IF NOT EXISTS idx_guardian_traffic_buckets_recent
+    ON guardian_traffic_buckets(bucket_at DESC, channel_id);
+CREATE TABLE IF NOT EXISTS guardian_field_ownership (
+    channel_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    baseline_json TEXT,
+    last_guardian_json TEXT,
+    last_write_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(channel_id, field_name)
 );
 """
 
@@ -190,6 +236,8 @@ def _decode_cursor(value: str) -> tuple[str, str]:
 
 
 class GuardianRepository:
+    SCHEMA_VERSION = GUARDIAN_SCHEMA_VERSION
+
     def __init__(self, path: Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = path
         self._clock = clock
@@ -209,8 +257,20 @@ class GuardianRepository:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         now = _iso(self._clock())
         default = GuardianPolicy()
-        with self._connect() as connection:
-            connection.executescript(GUARDIAN_SCHEMA_SQL)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in GUARDIAN_SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            row = connection.execute(
+                "SELECT value FROM guardian_metadata WHERE key = 'schema_version'"
+            ).fetchone()
+            current_version = int(row["value"]) if row is not None else 0
+            if current_version > self.SCHEMA_VERSION:
+                raise RuntimeError("Guardian database schema is newer than this service")
+            if current_version < 2:
+                self._migrate_v1_to_v2_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -228,6 +288,111 @@ class GuardianRepository:
                 "finished_at = ?, updated_at = ? WHERE status = 'RUNNING'",
                 (now, now),
             )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _migrate_v1_to_v2_sync(connection: sqlite3.Connection) -> None:
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_channels",
+            "confidence",
+            "REAL NOT NULL DEFAULT 0",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_channels",
+            "freshness_state",
+            "TEXT NOT NULL DEFAULT 'EXPIRED'",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_channels",
+            "last_evidence_at",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_channels",
+            "warmup_buckets",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_samples",
+            "source_event_id",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_samples",
+            "bucket_at",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_samples",
+            "reliability",
+            "REAL NOT NULL DEFAULT 1.0",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_samples",
+            "ingested_at",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_samples",
+            "legacy",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_probe_ledger",
+            "budget_date",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_probe_ledger",
+            "request_source",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_probe_ledger",
+            "blocked_reason",
+            "TEXT",
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_guardian_samples_source_event "
+            "ON guardian_samples(channel_id, source, source_event_id) "
+            "WHERE source_event_id IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_samples_bucket "
+            "ON guardian_samples(channel_id, bucket_at DESC)"
+        )
+
+    @staticmethod
+    def _ensure_column_sync(
+        connection: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def get_policy(self) -> GuardianPolicy:
         return await asyncio.to_thread(self._get_policy_sync)

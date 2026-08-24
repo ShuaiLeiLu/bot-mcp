@@ -8,7 +8,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: V1 policy compatibility; strict V2 validation; safe disabled defaults.
   - Verify: focused contract tests, Ruff, Pyright.
   - Dependencies: none.
-- [ ] Task 2: Add additive Guardian V2 schema migration.
+- [x] Task 2: Add additive Guardian V2 schema migration.
   - Acceptance: empty/V1/restart/idempotency/rollback tests.
   - Verify: Guardian repository tests.
   - Dependencies: Task 1.
