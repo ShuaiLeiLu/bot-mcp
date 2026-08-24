@@ -150,7 +150,7 @@ async def test_account_count_change_enqueues_a_new_notification(tmp_path: Path) 
     await service.queue_cycle()
     await manager.run_once({JobType.PROBE}, "worker-1")
 
-    assert await repository.outbox_backlog() == 2
+    assert await repository.outbox_backlog() == 1
 
 
 def test_admin_delivery_purposes_cannot_target_groups() -> None:

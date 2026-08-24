@@ -4,10 +4,11 @@ import base64
 import io
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from probe import ChannelProbe
+from probe import ChannelProbe, format_trigger_time
 
 
 class NotificationImageError(RuntimeError):
@@ -55,19 +56,30 @@ class _AdminRow:
     result: str
 
 
-def render_status_report_image(probes: Iterable[ChannelProbe]) -> str:
+def render_status_report_image(
+    probes: Iterable[ChannelProbe],
+    *,
+    triggered_at: datetime | None = None,
+) -> str:
     """Render the channel status report as a PNG data URI."""
 
     probe_list = list(probes)
     rows = [_status_row(probe) for probe in probe_list[:_MAX_CHANNEL_ROWS]]
     omitted = max(0, len(probe_list) - _MAX_CHANNEL_ROWS)
-    return _render_report(rows, (), omitted=omitted)
+    return _render_report(
+        rows,
+        (),
+        omitted=omitted,
+        trigger_line=format_trigger_time(triggered_at),
+    )
 
 
 def render_admin_report_image(
     probes: Iterable[ChannelProbe],
     recovery_outcomes: Sequence[Any],
     maintenance_adjustments: Sequence[Any],
+    *,
+    triggered_at: datetime | None = None,
 ) -> str:
     """Render admin-only account adjustments followed by the status table."""
 
@@ -93,7 +105,12 @@ def render_admin_report_image(
         for adjustment in maintenance_adjustments
     )
     omitted = max(0, len(probe_list) - _MAX_CHANNEL_ROWS)
-    return _render_report(rows, admin_rows, omitted=omitted)
+    return _render_report(
+        rows,
+        admin_rows,
+        omitted=omitted,
+        trigger_line=format_trigger_time(triggered_at),
+    )
 
 
 def _status_row(probe: ChannelProbe) -> _StatusRow:
@@ -123,6 +140,7 @@ def _render_report(
     admin_rows: Sequence[_AdminRow],
     *,
     omitted: int,
+    trigger_line: str,
 ) -> str:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -137,7 +155,7 @@ def _render_report(
 
     margin = 36
     width = 1536
-    title_height = 94
+    title_height = 112
     admin_header_height = 62 if admin_rows else 0
     admin_row_height = 58 * len(admin_rows)
     table_header_height = 70
@@ -165,6 +183,13 @@ def _render_report(
     draw.text(
         (x1, y + 12),
         "主动探测结果",
+        font=small_font,
+        fill=(100, 116, 139),
+        anchor="ra",
+    )
+    draw.text(
+        (x1, y + 48),
+        trigger_line,
         font=small_font,
         fill=(100, 116, 139),
         anchor="ra",

@@ -7,6 +7,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -35,6 +36,23 @@ def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         else:
             merged[key] = value
     return merged
+
+
+def _format_trigger_time(value: object) -> str:
+    triggered_at: datetime
+    if isinstance(value, datetime):
+        triggered_at = value
+    elif isinstance(value, str):
+        try:
+            triggered_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            triggered_at = datetime.now(UTC)
+    else:
+        triggered_at = datetime.now(UTC)
+    if triggered_at.tzinfo is None:
+        triggered_at = triggered_at.replace(tzinfo=UTC)
+    local = triggered_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    return f"触发时间：{local:%Y-%m-%d %H:%M:%S}（北京时间）"
 
 
 class GuardianService:
@@ -203,6 +221,7 @@ class GuardianService:
                 text="\n".join(
                     [
                         "Guardian 调度状态更新",
+                        _format_trigger_time(run.get("started_at")),
                         f"评估渠道：{result.get('channels_evaluated', 0)}",
                         f"状态变化：{result.get('state_transitions', 0)}",
                         f"预期差异：{result.get('expected_changes', 0)}",

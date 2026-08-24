@@ -4,8 +4,9 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 class MonitorDataError(ValueError):
@@ -723,10 +724,25 @@ def parse_channel_monitor_page(
     return channels, pages, page_size
 
 
-def format_status_report(probes: Iterable[ChannelProbe]) -> str:
+def format_trigger_time(triggered_at: datetime | None = None) -> str:
+    """Format one trigger timestamp in the operator-facing Beijing timezone."""
+
+    current = triggered_at or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("triggered_at must be timezone-aware")
+    local = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    return f"触发时间：{local:%Y-%m-%d %H:%M:%S}（北京时间）"
+
+
+def format_status_report(
+    probes: Iterable[ChannelProbe],
+    *,
+    triggered_at: datetime | None = None,
+) -> str:
     probe_list = list(probes)
+    trigger_line = format_trigger_time(triggered_at)
     if not probe_list:
-        return "暂无启用的渠道探测结果。"
+        return f"📊 渠道监控\n{trigger_line}\n暂无启用的渠道探测结果。"
 
     status_labels = {
         "operational": ("✅", "正常"),
@@ -739,7 +755,8 @@ def format_status_report(probes: Iterable[ChannelProbe]) -> str:
         probe.channel.status == "operational" for probe in probe_list
     )
     blocks = [
-        f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜异常 {len(probe_list) - normal_count}"
+        f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜异常 {len(probe_list) - normal_count}\n"
+        f"{trigger_line}"
     ]
     for probe in probe_list:
         channel = probe.channel

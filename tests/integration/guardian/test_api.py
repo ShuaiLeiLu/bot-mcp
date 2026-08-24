@@ -298,5 +298,7 @@ async def test_state_transition_enqueues_existing_all_channel_notification(
     assert result["status"] == "SUCCEEDED"
     assert delivery is not None
     text = delivery.payload["notification"]["text"]
+    assert "触发时间：" in text
+    assert "（北京时间）" in text
     assert "健康分" in text
     assert "探测 PERFECT" in text

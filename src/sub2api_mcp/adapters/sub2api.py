@@ -46,12 +46,16 @@ class LegacySub2APIAdapter:
         self._recovery_rotation: list[str] = []
 
     async def probe(self) -> ProbeResult:
+        triggered_at = datetime.now(UTC)
         probes = await self._client.fetch_probe()
         self._last_probes = probes
         snapshot = _SNAPSHOT_ADAPTER.validate_json(ProbeSnapshot.from_probes(probes).to_bytes())
         image_base64: str | None = None
         try:
-            image_data_uri = render_status_report_image(probes)
+            image_data_uri = render_status_report_image(
+                probes,
+                triggered_at=triggered_at,
+            )
             prefix = "data:image/png;base64,"
             if image_data_uri.startswith(prefix):
                 image_base64 = image_data_uri[len(prefix) :]
@@ -59,7 +63,7 @@ class LegacySub2APIAdapter:
             image_base64 = None
         return ProbeResult(
             snapshot=snapshot,
-            report=format_status_report(probes),
+            report=format_status_report(probes, triggered_at=triggered_at),
             image_base64=image_base64,
         )
 
