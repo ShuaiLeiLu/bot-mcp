@@ -660,15 +660,29 @@ class SqliteRepository:
                     )
             if event_type is OutboxEventType.STATUS_CHANGED:
                 placeholders = ",".join("?" for _ in unique_target_ids)
+                raw_coalesce_key = payload.get("coalesceKey")
+                coalesce_key = (
+                    raw_coalesce_key
+                    if isinstance(raw_coalesce_key, str)
+                    and 1 <= len(raw_coalesce_key) <= 128
+                    else None
+                )
+                key_filter = (
+                    " AND json_extract(payload_json, '$.coalesceKey') = ?"
+                    if coalesce_key is not None
+                    else ""
+                )
                 connection.execute(
                     "DELETE FROM notification_deliveries "
                     "WHERE event_id IN ("
                     "SELECT event_id FROM notification_outbox WHERE event_type = ?"
+                    f"{key_filter}"
                     ") "
                     f"AND delivery_target_id IN ({placeholders}) "
                     "AND status IN (?, ?)",
                     (
                         event_type.value,
+                        *((coalesce_key,) if coalesce_key is not None else ()),
                         *unique_target_ids,
                         DeliveryStatus.PENDING.value,
                         DeliveryStatus.FAILED.value,

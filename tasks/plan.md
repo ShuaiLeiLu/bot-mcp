@@ -2,11 +2,11 @@
 
 ## Status
 
-- Phase: **Plan / Tasks — pending human review**
+- Phase: **Implementation — final release verification**
 - Source of truth: `docs/prd-guardian-shared-sampling-v2.md`
 - Safety default: Guardian disabled, observe-only, all production writeback disabled
-- Branch: `feature/guardian-shared-sampling-v2`
-- Production deployment: out of scope until the complete implementation and rollout gate are approved
+- Branch: `main` (as explicitly required for this delivery)
+- Production deployment: automatic deployment is allowed; production writeback remains separately gated
 
 ## Overview
 

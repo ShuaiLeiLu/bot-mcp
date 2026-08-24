@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from ..errors import ServiceError
 from .contracts import (
@@ -1740,7 +1741,7 @@ class GuardianRepository:
                     output_tokens,
                     estimated_cost,
                     int(priced),
-                    occurred_at.astimezone(UTC).date().isoformat(),
+                    occurred_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
                     blocked_reason[:200] if blocked_reason else None,
                     _iso(occurred_at),
                 ),
@@ -1770,6 +1771,106 @@ class GuardianRepository:
             "estimated_cost": float(row["cost"] or 0),
             "blocked_count": int(row["blocked"] or 0),
         }
+
+    async def cleanup_retention(
+        self,
+        *,
+        now: datetime | None = None,
+        batch_size: int = 500,
+    ) -> dict[str, int]:
+        """Remove or redact eligible evidence within one global bounded batch."""
+        reference = now or self._clock()
+        if reference.tzinfo is None:
+            raise ValueError("retention time must be timezone-aware")
+        if not 1 <= batch_size <= 10_000:
+            raise ValueError("batch_size must be between 1 and 10000")
+        return await asyncio.to_thread(
+            self._cleanup_retention_sync,
+            reference,
+            batch_size,
+        )
+
+    def _cleanup_retention_sync(
+        self,
+        now: datetime,
+        batch_size: int,
+    ) -> dict[str, int]:
+        cutoffs = {
+            "dedup": _iso(now - timedelta(days=7)),
+            "traffic": _iso(now - timedelta(days=30)),
+            "samples": _iso(now - timedelta(days=90)),
+            "snapshots": _iso(now - timedelta(days=90)),
+        }
+        counts = {
+            "samples": 0,
+            "traffic_buckets": 0,
+            "snapshots": 0,
+            "snapshot_payloads_redacted": 0,
+            "source_ids_redacted": 0,
+        }
+        remaining = batch_size
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+
+            def execute_bounded(key: str, sql: str, params: tuple[object, ...]) -> None:
+                nonlocal remaining
+                if remaining <= 0:
+                    return
+                cursor = connection.execute(sql, (*params, remaining))
+                changed = max(0, cursor.rowcount)
+                counts[key] += changed
+                remaining -= changed
+
+            execute_bounded(
+                "samples",
+                "DELETE FROM guardian_samples WHERE rowid IN "
+                "(SELECT rowid FROM guardian_samples WHERE occurred_at < ? "
+                "ORDER BY occurred_at LIMIT ?)",
+                (cutoffs["samples"],),
+            )
+            execute_bounded(
+                "traffic_buckets",
+                "DELETE FROM guardian_traffic_buckets WHERE rowid IN "
+                "(SELECT rowid FROM guardian_traffic_buckets WHERE bucket_at < ? "
+                "ORDER BY bucket_at LIMIT ?)",
+                (cutoffs["traffic"],),
+            )
+            execute_bounded(
+                "snapshots",
+                "DELETE FROM guardian_input_snapshots WHERE rowid IN "
+                "(SELECT rowid FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NOT NULL AND captured_at < ? "
+                "ORDER BY captured_at LIMIT ?)",
+                (cutoffs["snapshots"],),
+            )
+            execute_bounded(
+                "snapshot_payloads_redacted",
+                "UPDATE guardian_input_snapshots SET payload_json = '{}' WHERE rowid IN "
+                "(SELECT rowid FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NOT NULL AND captured_at < ? AND payload_json <> '{}' "
+                "ORDER BY captured_at LIMIT ?)",
+                (cutoffs["dedup"],),
+            )
+            execute_bounded(
+                "source_ids_redacted",
+                "UPDATE guardian_samples SET source_event_id = NULL WHERE rowid IN "
+                "(SELECT rowid FROM guardian_samples "
+                "WHERE occurred_at < ? AND source_event_id IS NOT NULL "
+                "ORDER BY occurred_at LIMIT ?)",
+                (cutoffs["dedup"],),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        counts["deleted_total"] = (
+            counts["samples"] + counts["traffic_buckets"] + counts["snapshots"]
+        )
+        counts["processed_total"] = batch_size - remaining
+        return counts
 
     async def restore_preview(self) -> dict[str, Any]:
         return await asyncio.to_thread(self._restore_preview_sync)

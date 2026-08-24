@@ -711,7 +711,7 @@ main {
 }
 
 .metric-grid.five {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
 }
 
 .metric-grid.three {
@@ -762,6 +762,38 @@ main {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-xl);
   margin-bottom: var(--space-xl);
+}
+
+.sampling-panel {
+  margin-bottom: var(--space-xl);
+  border-left: 4px solid var(--color-primary);
+}
+
+.sampling-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  gap: var(--space-md);
+}
+
+.sampling-facts div {
+  padding: var(--space-lg);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.sampling-facts dt {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.sampling-facts dd {
+  margin: var(--space-sm) 0 0;
+  color: var(--text-primary);
+  font-family: "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.875rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .panel {
@@ -1224,6 +1256,23 @@ tbody tr:hover {
   border-color: #fed7aa;
 }
 
+.rollout-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-md);
+}
+
+.danger-outline {
+  border-color: #fecaca;
+  color: var(--color-destructive);
+}
+
+.rollout-help {
+  margin-top: var(--space-lg) !important;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
 .score-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(4.5rem, 1fr));
@@ -1557,6 +1606,10 @@ dialog::backdrop {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .sampling-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .metric {
     min-height: 6.5rem;
   }
@@ -1635,6 +1688,11 @@ dialog::backdrop {
     grid-template-columns: 1fr 1fr;
   }
 
+  .rollout-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
   .dialog-actions span,
   .channel-dialog-actions span {
     display: none;
@@ -1644,6 +1702,10 @@ dialog::backdrop {
 @media (max-width: 26rem) {
   .metric-grid.five,
   .metric-grid.three {
+    grid-template-columns: 1fr;
+  }
+
+  .sampling-facts {
     grid-template-columns: 1fr;
   }
 

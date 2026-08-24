@@ -274,3 +274,33 @@ async def test_new_status_event_supersedes_an_older_failed_attempt(tmp_path: Pat
     assert await repository.outbox_backlog() == 1
     assert delivery is not None
     assert delivery.event_id == latest.event_id
+
+
+@pytest.mark.asyncio
+async def test_status_events_with_distinct_coalesce_keys_are_both_preserved(
+    tmp_path: Path,
+) -> None:
+    repository = await _repo(tmp_path, MutableClock())
+    target = await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="status",
+            bot_uuid="bot-uuid",
+            target_type=TargetType.PERSON,
+            target_id="person-id",
+            purposes=frozenset({DeliveryPurpose.STATUS}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"coalesceKey": "guardian:run", "notification": {"text": "run"}},
+        [target.delivery_target_id],
+    )
+    await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"coalesceKey": "guardian:budget", "notification": {"text": "budget"}},
+        [target.delivery_target_id],
+    )
+
+    assert await repository.outbox_backlog() == 2

@@ -1,6 +1,6 @@
 # Guardian Shared Sampling V2 Task Checklist
 
-Status: **Draft — pending human approval of `tasks/plan.md`**
+Status: **Implementation active — final release verification**
 
 ## Phase 1 — Shared evidence foundation
 
@@ -77,22 +77,22 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: additive reads; guarded rollout/ownership mutations; compatibility.
   - Verify: API integration and MCP contract tests.
   - Dependencies: Tasks 7–11.
-- [ ] Task 13: Update Guardian UI for V2 evidence and controls.
+- [x] Task 13: Update Guardian UI for V2 evidence and controls.
   - Acceptance: parameter/help completeness; confirmations; responsive/a11y/browser checks.
   - Verify: JS syntax, API integration, 390px/1440px browser matrix.
   - Dependencies: Task 12.
-- [ ] Task 14: Add notifications, metrics, and retention.
+- [x] Task 14: Add notifications, metrics, and retention.
   - Acceptance: structured Chinese messages; coalescing rules; bounded cleanup.
   - Verify: notification, metric, and retention tests.
   - Dependencies: Tasks 7–12.
 
 ### Checkpoint D — Feature complete, writeback off
 
-- [ ] `uv run pytest -q`
-- [ ] `uv run ruff check .`
-- [ ] `uv run pyright`
-- [ ] `uv run pip-audit`
-- [ ] `docker build --tag bot-mcp-ci:guardian-v2 .`
-- [ ] Browser and accessibility matrix passes.
+- [x] `uv run pytest -q`
+- [x] `uv run ruff check .`
+- [x] `uv run pyright`
+- [x] `uv run pip-audit`
+- [x] `docker build --tag bot-mcp-ci:guardian-v2 .`
+- [x] Browser and accessibility matrix passes.
 - [ ] Backup/migration/stop/restore drill passes.
 - [ ] Product approves merge and deployment.

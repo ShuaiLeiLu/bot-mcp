@@ -27,18 +27,42 @@ const policyFields = [
   ["#p-observe", "observe_only", "boolean"],
   ["#p-scan", "scan_interval_seconds", "number"],
   ["#p-strategy", "strategy", "string"],
-  ["#p-probe-enabled", "probe.enabled", "boolean"],
-  ["#p-probe-skip", "probe.skip_when_traffic_fresh", "boolean"],
-  ["#p-probe-interval", "probe.interval_seconds", "number"],
-  ["#p-probe-timeout", "probe.timeout_seconds", "number"],
-  ["#p-probe-concurrency", "probe.concurrency", "number"],
-  ["#p-probe-model", "probe.model", "string"],
+  ["#p-sampling-mode", "sampling.mode", "string"],
+  ["#p-snapshot-interval", "sampling.shared_snapshot_interval_seconds", "number"],
+  ["#p-bucket-seconds", "sampling.bucket_seconds", "number"],
+  ["#p-fresh-seconds", "sampling.fresh_seconds", "number"],
+  ["#p-expire-seconds", "sampling.expire_seconds", "number"],
+  ["#p-warmup-buckets", "sampling.min_warmup_buckets", "number"],
+  ["#p-recovery-budget-enabled", "recovery_budget.enabled", "boolean"],
+  ["#p-recovery-budget-interval", "recovery_budget.interval_seconds", "number"],
+  ["#p-recovery-budget-concurrency", "recovery_budget.concurrency", "number"],
+  ["#p-recovery-channel-hourly", "recovery_budget.per_channel_hourly_requests", "number"],
+  ["#p-recovery-daily-requests", "recovery_budget.daily_requests", "number"],
+  ["#p-recovery-daily-tokens", "recovery_budget.daily_tokens", "number"],
   ["#p-short-window", "scoring.short_window", "number"],
   ["#p-long-window", "scoring.long_window", "number"],
   ["#p-slow-ttfb", "scoring.slow_ttfb_ms", "number"],
   ["#p-latest-weight", "scoring.latest_weight", "number"],
   ["#p-short-ratio", "scoring.short_ratio", "number"],
   ["#p-decay", "scoring.decay", "number"],
+  ["#p-short-minutes", "scoring.short_window_minutes", "number"],
+  ["#p-long-minutes", "scoring.long_window_minutes", "number"],
+  ["#p-short-half-life", "scoring.short_half_life_minutes", "number"],
+  ["#p-long-half-life", "scoring.long_half_life_minutes", "number"],
+  ["#p-confidence-degrade", "confidence.degrade_min", "number"],
+  ["#p-confidence-weight", "confidence.weight_min", "number"],
+  ["#p-confidence-fuse", "confidence.fuse_min", "number"],
+  ["#p-confidence-recover", "confidence.recover_min", "number"],
+  ["#p-traffic-enabled", "traffic.enabled", "boolean"],
+  ["#p-traffic-refresh", "traffic.refresh_seconds", "number"],
+  ["#p-traffic-lookback", "traffic.lookback_minutes", "number"],
+  ["#p-traffic-max-samples", "traffic.max_samples_per_channel", "number"],
+  ["#p-write-max-channels", "writes.max_channels_per_run", "number"],
+  ["#p-write-load-cooldown", "writes.load_cooldown_seconds", "number"],
+  ["#p-write-priority-cooldown", "writes.priority_cooldown_seconds", "number"],
+  ["#p-write-max-step", "writes.max_relative_step", "number"],
+  ["#p-write-min-change", "writes.min_relative_change", "number"],
+  ["#p-write-min-absolute", "writes.min_absolute_change", "number"],
   ["#score-perfect", "scoring.event_scores.PERFECT", "number"],
   ["#score-slow", "scoring.event_scores.SLOW_TTFB", "number"],
   ["#score-unknown", "scoring.event_scores.UPSTREAM_UNKNOWN", "number"],
@@ -135,6 +159,15 @@ function formatDate(value) {
 function formatNumber(value, digits = 1) {
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(digits) : "—";
+}
+
+function formatAge(value) {
+  if (!value) return "尚无快照";
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (!Number.isFinite(ageSeconds)) return "时间无效";
+  if (ageSeconds < 60) return `${ageSeconds} 秒前`;
+  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)} 分钟前`;
+  return `${Math.floor(ageSeconds / 3600)} 小时前`;
 }
 
 function getPath(object, path) {
@@ -253,10 +286,11 @@ async function loadStatus() {
 }
 
 async function loadOverview() {
-  const [overview, status, events] = await Promise.all([
+  const [overview, status, events, sampling] = await Promise.all([
     api("/overview"),
     api("/status"),
     api("/events?limit=6"),
+    api("/sampling/status"),
   ]);
   const counts = overview.health_counts || {};
   const healthy = counts.HEALTHY || 0;
@@ -269,10 +303,31 @@ async function loadOverview() {
   $("#metric-healthy").textContent = healthy;
   $("#metric-risk").textContent = risk;
   $("#metric-revision").textContent = overview.policy_revision;
+  renderSamplingStatus(sampling);
   await loadStatus();
   renderDistribution(counts, overview.channel_count);
   renderLastRun(status.last_run);
   renderEvents($("#overview-events"), events.items || []);
+}
+
+function renderSamplingStatus(sampling) {
+  const freshness = sampling.channels_by_freshness || {};
+  const mode = sampling.mode === "SHARED" ? "共享" : "主动";
+  const latestAge = formatAge(sampling.latest_snapshot_at);
+  $("#sampling-mode").textContent = mode;
+  $("#sampling-snapshot-age").textContent = latestAge;
+  $("#sampling-latest-at").textContent = formatDate(sampling.latest_snapshot_at);
+  $("#sampling-pending").textContent = sampling.pending_snapshots ?? 0;
+  $("#sampling-consumed").textContent = Math.max(
+    0,
+    Number(sampling.shared_snapshots || 0) - Number(sampling.pending_snapshots || 0),
+  );
+  $("#sampling-freshness").textContent = `${freshness.FRESH || 0} / ${freshness.EXPIRED || 0}`;
+  const healthy = sampling.latest_snapshot_at &&
+    Date.now() - new Date(sampling.latest_snapshot_at).getTime() <= Number(sampling.expire_seconds || 600) * 1000;
+  const badge = $("#sampling-health");
+  badge.textContent = healthy ? "链路新鲜" : "快照过期";
+  badge.className = `badge ${healthy ? "success" : "warning"}`;
 }
 
 function renderDistribution(counts, total) {
@@ -450,8 +505,9 @@ function channelRow(channel) {
   cell(row, titleWrap);
   cell(row, channel.group_id || "未分组");
   cell(row, make("span", "score-value", formatNumber(channel.score)));
+  cell(row, make("span", "score-value", `${formatNumber(Number(channel.confidence || 0) * 100, 0)}%`));
+  cell(row, freshnessBadge(channel.freshness_state));
   cell(row, channel.latency_ms == null ? "—" : `${channel.latency_ms} ms`);
-  cell(row, booleanBadge(channel.upstream_schedulable));
   cell(row, statusBadge(channel.health));
   cell(row, make("span", `badge ${channel.details?.expected_action === "NO_CHANGE" ? "success" : "warning"}`, channel.details?.expected_action || "—"));
   cell(row, statusBadge(channel.manual_control));
@@ -463,6 +519,12 @@ function channelRow(channel) {
   actions.append(actionButton(excludeAction === "exclude" ? "排除" : "纳入", channel, excludeAction, excludeAction === "exclude"));
   cell(row, actions);
   return row;
+}
+
+function freshnessBadge(value) {
+  const labels = { FRESH: "新鲜", STALE: "陈旧", EXPIRED: "过期" };
+  const className = value === "FRESH" ? "success" : value === "STALE" ? "warning" : "danger";
+  return make("span", `badge ${className}`, labels[value] || value || "—");
 }
 
 function actionButton(label, channel, action, dangerous = false) {
@@ -490,7 +552,10 @@ async function channelAction(channelId, action) {
 }
 
 async function showChannel(channelId) {
-  const channel = await api(`/channels/${encodeURIComponent(channelId)}`);
+  const [channel, explanation] = await Promise.all([
+    api(`/channels/${encodeURIComponent(channelId)}`),
+    api(`/channels/${encodeURIComponent(channelId)}/explanation`),
+  ]);
   $("#channel-dialog-title").textContent = channel.name;
   const root = $("#channel-detail");
   root.replaceChildren();
@@ -499,7 +564,11 @@ async function showChannel(channelId) {
     ["渠道 ID", channel.channel_id],
     ["分组", channel.group_id || "未分组"],
     ["健康分", formatNumber(channel.score)],
-    ["状态", channel.health],
+    ["置信度", `${formatNumber(Number(explanation.confidence || 0) * 100, 0)}%`],
+    ["证据状态", explanation.freshness_state],
+    ["证据来源", (explanation.evidence_sources || []).join("、") || "暂无"],
+    ["预热桶数", explanation.warmup_buckets ?? 0],
+    ["决策原因", explanation.reason || "暂无"],
   ]) {
     const item = make("div");
     item.append(make("span", "", label), make("strong", "", value));
@@ -587,11 +656,69 @@ async function loadRouting() {
 }
 
 async function loadSpend() {
-  const data = await api("/probe-spend");
+  const [data, budget, ownership, policyData] = await Promise.all([
+    api("/probe-spend"),
+    api("/probe-budget"),
+    api("/write-ownership"),
+    api("/policy"),
+  ]);
+  policyState = policyData.policy;
   $("#spend-count").textContent = data.probe_count;
   $("#spend-cost").textContent = `$${Number(data.estimated_cost || 0).toFixed(4)}`;
-  $("#spend-unpriced").textContent = data.unpriced_count;
   $("#spend-currency").textContent = data.currency;
+  $("#probe-budget-requests").textContent = `${budget.request_count || 0} / ${budget.daily_request_limit || 0}`;
+  $("#probe-budget-tokens").textContent = `${budget.total_tokens || 0} / ${budget.daily_token_limit || 0}`;
+  $("#probe-budget-blocked").textContent = budget.blocked_count || 0;
+  $("#probe-budget-state").textContent = budget.enabled ? "预算已启用" : "预算关闭";
+  renderOwnership(ownership.items || []);
+}
+
+function renderOwnership(items) {
+  const body = $("#ownership-table");
+  body.replaceChildren();
+  $("#ownership-empty").hidden = items.length > 0;
+  for (const item of items) {
+    const row = make("tr");
+    cell(row, item.channel_id);
+    cell(row, item.field_name);
+    cell(row, make("span", `badge ${item.owner === "HUMAN" ? "warning" : "success"}`, item.owner === "HUMAN" ? "人工接管" : "Guardian"));
+    cell(row, formatFieldValue(item.baseline_value));
+    cell(row, formatFieldValue(item.last_guardian_value));
+    cell(row, formatDate(item.last_write_at));
+    const actions = make("div", "table-actions");
+    const owner = item.owner === "HUMAN" ? "GUARDIAN" : "HUMAN";
+    const label = owner === "GUARDIAN" ? "交还 Guardian" : "人工接管";
+    const button = make("button", `table-action${owner === "HUMAN" ? " danger" : ""}`, label);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      changeOwnership(item, owner).catch((error) => toast(error.message, true));
+    });
+    actions.append(button);
+    cell(row, actions);
+    body.append(row);
+  }
+}
+
+async function changeOwnership(item, owner) {
+  if (!policyState) return;
+  const label = owner === "GUARDIAN" ? "交还 Guardian" : "切换为人工接管";
+  if (!window.confirm(`确认将渠道 ${item.channel_id} 的 ${item.field_name} ${label}吗？`)) return;
+  await api(`/channels/${encodeURIComponent(item.channel_id)}/ownership`, {
+    method: "POST",
+    headers: {
+      "If-Match": String(policyState.revision),
+      "Idempotency-Key": `ui:ownership:${item.channel_id}:${item.field_name}:${owner}:${Date.now()}`,
+    },
+    body: { field_name: item.field_name, owner },
+  });
+  toast(`字段归属已更新为 ${owner}`);
+  await loadSpend();
+}
+
+function formatFieldValue(value) {
+  if (value == null) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 async function loadEvents(reset = false) {
@@ -621,6 +748,8 @@ function fillPolicy(policy) {
     else input.value = value ?? "";
   }
   $("#policy-revision").textContent = policy.revision;
+  $("#rollout-stage").textContent = policy.rollout?.stage || "OBSERVE";
+  $("#rollout-advance").disabled = policy.rollout?.stage === "SCHEDULABLE";
   $("#policy-message").textContent = "尚无未保存修改";
 }
 
@@ -672,6 +801,47 @@ async function savePolicy(event) {
   } finally {
     button.disabled = false;
   }
+}
+
+async function advanceRollout() {
+  if (!policyState) return;
+  const current = policyState.rollout?.stage || "OBSERVE";
+  if (!window.confirm(`确认把写回阶段从 ${current} 推进到下一阶段吗？此操作会记录审计事件。`)) return;
+  const button = $("#rollout-advance");
+  button.disabled = true;
+  try {
+    const data = await api("/rollout/advance", {
+      method: "POST",
+      headers: {
+        "If-Match": String(policyState.revision),
+        "Idempotency-Key": `ui:rollout-advance:${policyState.revision}:${Date.now()}`,
+      },
+      body: { confirm: true },
+    });
+    policyState = data.policy;
+    fillPolicy(policyState);
+    toast(`灰度阶段已推进到 ${policyState.rollout.stage}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = policyState?.rollout?.stage === "SCHEDULABLE";
+  }
+}
+
+async function stopRollout() {
+  if (!policyState) return;
+  if (!window.confirm("确认立即停止所有自动写回并回到 OBSERVE 阶段吗？")) return;
+  const data = await api("/rollout/stop", {
+    method: "POST",
+    headers: {
+      "If-Match": String(policyState.revision),
+      "Idempotency-Key": `ui:rollout-stop:${policyState.revision}:${Date.now()}`,
+    },
+    body: {},
+  });
+  policyState = data.policy;
+  fillPolicy(policyState);
+  toast("已停止写回并回到观察阶段");
 }
 
 async function loadConnection() {
@@ -752,6 +922,10 @@ $("#channel-unboost").addEventListener("click", () => {
   boostChannel("unboost").catch((error) => toast(error.message, true));
 });
 $("#policy-form").addEventListener("submit", savePolicy);
+$("#rollout-advance").addEventListener("click", advanceRollout);
+$("#rollout-stop").addEventListener("click", () => {
+  stopRollout().catch((error) => toast(error.message, true));
+});
 $("#policy-form").addEventListener("input", () => {
   $("#policy-message").textContent = "有尚未保存的修改";
 });

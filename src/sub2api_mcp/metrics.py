@@ -19,6 +19,16 @@ class Metrics:
     scheduler_runs: Counter
     guardian_runs: Counter
     guardian_duration: Histogram
+    guardian_shared_snapshots: Counter
+    guardian_snapshot_age_seconds: Gauge
+    guardian_duplicate_observations: Counter
+    guardian_traffic_buckets: Counter
+    guardian_channel_confidence: Gauge
+    guardian_channels_by_freshness: Gauge
+    guardian_write_frozen: Counter
+    guardian_recovery_probe_requests: Counter
+    guardian_recovery_probe_tokens: Counter
+    guardian_field_ownership_changes: Counter
     outbox_backlog: Gauge
     outbox_oldest_age_seconds: Gauge
 
@@ -79,6 +89,65 @@ class Metrics:
                 "sub2api_guardian_run_duration_seconds",
                 "Guardian evaluation duration",
                 ("mode",),
+                registry=registry,
+            ),
+            guardian_shared_snapshots=Counter(
+                "guardian_shared_snapshots_total",
+                "Shared Guardian snapshots by processing result",
+                ("status",),
+                registry=registry,
+            ),
+            guardian_snapshot_age_seconds=Gauge(
+                "guardian_snapshot_age_seconds",
+                "Age of the latest shared Guardian snapshot",
+                registry=registry,
+            ),
+            guardian_duplicate_observations=Counter(
+                "guardian_duplicate_observations_total",
+                "Duplicate Guardian observations discarded",
+                ("source",),
+                registry=registry,
+            ),
+            guardian_traffic_buckets=Counter(
+                "guardian_traffic_buckets_total",
+                "Guardian traffic bucket processing results",
+                ("status",),
+                registry=registry,
+            ),
+            guardian_channel_confidence=Gauge(
+                "guardian_channel_confidence",
+                "Latest evidence confidence for a Guardian channel",
+                ("channel",),
+                registry=registry,
+            ),
+            guardian_channels_by_freshness=Gauge(
+                "guardian_channels_by_freshness",
+                "Guardian channels by evidence freshness state",
+                ("state",),
+                registry=registry,
+            ),
+            guardian_write_frozen=Counter(
+                "guardian_write_frozen_total",
+                "Guardian write recommendations frozen by reason",
+                ("reason",),
+                registry=registry,
+            ),
+            guardian_recovery_probe_requests=Counter(
+                "guardian_recovery_probe_requests_total",
+                "Guardian recovery probe request results",
+                ("result",),
+                registry=registry,
+            ),
+            guardian_recovery_probe_tokens=Counter(
+                "guardian_recovery_probe_tokens_total",
+                "Guardian recovery probe tokens",
+                ("priced",),
+                registry=registry,
+            ),
+            guardian_field_ownership_changes=Counter(
+                "guardian_field_ownership_changes_total",
+                "Guardian field ownership transitions",
+                ("from_owner", "to_owner"),
                 registry=registry,
             ),
             outbox_backlog=Gauge(

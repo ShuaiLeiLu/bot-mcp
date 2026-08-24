@@ -19,6 +19,9 @@ from .contracts import (
     AutoApplyPolicy,
     ChannelPolicyOverride,
     GroupPolicyOverride,
+    GuardianFieldName,
+    GuardianFieldOwner,
+    GuardianFieldOwnership,
     GuardianPolicy,
     GuardianRolloutStage,
     ManualControl,
@@ -72,6 +75,10 @@ class GuardianService:
         self._logger = logging.getLogger("sub2api_mcp.guardian")
         self._metrics = metrics
         self._notification_repository = notification_repository
+        self._last_retention_at: datetime | None = None
+        self._recovery_metric_requests = 0
+        self._recovery_metric_tokens = 0
+        self._recovery_metric_blocked = 0
 
     async def start(self) -> None:
         if self._task is not None:
@@ -100,7 +107,7 @@ class GuardianService:
                 policy = await self.repository.get_policy()
                 if policy.enabled:
                     slot = int(datetime.now(UTC).timestamp()) // policy.scan_interval_seconds
-                    await self.engine.run_once(dry_run=True, idempotency_key=f"scheduled:{slot}")
+                    await self.run_once(dry_run=True, idempotency_key=f"scheduled:{slot}")
             except Exception:
                 self._logger.exception("guardian_scheduled_cycle_failed")
 
@@ -176,6 +183,7 @@ class GuardianService:
                 and int(run_result.get("state_transitions", 0)) > 0
             ):
                 await self._notify_run(result)
+            await self._after_run_operations(result)
             return result
         finally:
             if self._metrics is not None:
@@ -183,6 +191,130 @@ class GuardianService:
                 self._metrics.guardian_duration.labels(mode=mode).observe(
                     time.monotonic() - started
                 )
+
+    async def _after_run_operations(self, run: dict[str, Any]) -> None:
+        try:
+            await self._refresh_v2_metrics(run)
+            await self._check_recovery_budget_alert()
+            now = datetime.now(UTC)
+            if (
+                self._last_retention_at is None
+                or now - self._last_retention_at >= timedelta(hours=1)
+            ):
+                await self.repository.cleanup_retention(now=now, batch_size=500)
+                self._last_retention_at = now
+        except Exception:
+            self._logger.exception(
+                "guardian_post_run_operations_failed",
+                extra={"runId": run.get("run_id")},
+            )
+
+    async def _refresh_v2_metrics(self, run: dict[str, Any]) -> None:
+        if self._metrics is None:
+            return
+        result = cast(dict[str, Any], run.get("result") or {})
+        if result.get("snapshot_id"):
+            self._metrics.guardian_shared_snapshots.labels(status="consumed").inc()
+        elif result.get("no_new_evidence"):
+            self._metrics.guardian_shared_snapshots.labels(status="empty").inc()
+        reason = str(result.get("writeback_blocked_reason") or "")
+        if reason:
+            self._metrics.guardian_write_frozen.labels(reason=reason).inc()
+        duplicates = int(result.get("duplicate_observations") or 0)
+        if duplicates:
+            self._metrics.guardian_duplicate_observations.labels(
+                source="SHARED_MONITOR"
+            ).inc(duplicates)
+        traffic_processed = int(result.get("traffic_buckets_processed") or 0)
+        if traffic_processed:
+            self._metrics.guardian_traffic_buckets.labels(status="fused").inc(
+                traffic_processed
+            )
+        sampling = await self.repository.sampling_status()
+        latest = sampling.get("latest_snapshot_at")
+        if latest:
+            captured = datetime.fromisoformat(str(latest).replace("Z", "+00:00"))
+            if captured.tzinfo is None:
+                captured = captured.replace(tzinfo=UTC)
+            self._metrics.guardian_snapshot_age_seconds.set(
+                max(0, (datetime.now(UTC) - captured).total_seconds())
+            )
+        for state, count in cast(
+            dict[str, int], sampling.get("channels_by_freshness") or {}
+        ).items():
+            self._metrics.guardian_channels_by_freshness.labels(state=state).set(count)
+        channels = await self.repository.list_channels(limit=200)
+        for channel in cast(list[dict[str, Any]], channels.get("items") or []):
+            self._metrics.guardian_channel_confidence.labels(
+                channel=str(channel["channel_id"])
+            ).set(float(channel.get("confidence") or 0))
+        budget = await self.probe_budget()
+        requests = int(budget["request_count"])
+        tokens = int(budget["total_tokens"])
+        blocked = int(budget["blocked_count"])
+        if requests > self._recovery_metric_requests:
+            self._metrics.guardian_recovery_probe_requests.labels(
+                result="completed"
+            ).inc(requests - self._recovery_metric_requests)
+        if blocked > self._recovery_metric_blocked:
+            self._metrics.guardian_recovery_probe_requests.labels(result="blocked").inc(
+                blocked - self._recovery_metric_blocked
+            )
+        if tokens > self._recovery_metric_tokens:
+            self._metrics.guardian_recovery_probe_tokens.labels(priced="unknown").inc(
+                tokens - self._recovery_metric_tokens
+            )
+        self._recovery_metric_requests = requests
+        self._recovery_metric_tokens = tokens
+        self._recovery_metric_blocked = blocked
+
+    async def _check_recovery_budget_alert(self) -> None:
+        policy = await self.repository.get_policy()
+        if not policy.recovery_budget.enabled:
+            return
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        usage = await self.repository.recovery_probe_budget_summary(now.date())
+        request_ratio = float(usage["request_count"]) / policy.recovery_budget.daily_requests
+        token_ratio = float(usage["total_tokens"]) / policy.recovery_budget.daily_tokens
+        ratio = max(request_ratio, token_ratio)
+        if ratio < 0.8:
+            return
+        exhausted = ratio >= 1
+        event_type = (
+            "RECOVERY_BUDGET_EXHAUSTED" if exhausted else "RECOVERY_BUDGET_WARNING"
+        )
+        existing = await self.repository.list_events(limit=20, event_type=event_type)
+        for event in cast(list[dict[str, Any]], existing.get("items") or []):
+            created = datetime.fromisoformat(str(event["created_at"]).replace("Z", "+00:00"))
+            if created.astimezone(ZoneInfo("Asia/Shanghai")).date() == now.date():
+                return
+        await self.repository.add_event(
+            event_type=event_type,
+            severity="ERROR" if exhausted else "WARNING",
+            message=(
+                "Guardian recovery probe budget exhausted"
+                if exhausted
+                else "Guardian recovery probe budget reached 80 percent"
+            ),
+            details={
+                "request_count": usage["request_count"],
+                "daily_requests": policy.recovery_budget.daily_requests,
+                "total_tokens": usage["total_tokens"],
+                "daily_tokens": policy.recovery_budget.daily_tokens,
+            },
+        )
+        await self._notify_control_event(
+            "Guardian 恢复探测预算告警",
+            [
+                f"状态：{'已耗尽' if exhausted else '已达到 80%'}",
+                f"请求：{usage['request_count']} / {policy.recovery_budget.daily_requests}",
+                f"Token：{usage['total_tokens']} / {policy.recovery_budget.daily_tokens}",
+                "目标动作：停止新增恢复探测" if exhausted else "目标动作：继续监控预算",
+                "实际写回：否",
+                "原因：恢复探测硬预算保护",
+            ],
+            coalesce_key=f"guardian:budget:{now.date().isoformat()}",
+        )
 
     async def _notify_run(self, run: dict[str, Any]) -> None:
         if self._notification_repository is None:
@@ -199,23 +331,26 @@ class GuardianService:
             transition_items = cast(
                 list[dict[str, Any]], result.get("transitions") or []
             )
-            transition_lines = [
-                "｜".join(
+            transition_lines: list[str] = []
+            for index, item in enumerate(transition_items[:10], start=1):
+                sources = cast(list[object], item.get("evidence_sources") or [])
+                source_text = "、".join(str(value) for value in sources) or "暂无"
+                age = int(item.get("evidence_age_seconds") or 0)
+                transition_lines.extend(
                     [
-                        str(item.get("name") or item.get("channel_id") or "未知渠道"),
-                        f"{item.get('from', '—')}→{item.get('to', '—')}",
-                        f"健康分 {float(item.get('score', 0)):.1f}",
-                        (
-                            f"延迟 {item['latency_ms']}ms"
-                            if item.get("latency_ms") is not None
-                            else "延迟 --"
-                        ),
-                        f"探测 {item.get('event_type', '—')}",
-                        f"原因 {item.get('reason', '—')}",
+                        "",
+                        f"{index}. {item.get('name') or item.get('channel_id') or '未知渠道'}"
+                        f"（分组 {item.get('group_id') or '未分组'}）",
+                        f"   状态：{item.get('from', '—')} → {item.get('to', '—')}",
+                        f"   健康分：{float(item.get('score', 0)):.1f}｜"
+                        f"置信度：{float(item.get('confidence', 0)) * 100:.0f}%",
+                        f"   证据来源：{source_text}｜证据年龄：{age} 秒",
+                        f"   目标动作：{item.get('action', 'NO_CHANGE')}｜"
+                        f"实际写回：{'是' if item.get('writes_applied') else '否'}",
+                        f"   探测：{item.get('event_type', '—')}｜"
+                        f"原因：{item.get('reason', '—')}",
                     ]
                 )
-                for item in transition_items[:10]
-            ]
             detail_lines = (
                 ["", "渠道变化：", *transition_lines] if transition_lines else []
             )
@@ -234,7 +369,10 @@ class GuardianService:
             )
             await self._notification_repository.enqueue_outbox(
                 OutboxEventType.STATUS_CHANGED,
-                {"notification": notification.model_dump(mode="json", exclude_none=True)},
+                {
+                    "coalesceKey": "guardian:run",
+                    "notification": notification.model_dump(mode="json", exclude_none=True),
+                },
                 targets,
             )
         except Exception:
@@ -242,6 +380,37 @@ class GuardianService:
                 "guardian_notification_enqueue_failed",
                 extra={"runId": run.get("run_id")},
             )
+
+    async def _notify_control_event(
+        self,
+        title: str,
+        lines: list[str],
+        *,
+        coalesce_key: str | None = None,
+    ) -> None:
+        if self._notification_repository is None:
+            return
+        try:
+            targets = [
+                target.delivery_target_id
+                for target in await self._notification_repository.list_delivery_targets()
+                if target.enabled and DeliveryPurpose.STATUS in target.purposes
+            ]
+            if not targets:
+                return
+            notification = NotificationPayload(
+                text="\n".join([title, _format_trigger_time(datetime.now(UTC)), *lines])
+            )
+            await self._notification_repository.enqueue_outbox(
+                OutboxEventType.STATUS_CHANGED,
+                {
+                    "coalesceKey": coalesce_key or f"guardian:control:{title}",
+                    "notification": notification.model_dump(mode="json", exclude_none=True),
+                },
+                targets,
+            )
+        except Exception:
+            self._logger.exception("guardian_control_notification_enqueue_failed")
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
         return await self.repository.cancel_run(run_id)
@@ -462,6 +631,97 @@ class GuardianService:
     async def write_ownership(self) -> dict[str, Any]:
         return {"items": await self.repository.list_field_ownership()}
 
+    async def set_field_ownership(
+        self,
+        *,
+        channel_id: str,
+        field_name: str,
+        owner: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        policy = await self.repository.get_policy()
+        if policy.revision != expected_revision:
+            raise ServiceError(
+                "POLICY_REVISION_CONFLICT",
+                "The Guardian policy was modified by another request",
+            )
+        try:
+            parsed_field = GuardianFieldName(field_name)
+            parsed_owner = GuardianFieldOwner(owner)
+        except ValueError as exc:
+            raise ServiceError(
+                "VALIDATION_ERROR",
+                "field_name or owner is invalid",
+            ) from exc
+        if parsed_owner not in {GuardianFieldOwner.HUMAN, GuardianFieldOwner.GUARDIAN}:
+            raise ServiceError(
+                "VALIDATION_ERROR",
+                "owner must be HUMAN or GUARDIAN",
+            )
+        channel = await self.repository.get_channel(channel_id)
+        if channel is None:
+            raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
+        previous = await self.repository.get_field_ownership(channel_id, parsed_field)
+        details = cast(dict[str, Any], channel.get("details") or {})
+        current_values: dict[GuardianFieldName, object] = {
+            GuardianFieldName.SCHEDULABLE: channel["upstream_schedulable"],
+            GuardianFieldName.PRIORITY: details.get("baseline_priority"),
+            GuardianFieldName.LOAD_FACTOR: details.get("desired_load_factor"),
+        }
+        value = GuardianFieldOwnership(
+            channel_id=channel_id,
+            field_name=parsed_field,
+            owner=parsed_owner,
+            baseline_value=(
+                previous.baseline_value
+                if previous is not None
+                else cast(int | float | bool | str | None, current_values[parsed_field])
+            ),
+            last_guardian_value=(
+                previous.last_guardian_value if previous is not None else None
+            ),
+            last_write_at=previous.last_write_at if previous is not None else None,
+        )
+        await self.repository.save_field_ownership(value)
+        previous_owner = (
+            previous.owner if previous is not None else GuardianFieldOwner.UPSTREAM
+        )
+        if self._metrics is not None and previous_owner is not parsed_owner:
+            self._metrics.guardian_field_ownership_changes.labels(
+                from_owner=previous_owner.value,
+                to_owner=parsed_owner.value,
+            ).inc()
+        await self.repository.add_event(
+            event_type="FIELD_OWNERSHIP_CHANGED",
+            severity="WARNING",
+            channel_id=channel_id,
+            group_id=cast(str | None, channel.get("group_id")),
+            message=(
+                f"{channel.get('name') or channel_id}: {parsed_field.value} ownership "
+                f"changed to {parsed_owner.value}"
+            ),
+            details={
+                "field_name": parsed_field.value,
+                "from_owner": previous_owner.value,
+                "to_owner": parsed_owner.value,
+            },
+        )
+        await self._notify_control_event(
+            "Guardian 字段归属已变更",
+            [
+                f"渠道：{channel.get('name') or channel_id}"
+                f"（分组 {channel.get('group_id') or '未分组'}）",
+                f"字段：{parsed_field.value}",
+                f"归属：{previous_owner.value} → {parsed_owner.value}",
+                "实际写回：否",
+                "原因：管理员显式调整字段控制权",
+            ],
+            coalesce_key=(
+                f"guardian:ownership:{channel_id}:{parsed_field.value}"
+            ),
+        )
+        return value.model_dump(mode="json")
+
     async def probe_budget(self) -> dict[str, Any]:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         policy = await self.repository.get_policy()
@@ -501,6 +761,15 @@ class GuardianService:
             message=f"Guardian rollout advanced to {saved.rollout.stage.value}",
             details={"stage": saved.rollout.stage.value},
         )
+        await self._notify_control_event(
+            "Guardian 灰度阶段已变更",
+            [
+                f"阶段：{current.rollout.stage.value} → {saved.rollout.stage.value}",
+                "实际写回：否（生产写回适配器仍未批准）",
+                "原因：管理员确认推进灰度阶段",
+            ],
+            coalesce_key="guardian:rollout",
+        )
         return {"policy": saved.model_dump(mode="json")}
 
     async def stop_writeback(self, *, expected_revision: int) -> dict[str, Any]:
@@ -517,6 +786,21 @@ class GuardianService:
         saved = await self.repository.update_policy(
             updated,
             expected_revision=expected_revision,
+        )
+        await self.repository.add_event(
+            event_type="ROLLOUT_STOPPED",
+            severity="WARNING",
+            message="Guardian writeback stopped and returned to observe mode",
+            details={"stage": GuardianRolloutStage.OBSERVE.value},
+        )
+        await self._notify_control_event(
+            "Guardian 写回已停止",
+            [
+                f"阶段：{current.rollout.stage.value} → {GuardianRolloutStage.OBSERVE.value}",
+                "实际写回：否",
+                "原因：管理员触发紧急停止",
+            ],
+            coalesce_key="guardian:rollout",
         )
         return {"policy": saved.model_dump(mode="json")}
 

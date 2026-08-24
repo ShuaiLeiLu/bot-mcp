@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -109,3 +109,26 @@ async def test_recovery_probe_ledger_reports_requests_tokens_and_blocks(
         "estimated_cost": pytest.approx(0.001),
         "blocked_count": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_recovery_budget_uses_beijing_calendar_day(tmp_path: Path) -> None:
+    repository = GuardianRepository(tmp_path / "state.db", clock=lambda: NOW)
+    await repository.initialize()
+    occurred_at = datetime(2026, 8, 23, 18, 30, tzinfo=UTC)
+
+    await repository.record_recovery_probe(
+        channel_id="channel-1",
+        model="test-model",
+        input_tokens=1,
+        output_tokens=1,
+        estimated_cost=None,
+        priced=False,
+        occurred_at=occurred_at,
+    )
+
+    beijing_day = await repository.recovery_probe_budget_summary(date(2026, 8, 24))
+    utc_day = await repository.recovery_probe_budget_summary(date(2026, 8, 23))
+
+    assert beijing_day["request_count"] == 1
+    assert utc_day["request_count"] == 0

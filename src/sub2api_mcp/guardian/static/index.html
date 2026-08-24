@@ -73,11 +73,21 @@
             <div class="notice safe"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><div><strong>生产写回已锁定</strong><p>当前只会同步、评分和生成期望动作，不会修改 Sub2API 渠道。</p></div></div>
             <div class="metric-grid five">
               <article class="metric"><span>运行模式</span><strong id="metric-mode">观察</strong><small id="metric-engine">引擎待命</small></article>
+              <article class="metric"><span>采样模式</span><strong id="sampling-mode">共享</strong><small id="sampling-snapshot-age">等待调度快照</small></article>
               <article class="metric"><span>渠道总数</span><strong id="metric-channels">0</strong><small id="metric-groups">0 个分组</small></article>
               <article class="metric"><span>健康渠道</span><strong class="green" id="metric-healthy">0</strong><small>可参与调度</small></article>
               <article class="metric"><span>异常渠道</span><strong class="amber-text" id="metric-risk">0</strong><small>降级 / 熔断 / 保底</small></article>
               <article class="metric"><span>策略版本</span><strong id="metric-revision">1</strong><small>乐观锁 revision</small></article>
             </div>
+            <article class="panel sampling-panel" aria-labelledby="sampling-title">
+              <div class="panel-heading"><div><h2 id="sampling-title">共享采样链路</h2><p>复用现有渠道监控快照；Guardian 正常轮次不额外消耗模型 token。</p></div><span class="badge neutral" id="sampling-health">等待快照</span></div>
+              <dl class="sampling-facts">
+                <div><dt>最新快照</dt><dd id="sampling-latest-at">—</dd></div>
+                <div><dt>待消费</dt><dd id="sampling-pending">0</dd></div>
+                <div><dt>新鲜 / 过期</dt><dd id="sampling-freshness">0 / 0</dd></div>
+                <div><dt>已消费快照</dt><dd id="sampling-consumed">0</dd></div>
+              </dl>
+            </article>
             <div class="dashboard-grid">
               <article class="panel">
                 <div class="panel-heading"><div><h2>健康分布</h2><p>按 Guardian 当前内部状态统计</p></div><button class="text-button" data-page-link="channels" type="button">查看渠道池 →</button></div>
@@ -107,7 +117,7 @@
               <label><span class="sr-only">状态筛选</span><select id="channel-health"><option value="">全部状态</option><option>HEALTHY</option><option>DEGRADED</option><option>RATE_LIMITED</option><option>FUSED</option><option>FORCED_KEEP</option><option>MANUALLY_PAUSED</option><option>EXCLUDED</option></select></label>
               <button class="secondary" id="channel-filter" type="button">应用筛选</button>
             </div>
-            <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>渠道</th><th>分组</th><th>健康分</th><th>延迟</th><th>上游</th><th>Guardian</th><th>预期动作</th><th>人工控制</th><th>操作</th></tr></thead><tbody id="channels-table"></tbody></table></div><p class="empty" id="channels-empty">尚未同步渠道数据</p></article>
+            <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>渠道</th><th>分组</th><th>健康分</th><th>置信度</th><th>证据新鲜度</th><th>延迟</th><th>Guardian</th><th>预期动作</th><th>人工控制</th><th>操作</th></tr></thead><tbody id="channels-table"></tbody></table></div><p class="empty" id="channels-empty">尚未同步渠道数据</p></article>
           </section>
 
           <section class="page" id="page-routing">
@@ -116,9 +126,10 @@
           </section>
 
           <section class="page" id="page-spend">
-            <div class="section-intro"><div><h2>探测费用</h2><p>主动探测 token 与费用估算；真实流量采样不计入探测费用。</p></div></div>
-            <div class="metric-grid three"><article class="metric"><span>主动探测次数</span><strong id="spend-count">0</strong><small>累计账本</small></article><article class="metric"><span>估算费用</span><strong id="spend-cost">$0.0000</strong><small id="spend-currency">USD</small></article><article class="metric"><span>未计价记录</span><strong id="spend-unpriced">0</strong><small>缺少模型单价</small></article></div>
+            <div class="section-intro"><div><h2>探测预算与写回归属</h2><p>恢复探测受请求数和 token 双重硬预算限制；人工接管字段不会被 Guardian 覆盖。</p></div></div>
+            <div class="metric-grid five"><article class="metric"><span>历史探测次数</span><strong id="spend-count">0</strong><small>累计账本</small></article><article class="metric"><span>估算费用</span><strong id="spend-cost">$0.0000</strong><small id="spend-currency">USD</small></article><article class="metric"><span>今日恢复请求</span><strong id="probe-budget-requests">0 / 0</strong><small id="probe-budget-state">预算关闭</small></article><article class="metric"><span>今日恢复 Token</span><strong id="probe-budget-tokens">0 / 0</strong><small>达到上限立即停止</small></article><article class="metric"><span>被预算拦截</span><strong id="probe-budget-blocked">0</strong><small>不会绕过硬限制</small></article></div>
             <div class="notice info"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg></span><div><strong>费用数据如何产生</strong><p>仅当主动探测响应提供 token 用量且模型有单价时才累计估算费用；未知价格会单独标记，不会按 0 元掩盖。</p></div></div>
+            <article class="panel table-panel"><div class="panel-heading"><div><h2>字段写回归属</h2><p>一旦检测到人工修改，该字段进入人工接管；恢复自动管理需要显式操作。</p></div></div><div class="table-scroll"><table><thead><tr><th>渠道</th><th>字段</th><th>归属</th><th>基线值</th><th>Guardian 最近值</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="ownership-table"></tbody></table></div><p class="empty" id="ownership-empty">暂无写回归属记录</p></article>
           </section>
 
           <section class="page" id="page-guide">
@@ -144,19 +155,31 @@
                   <label><span>扫描间隔（秒）</span><input id="p-scan" type="number" min="5" max="3600"></label>
                   <label><span>调度策略</span><select id="p-strategy"><option value="PRICE">价格优先</option><option value="SPEED">速度优先</option><option value="BALANCED">均衡</option></select></label>
                 </div></article>
-                <article class="panel form-panel"><div class="panel-heading"><div><h3>主动探测</h3><p>恢复探测与普通探测独立，最短间隔 30 秒。</p></div></div><div class="form-grid">
-                  <label class="toggle-row"><span><strong>启用主动探测</strong><small>对没有新鲜真实流量的渠道采样</small></span><input id="p-probe-enabled" type="checkbox"></label>
-                  <label class="toggle-row"><span><strong>新鲜流量时跳过</strong><small>降低重复探测成本</small></span><input id="p-probe-skip" type="checkbox"></label>
-                  <label><span>探测间隔（秒）</span><input id="p-probe-interval" type="number" min="30" max="86400" step="30"></label>
-                  <label><span>请求超时（秒）</span><input id="p-probe-timeout" type="number" min="5" max="600"></label>
-                  <label><span>并发数</span><input id="p-probe-concurrency" type="number" min="1" max="32"></label>
-                  <label><span>探测模型</span><input id="p-probe-model" maxlength="200" placeholder="留空使用渠道默认模型"></label>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>共享采样</h3><p>默认消费现有监控快照；普通主动探测保持关闭。</p></div><span class="badge success">零额外正常探测</span></div><div class="form-grid three-cols">
+                  <label><span>采样模式</span><select id="p-sampling-mode"><option value="SHARED">共享快照</option><option value="ACTIVE">主动模式（不推荐）</option></select></label>
+                  <label><span>快照周期（秒）</span><input id="p-snapshot-interval" type="number" min="30" max="3600"></label>
+                  <label><span>聚合桶（秒）</span><input id="p-bucket-seconds" type="number" min="30" max="300"></label>
+                  <label><span>新鲜阈值（秒）</span><input id="p-fresh-seconds" type="number" min="30" max="3600"></label>
+                  <label><span>过期阈值（秒）</span><input id="p-expire-seconds" type="number" min="60" max="86400"></label>
+                  <label><span>预热桶数</span><input id="p-warmup-buckets" type="number" min="1" max="60"></label>
                 </div></article>
-                <article class="panel form-panel locked-panel"><div class="panel-heading"><div><h3>自动写回</h3><p>需要独立的生产放权审批，当前不能通过页面开启。</p></div><span class="badge warning">安全锁定</span></div><div class="form-grid three-cols"><label class="toggle-row locked"><span><strong>调度状态</strong></span><input type="checkbox" disabled></label><label class="toggle-row locked"><span><strong>优先级</strong></span><input type="checkbox" disabled></label><label class="toggle-row locked"><span><strong>负载因子</strong></span><input type="checkbox" disabled></label></div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>恢复探测硬预算</h3><p>只允许 Guardian 自己熔断且能唯一映射账号的渠道进入恢复探测。</p></div></div><div class="form-grid three-cols">
+                  <label class="toggle-row"><span><strong>启用恢复探测</strong><small>默认关闭，需显式开启</small></span><input id="p-recovery-budget-enabled" type="checkbox"></label>
+                  <label><span>每次间隔（秒）</span><input id="p-recovery-budget-interval" type="number" min="30" max="86400"></label>
+                  <label><span>并发数</span><input id="p-recovery-budget-concurrency" type="number" min="1" max="32"></label>
+                  <label><span>单渠道每小时请求</span><input id="p-recovery-channel-hourly" type="number" min="1"></label>
+                  <label><span>每日请求上限</span><input id="p-recovery-daily-requests" type="number" min="1"></label>
+                  <label><span>每日 Token 上限</span><input id="p-recovery-daily-tokens" type="number" min="1"></label>
+                </div></article>
+                <article class="panel form-panel locked-panel"><div class="panel-heading"><div><h3>灰度写回</h3><p>按“观察 → 负载因子 → 优先级 → 可调度状态”逐级放权，每次前进都需要确认。</p></div><span class="badge warning" id="rollout-stage">OBSERVE</span></div><div class="rollout-actions"><button class="secondary danger-outline" id="rollout-stop" type="button">立即停止并回到观察</button><button class="primary" id="rollout-advance" type="button">确认进入下一阶段</button></div><p class="muted rollout-help" id="rollout-help">生产写回适配器未批准时，即使阶段前进也不会产生实际写入。</p></article>
               </div>
 
               <div class="policy-pane" id="policy-system" role="tabpanel" hidden>
                 <article class="panel form-panel"><div class="panel-heading"><div><h3>健康评分</h3><p>精确短期衰减与长期均值组合。</p></div></div><div class="form-grid three-cols"><label><span>短期窗口</span><input id="p-short-window" type="number" min="1" max="1000"></label><label><span>长期窗口</span><input id="p-long-window" type="number" min="1" max="10000"></label><label><span>慢首字阈值（ms）</span><input id="p-slow-ttfb" type="number" min="100" max="600000"></label><label><span>最新样本权重</span><input id="p-latest-weight" type="number" min="0.05" max="1" step="0.01"></label><label><span>短期占比</span><input id="p-short-ratio" type="number" min="0.05" max="1" step="0.01"></label><label><span>历史衰减</span><input id="p-decay" type="number" min="0.01" max="1" step="0.01"></label></div><div class="score-grid"><label>完美<input id="score-perfect" type="number" min="0" max="100"></label><label>慢响应<input id="score-slow" type="number" min="0" max="100"></label><label>未知<input id="score-unknown" type="number" min="0" max="100"></label><label>网关<input id="score-gateway" type="number" min="0" max="100"></label><label>限额<input id="score-quota" type="number" min="0" max="100"></label><label>探测失败<input id="score-probe" type="number" min="0" max="100"></label><label>致命<input id="score-fatal" type="number" min="0" max="100"></label></div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>V2 时间衰减</h3><p>单位均为分钟；参数继承全局策略，分组未覆盖时直接使用。</p></div></div><div class="form-grid"><label><span>短期时间窗（分钟）</span><input id="p-short-minutes" type="number" min="1" max="1440"></label><label><span>长期时间窗（分钟）</span><input id="p-long-minutes" type="number" min="1" max="10080"></label><label><span>短期半衰期（分钟）</span><input id="p-short-half-life" type="number" min="0.01" max="1440" step="0.1"></label><label><span>长期半衰期（分钟）</span><input id="p-long-half-life" type="number" min="0.01" max="10080" step="0.1"></label></div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>置信度写入闸门</h3><p>证据不足或过期时冻结写回，绝不把“没有数据”当成失败。</p></div></div><div class="form-grid three-cols"><label><span>允许降级</span><input id="p-confidence-degrade" type="number" min="0" max="1" step="0.01"></label><label><span>允许调权</span><input id="p-confidence-weight" type="number" min="0" max="1" step="0.01"></label><label><span>允许熔断</span><input id="p-confidence-fuse" type="number" min="0" max="1" step="0.01"></label><label><span>允许恢复</span><input id="p-confidence-recover" type="number" min="0" max="1" step="0.01"></label></div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>历史流量证据</h3><p>仅接收已校验、去重且能唯一归属渠道的请求记录；监控请求会排除。</p></div></div><div class="form-grid"><label class="toggle-row"><span><strong>启用历史流量</strong><small>全局默认；无数据时仍保留共享监控证据</small></span><input id="p-traffic-enabled" type="checkbox"></label><label><span>刷新周期（秒）</span><input id="p-traffic-refresh" type="number" min="10" max="86400"></label><label><span>回看窗口（分钟）</span><input id="p-traffic-lookback" type="number" min="5" max="10080"></label><label><span>每渠道最大样本</span><input id="p-traffic-max-samples" type="number" min="5" max="200"></label></div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>写回抖动保护</h3><p>这些只是全局安全上限；仍需灰度阶段、自动写回字段和适配器三重放权。</p></div></div><div class="form-grid three-cols"><label><span>每轮最多渠道</span><input id="p-write-max-channels" type="number" min="1" max="1000"></label><label><span>负载冷却（秒）</span><input id="p-write-load-cooldown" type="number" min="0" max="86400"></label><label><span>优先级冷却（秒）</span><input id="p-write-priority-cooldown" type="number" min="0" max="86400"></label><label><span>单步最大相对变化</span><input id="p-write-max-step" type="number" min="0.01" max="1" step="0.01"></label><label><span>最小相对变化</span><input id="p-write-min-change" type="number" min="0" max="1" step="0.01"></label><label><span>最小绝对变化</span><input id="p-write-min-absolute" type="number" min="0" max="1000000"></label></div></article>
                 <article class="panel form-panel"><div class="panel-heading"><div><h3>熔断与保底</h3><p>持续失败达到窗口条件后才临时熔断。</p></div></div><div class="form-grid three-cols"><label class="toggle-row"><span><strong>启用熔断</strong></span><input id="p-breaker-enabled" type="checkbox"></label><label><span>HTTP 窗口</span><input id="p-http-window" type="number" min="1"></label><label><span>失败次数</span><input id="p-http-failures" type="number" min="1"></label><label><span>分数低于</span><input id="p-http-score" type="number" min="0" max="100"></label><label><span>每轮最多熔断</span><input id="p-max-fuse" type="number" min="1"></label><label><span>熔断冷却（秒）</span><input id="p-fuse-cooldown" type="number" min="0"></label><label><span>分组最低可用</span><input id="p-min-pool" type="number" min="0"></label><label><span>保底最低分</span><input id="p-min-score" type="number" min="0" max="100"></label><label><span>延迟阈值（ms）</span><input id="p-latency-threshold" type="number" min="100"></label></div></article>
                 <article class="panel form-panel"><div class="panel-heading"><div><h3>降级与恢复</h3><p>降级继续接流量；自动回池要求连续成功和健康保持。</p></div></div><div class="form-grid three-cols"><label><span>降级分数</span><input id="p-degrade-score" type="number" min="0" max="100"></label><label><span>负载倍率</span><input id="p-degrade-ratio" type="number" min="0.05" max="1" step="0.05"></label><label><span>优先级步长</span><input id="p-priority-step" type="number" min="1" max="4"></label><label><span>恢复目标分</span><input id="p-recovery-score" type="number" min="0" max="100"></label><label><span>连续成功次数</span><input id="p-recovery-count" type="number" min="1"></label><label><span>健康保持（秒）</span><input id="p-recovery-hold" type="number" min="0"></label></div></article>
                 <article class="panel form-panel"><div class="panel-heading"><div><h3>权重归一化</h3><p>当前为自有候选算法，黄金样本对拍前不会宣称第三方公式一致。</p></div><span class="badge neutral">候选算法</span></div><div class="form-grid three-cols"><label><span>分组预算</span><input id="p-weight-budget" type="number" min="1"></label><label><span>健康闸门</span><input id="p-weight-gate" type="number" min="0" max="100"></label><label><span>均衡价格占比</span><input id="p-balance-ratio" type="number" min="0" max="1" step="0.05"></label><label><span>变化阈值</span><input id="p-change-threshold" type="number" min="0.01" max="1" step="0.01"></label><label><span>写回冷却（秒）</span><input id="p-weight-cooldown" type="number" min="0"></label><label><span>最大负载因子</span><input id="p-max-load" type="number" min="1"></label></div></article>

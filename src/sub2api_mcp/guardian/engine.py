@@ -198,6 +198,8 @@ class GuardianEngine:
                             "writeback_blocked_reason": "no_new_evidence",
                             "no_new_evidence": True,
                             "snapshot_id": None,
+                            "duplicate_observations": 0,
+                            "traffic_buckets_processed": 0,
                         },
                     )
                 raw_snapshot = cast(dict[str, Any], claimed_snapshot["payload"])
@@ -287,6 +289,8 @@ class GuardianEngine:
         transitions = 0
         transition_summaries: list[dict[str, Any]] = []
         expected_changes = 0
+        duplicate_observations = 0
+        traffic_buckets_processed = 0
 
         for entry in snapshot.entries:
             active_run = await self.repository.get_run(run_id)
@@ -340,7 +344,7 @@ class GuardianEngine:
                         - bucket_timestamp % policy.sampling.bucket_seconds,
                         tz=UTC,
                     )
-                    await self.repository.append_evidence(
+                    inserted = await self.repository.append_evidence(
                         GuardianEvidence(
                             source_event_id=f"{snapshot_id}:{entry.monitor_id}",
                             channel_id=entry.monitor_id,
@@ -354,6 +358,8 @@ class GuardianEngine:
                         ),
                         bucket_at=bucket_at,
                     )
+                    if not inserted:
+                        duplicate_observations += 1
                 else:
                     await self.repository.append_sample(
                         GuardianSample(
@@ -378,6 +384,7 @@ class GuardianEngine:
                     entry.monitor_id,
                     since=since,
                 )
+                traffic_buckets_processed += len(traffic_buckets)
                 fused_buckets = fuse_evidence_buckets(
                     evidence,
                     traffic_buckets,
@@ -559,9 +566,35 @@ class GuardianEngine:
                             "from": current_health.value,
                             "to": decision.health.value,
                             "score": score_value,
+                            "confidence": (
+                                assessment.confidence if assessment is not None else 1.0
+                            ),
+                            "freshness": (
+                                assessment.freshness.value
+                                if assessment is not None
+                                else GuardianFreshness.FRESH.value
+                            ),
+                            "evidence_sources": evidence_sources,
+                            "evidence_age_seconds": (
+                                max(
+                                    0,
+                                    int(
+                                        (now - assessment.last_evidence_at).total_seconds()
+                                    ),
+                                )
+                                if assessment is not None
+                                and assessment.last_evidence_at is not None
+                                else 0
+                            ),
                             "latency_ms": entry.latency_ms,
                             "event_type": event_type.value,
                             "reason": decision.reason,
+                            "action": (
+                                "NO_CHANGE"
+                                if entry.upstream_schedulable == decision.should_schedule
+                                else ("ENABLE" if decision.should_schedule else "DISABLE")
+                            ),
+                            "writes_applied": 0,
                         }
                     )
                 await self.repository.add_event(
@@ -766,6 +799,8 @@ class GuardianEngine:
             "writes_applied": 0,
             "strategy": policy.strategy.value,
             "weight_candidates": weights,
+            "duplicate_observations": duplicate_observations,
+            "traffic_buckets_processed": traffic_buckets_processed,
             "writeback_blocked_reason": (
                 "observe_only" if policy.observe_only else "writeback_adapter_not_enabled"
             ),

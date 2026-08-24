@@ -78,6 +78,11 @@ class GuardianAPI:
                 self.channel_explanation,
                 methods=["GET"],
             ),
+            Route(
+                "/api/guardian/v1/channels/{channel_id:str}/ownership",
+                self.channel_ownership,
+                methods=["POST"],
+            ),
             Route("/api/guardian/v1/rollout/advance", self.advance_rollout, methods=["POST"]),
             Route("/api/guardian/v1/rollout/stop", self.stop_writeback, methods=["POST"]),
             Route("/api/guardian/v1/events", self.events, methods=["GET"]),
@@ -279,6 +284,34 @@ class GuardianAPI:
             lambda: self.service.channel_explanation(channel_id),
         )
 
+    async def channel_ownership(self, request: Request) -> Response:
+        channel_id = request.path_params["channel_id"][:128]
+
+        async def change() -> dict[str, Any]:
+            body = await self._body(request)
+            field_name = body.get("field_name")
+            owner = body.get("owner")
+            if not isinstance(field_name, str) or not isinstance(owner, str):
+                raise ServiceError(
+                    "VALIDATION_ERROR",
+                    "field_name and owner must be strings",
+                )
+            return await self.service.set_field_ownership(
+                channel_id=channel_id,
+                field_name=field_name,
+                owner=owner,
+                expected_revision=self._revision(request),
+            )
+
+        return await self._execute(
+            request,
+            "sub2api:admin",
+            change,
+            mutation="guardian_set_field_ownership",
+            subject=channel_id,
+            require_idempotency=True,
+        )
+
     async def advance_rollout(self, request: Request) -> Response:
         async def advance() -> dict[str, Any]:
             body = await self._body(request)
@@ -292,6 +325,7 @@ class GuardianAPI:
             "sub2api:admin",
             advance,
             mutation="guardian_advance_rollout",
+            require_idempotency=True,
         )
 
     async def stop_writeback(self, request: Request) -> Response:
@@ -306,6 +340,7 @@ class GuardianAPI:
             "sub2api:admin",
             stop,
             mutation="guardian_stop_writeback",
+            require_idempotency=True,
         )
 
     async def events(self, request: Request) -> Response:
@@ -354,6 +389,7 @@ class GuardianAPI:
         *,
         mutation: str | None = None,
         subject: str | None = None,
+        require_idempotency: bool = False,
     ) -> Response:
         request_id = self._request_id(request)
         principal = self._authenticator.authenticate(request.scope.get("headers", []))
@@ -370,7 +406,11 @@ class GuardianAPI:
                 403,
             )
         try:
-            idempotency_key = self._idempotency_key(request, required=False) if mutation else None
+            idempotency_key = (
+                self._idempotency_key(request, required=require_idempotency)
+                if mutation
+                else None
+            )
             with bind_principal(principal, request_id):
                 if mutation and idempotency_key:
                     cached = await self.service.repository.get_idempotent_result(

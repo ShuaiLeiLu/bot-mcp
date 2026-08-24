@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -118,12 +119,26 @@ def test_guardian_ui_uses_the_persisted_light_design_system(tmp_path: Path) -> N
     with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
         page = client.get("/guardian/")
         styles = client.get("/guardian/assets/app.css")
+        script = client.get("/guardian/assets/app.js")
 
     normalized_css = styles.text.casefold()
     assert page.text.count('class="nav-icon"') == 10
     assert "color-scheme: light" in normalized_css
     assert "--color-background: #f8fafc" in normalized_css
     assert "#07101c" not in normalized_css
+    assert 'id="sampling-mode"' in page.text
+    assert 'id="sampling-snapshot-age"' in page.text
+    assert 'id="probe-budget-requests"' in page.text
+    assert 'id="ownership-table"' in page.text
+    assert 'id="rollout-stage"' in page.text
+    assert 'id="rollout-advance"' in page.text
+    assert 'id="rollout-stop"' in page.text
+    assert "/sampling/status" in script.text
+    assert "/probe-budget" in script.text
+    assert "/write-ownership" in script.text
+    assert "/explanation" in script.text
+    assert "/rollout/advance" in script.text
+    assert "/rollout/stop" in script.text
 
 
 def test_policy_revision_and_writeback_safety_gate(tmp_path: Path) -> None:
@@ -301,7 +316,77 @@ async def test_state_transition_enqueues_existing_all_channel_notification(
     assert "触发时间：" in text
     assert "（北京时间）" in text
     assert "健康分" in text
-    assert "探测 PERFECT" in text
+    assert "置信度" in text
+    assert "证据来源" in text
+    assert "证据年龄" in text
+    assert "目标动作" in text
+    assert "探测：PERFECT" in text
+
+
+@pytest.mark.asyncio
+async def test_recovery_budget_threshold_enqueues_one_readable_alert(
+    tmp_path: Path,
+) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+    await runtime.repository.initialize()
+    await runtime.guardian_repository.initialize()
+    await runtime.repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="guardian-budget",
+            bot_uuid="bot-1",
+            target_type=TargetType.GROUP,
+            target_id="group-1",
+            purposes=frozenset({DeliveryPurpose.STATUS}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=False,
+        )
+    )
+    policy = await runtime.guardian_repository.get_policy()
+    await runtime.guardian_repository.update_policy(
+        policy.model_copy(
+            update={
+                "recovery_budget": policy.recovery_budget.model_copy(
+                    update={"enabled": True, "daily_requests": 5}
+                )
+            }
+        ),
+        expected_revision=1,
+    )
+    for index in range(4):
+        await runtime.guardian_repository.record_recovery_probe(
+            channel_id=f"channel-{index}",
+            model="test-model",
+            input_tokens=1,
+            output_tokens=1,
+            estimated_cost=None,
+            priced=False,
+            occurred_at=datetime.now(UTC),
+        )
+
+    await runtime.guardian.run_once(dry_run=True, idempotency_key="budget-alert")
+    first_delivery = await runtime.repository.claim_next_delivery(
+        "guardian-budget-test", lease_seconds=30
+    )
+    assert first_delivery is not None
+    await runtime.repository.mark_delivery_succeeded(first_delivery.delivery_id)
+    delivery = await runtime.repository.claim_next_delivery(
+        "guardian-budget-test", lease_seconds=30
+    )
+    events = await runtime.guardian_repository.list_events(
+        limit=20,
+        event_type="RECOVERY_BUDGET_WARNING",
+    )
+
+    assert delivery is not None
+    text = delivery.payload["notification"]["text"]
+    assert "恢复探测预算告警" in text
+    assert "请求：4 / 5" in text
+    assert "触发时间：" in text
+    assert len(events["items"]) == 1
 
 
 def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> None:
@@ -317,19 +402,24 @@ def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> N
         sampling = client.get("/api/guardian/v1/sampling/status", headers=reader)
         budget = client.get("/api/guardian/v1/probe-budget", headers=reader)
         ownership = client.get("/api/guardian/v1/write-ownership", headers=reader)
-        denied = client.post(
-            "/api/guardian/v1/rollout/advance",
-            headers={**admin, "If-Match": "1"},
-            json={"confirm": False},
-        )
-        advanced = client.post(
+        missing_key = client.post(
             "/api/guardian/v1/rollout/advance",
             headers={**admin, "If-Match": "1"},
             json={"confirm": True},
         )
+        denied = client.post(
+            "/api/guardian/v1/rollout/advance",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "rollout-denied"},
+            json={"confirm": False},
+        )
+        advanced = client.post(
+            "/api/guardian/v1/rollout/advance",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "rollout-advance"},
+            json={"confirm": True},
+        )
         stopped = client.post(
             "/api/guardian/v1/rollout/stop",
-            headers={**admin, "If-Match": "2"},
+            headers={**admin, "If-Match": "2", "Idempotency-Key": "rollout-stop"},
             json={},
         )
 
@@ -339,6 +429,8 @@ def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> N
     assert budget.json()["data"]["enabled"] is False
     assert ownership.status_code == 200
     assert ownership.json()["data"]["items"] == []
+    assert missing_key.status_code == 422
+    assert missing_key.json()["error"]["code"] == "VALIDATION_ERROR"
     assert denied.status_code == 409
     assert denied.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
     assert advanced.status_code == 200
@@ -346,3 +438,45 @@ def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> N
     assert stopped.status_code == 200
     assert stopped.json()["data"]["policy"]["rollout"]["stage"] == "OBSERVE"
     assert stopped.json()["data"]["policy"]["observe_only"] is True
+
+
+def test_field_ownership_can_be_explicitly_transferred_with_audit_guards(
+    tmp_path: Path,
+) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+    admin = {"X-API-Key": "a" * 32}
+    mutation_headers = {
+        **admin,
+        "If-Match": "1",
+        "Idempotency-Key": "ownership-11-schedulable-human",
+    }
+
+    with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
+        client.post(
+            "/api/guardian/v1/runs",
+            headers={**admin, "Idempotency-Key": "ownership-seed"},
+            json={"dry_run": True},
+        )
+        changed = client.post(
+            "/api/guardian/v1/channels/11/ownership",
+            headers=mutation_headers,
+            json={"field_name": "SCHEDULABLE", "owner": "HUMAN"},
+        )
+        replayed = client.post(
+            "/api/guardian/v1/channels/11/ownership",
+            headers=mutation_headers,
+            json={"field_name": "SCHEDULABLE", "owner": "HUMAN"},
+        )
+        ownership = client.get(
+            "/api/guardian/v1/write-ownership",
+            headers={"X-API-Key": "r" * 32},
+        )
+
+    assert changed.status_code == 200
+    assert changed.json()["data"]["owner"] == "HUMAN"
+    assert replayed.headers["x-idempotent-replay"] == "true"
+    assert ownership.json()["data"]["items"][0]["owner"] == "HUMAN"
