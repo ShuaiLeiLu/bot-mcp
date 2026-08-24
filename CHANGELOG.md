@@ -19,6 +19,9 @@
 - Guardian V2 now computes time-decayed short/long health, independent evidence confidence,
   deterministic freshness, and cold-start state; missing evidence preserves the prior health
   score while confidence falls to zero.
+- Guardian runs now persist de-duplicated shared-monitor evidence, fuse matching traffic
+  buckets by source reliability, exclude legacy samples from V2 scoring, and expose each
+  channel's confidence, freshness, evidence age, warm-up count, and source mix.
 
 ### Changed
 

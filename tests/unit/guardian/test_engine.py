@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from sub2api_mcp.contracts import ProbeResult
+from sub2api_mcp.guardian.contracts import GuardianEvidenceBucket, GuardianSampleSource
 from sub2api_mcp.guardian.engine import GuardianEngine
 from sub2api_mcp.guardian.repository import GuardianRepository
 from sub2api_mcp.repository import SqliteRepository
@@ -99,28 +100,78 @@ async def test_shared_snapshot_is_consumed_once_without_guardian_upstream_calls(
     await scheduler_repository.initialize()
     await repository.initialize()
     seed = await FakeOperations().probe()
+    captured_at = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
     await scheduler_repository.publish_guardian_snapshot(
         seed.snapshot,
-        captured_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+        captured_at=captured_at,
     )
     operations = FakeOperations()
-    engine = GuardianEngine(repository, operations)
+    engine = GuardianEngine(repository, operations, clock=lambda: captured_at)
 
     first = await engine.run_once(dry_run=True, idempotency_key="shared-1")
+    channel = await repository.get_channel("11")
     second = await engine.run_once(dry_run=True, idempotency_key="shared-2")
     reopened = GuardianRepository(path)
     await reopened.initialize()
-    third = await GuardianEngine(reopened, operations).run_once(
+    third = await GuardianEngine(reopened, operations, clock=lambda: captured_at).run_once(
         dry_run=True,
         idempotency_key="shared-3",
     )
 
     assert first["result"]["channels_evaluated"] == 2
     assert first["result"]["snapshot_id"]
+    assert channel is not None
+    assert channel["score"] == 100
+    assert channel["confidence"] == pytest.approx(0.46, abs=1e-12)
+    assert channel["freshness_state"] == "FRESH"
+    assert channel["warmup_buckets"] == 1
+    assert channel["details"]["evidence_sources"] == ["SHARED_MONITOR"]
     assert second["result"]["no_new_evidence"] is True
     assert third["result"]["no_new_evidence"] is True
     assert operations.calls == 0
     assert await reopened.pending_input_snapshot_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_shared_monitor_and_traffic_evidence_are_fused_in_one_bucket(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    scheduler_repository = SqliteRepository(path)
+    repository = GuardianRepository(path)
+    await scheduler_repository.initialize()
+    await repository.initialize()
+    captured_at = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+    seed = await FakeOperations().probe()
+    await scheduler_repository.publish_guardian_snapshot(
+        seed.snapshot,
+        captured_at=captured_at,
+    )
+    await repository.upsert_traffic_buckets(
+        [
+            GuardianEvidenceBucket(
+                channel_id="11",
+                bucket_at=captured_at,
+                score=25,
+                quality=1,
+                sources=frozenset({GuardianSampleSource.TRAFFIC}),
+                event_count=5,
+                ttfb_p95_ms=4000,
+            )
+        ]
+    )
+
+    await GuardianEngine(
+        repository,
+        FakeOperations(),
+        clock=lambda: captured_at,
+    ).run_once(dry_run=True, idempotency_key="fused-evidence")
+    channel = await repository.get_channel("11")
+
+    assert channel is not None
+    assert channel["score"] == pytest.approx((100 * 0.85 + 25) / 1.85, abs=1e-12)
+    assert channel["confidence"] == pytest.approx(0.52, abs=1e-12)
+    assert channel["details"]["evidence_sources"] == ["SHARED_MONITOR", "TRAFFIC"]
 
 
 @pytest.mark.asyncio

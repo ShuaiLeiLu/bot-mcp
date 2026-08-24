@@ -37,7 +37,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: published golden example within `1e-9`; stale/no-data behavior.
   - Verify: scoring unit/property tests.
   - Dependencies: Tasks 1 and 5.
-- [ ] Task 7: Integrate durable evidence ingestion into Guardian runs.
+- [x] Task 7: Integrate durable evidence ingestion into Guardian runs.
   - Acceptance: source fusion, persisted confidence, legacy samples blocked from writes.
   - Verify: engine/repository integration tests.
   - Dependencies: Tasks 4–6.

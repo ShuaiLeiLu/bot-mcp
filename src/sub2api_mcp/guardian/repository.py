@@ -15,9 +15,13 @@ from typing import Any, cast
 from ..errors import ServiceError
 from .contracts import (
     ChannelPolicyOverride,
+    GuardianEvidence,
+    GuardianEvidenceBucket,
+    GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
     GuardianSample,
+    GuardianSampleSource,
     ManualControl,
 )
 
@@ -682,6 +686,10 @@ class GuardianRepository:
         manual_control: ManualControl,
         details: dict[str, Any],
         seen_at: datetime,
+        confidence: float = 0,
+        freshness_state: GuardianFreshness = GuardianFreshness.EXPIRED,
+        last_evidence_at: datetime | None = None,
+        warmup_buckets: int = 0,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._upsert_channel_sync,
@@ -697,6 +705,10 @@ class GuardianRepository:
             manual_control,
             details,
             seen_at,
+            confidence,
+            freshness_state,
+            last_evidence_at,
+            warmup_buckets,
         )
 
     def _upsert_channel_sync(
@@ -713,6 +725,10 @@ class GuardianRepository:
         manual_control: ManualControl,
         details: dict[str, Any],
         seen_at: datetime,
+        confidence: float,
+        freshness_state: GuardianFreshness,
+        last_evidence_at: datetime | None,
+        warmup_buckets: int,
     ) -> dict[str, Any]:
         now = _iso(self._clock())
         seen = _iso(seen_at)
@@ -725,14 +741,19 @@ class GuardianRepository:
             connection.execute(
                 "INSERT INTO guardian_channels(channel_id, name, group_id, upstream_status, "
                 "upstream_schedulable, health, score, latency_ms, desired_schedulable, "
-                "manual_control, details_json, first_seen_at, last_seen_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "manual_control, details_json, confidence, freshness_state, "
+                "last_evidence_at, warmup_buckets, first_seen_at, last_seen_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(channel_id) DO UPDATE SET name = excluded.name, "
                 "group_id = excluded.group_id, upstream_status = excluded.upstream_status, "
                 "upstream_schedulable = excluded.upstream_schedulable, health = excluded.health, "
                 "score = excluded.score, latency_ms = excluded.latency_ms, "
                 "desired_schedulable = excluded.desired_schedulable, "
                 "manual_control = excluded.manual_control, details_json = excluded.details_json, "
+                "confidence = excluded.confidence, "
+                "freshness_state = excluded.freshness_state, "
+                "last_evidence_at = excluded.last_evidence_at, "
+                "warmup_buckets = excluded.warmup_buckets, "
                 "last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at",
                 (
                     channel_id,
@@ -746,6 +767,10 @@ class GuardianRepository:
                     int(desired_schedulable),
                     manual_control.value,
                     _json(details),
+                    confidence,
+                    freshness_state.value,
+                    _iso(last_evidence_at) if last_evidence_at is not None else None,
+                    warmup_buckets,
                     first_seen,
                     seen,
                     now,
@@ -955,6 +980,165 @@ class GuardianRepository:
                 "ORDER BY occurred_at DESC, sample_id DESC LIMIT 10000)",
                 (sample.channel_id, sample.channel_id),
             )
+
+    async def append_evidence(
+        self,
+        evidence: GuardianEvidence,
+        *,
+        bucket_at: datetime,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._append_evidence_sync,
+            evidence,
+            bucket_at,
+        )
+
+    def _append_evidence_sync(
+        self,
+        evidence: GuardianEvidence,
+        bucket_at: datetime,
+    ) -> bool:
+        if bucket_at.tzinfo is None:
+            raise ValueError("bucket_at must be timezone-aware")
+        with self._connect() as connection:
+            result = connection.execute(
+                "INSERT OR IGNORE INTO guardian_samples"
+                "(sample_id, channel_id, source, event_type, score, occurred_at, ttfb_ms, "
+                "status_code, message, source_event_id, bucket_at, reliability, ingested_at, "
+                "legacy) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    str(uuid.uuid4()),
+                    evidence.channel_id,
+                    evidence.source.value,
+                    evidence.event_type.value,
+                    evidence.score,
+                    _iso(evidence.occurred_at),
+                    evidence.ttfb_ms,
+                    evidence.status_code,
+                    evidence.message,
+                    evidence.source_event_id,
+                    _iso(bucket_at),
+                    evidence.reliability,
+                    _iso(self._clock()),
+                ),
+            )
+        return result.rowcount == 1
+
+    async def list_evidence(
+        self,
+        channel_id: str,
+        *,
+        since: datetime,
+    ) -> list[GuardianEvidence]:
+        return await asyncio.to_thread(self._list_evidence_sync, channel_id, since)
+
+    def _list_evidence_sync(
+        self,
+        channel_id: str,
+        since: datetime,
+    ) -> list[GuardianEvidence]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_samples WHERE channel_id = ? AND legacy = 0 "
+                "AND occurred_at >= ? ORDER BY occurred_at DESC, sample_id DESC",
+                (channel_id, _iso(since)),
+            ).fetchall()
+        evidence: list[GuardianEvidence] = []
+        for row in rows:
+            occurred_at = _dt(row["occurred_at"])
+            assert occurred_at is not None
+            evidence.append(
+                GuardianEvidence(
+                    source_event_id=row["source_event_id"],
+                    channel_id=row["channel_id"],
+                    source=row["source"],
+                    event_type=row["event_type"],
+                    score=int(row["score"]),
+                    occurred_at=occurred_at,
+                    reliability=float(row["reliability"]),
+                    event_count=1,
+                    ttfb_ms=row["ttfb_ms"],
+                    status_code=row["status_code"],
+                    message=row["message"],
+                )
+            )
+        return evidence
+
+    async def list_traffic_buckets(
+        self,
+        channel_id: str,
+        *,
+        since: datetime,
+    ) -> list[GuardianEvidenceBucket]:
+        return await asyncio.to_thread(
+            self._list_traffic_buckets_sync,
+            channel_id,
+            since,
+        )
+
+    def _list_traffic_buckets_sync(
+        self,
+        channel_id: str,
+        since: datetime,
+    ) -> list[GuardianEvidenceBucket]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_traffic_buckets WHERE channel_id = ? "
+                "AND bucket_at >= ? ORDER BY bucket_at DESC",
+                (channel_id, _iso(since)),
+            ).fetchall()
+        buckets: list[GuardianEvidenceBucket] = []
+        for row in rows:
+            bucket_at = _dt(row["bucket_at"])
+            assert bucket_at is not None
+            event_count = int(row["event_count"])
+            buckets.append(
+                GuardianEvidenceBucket(
+                    channel_id=channel_id,
+                    bucket_at=bucket_at,
+                    score=float(row["score_sum"]) / event_count,
+                    quality=min(1.0, event_count / 5),
+                    sources=frozenset({GuardianSampleSource.TRAFFIC}),
+                    event_count=event_count,
+                    ttfb_p95_ms=row["ttfb_p95_ms"],
+                )
+            )
+        return buckets
+
+    async def upsert_traffic_buckets(
+        self,
+        buckets: list[GuardianEvidenceBucket],
+    ) -> None:
+        await asyncio.to_thread(self._upsert_traffic_buckets_sync, buckets)
+
+    def _upsert_traffic_buckets_sync(
+        self,
+        buckets: list[GuardianEvidenceBucket],
+    ) -> None:
+        now = _iso(self._clock())
+        with self._connect() as connection:
+            for bucket in buckets:
+                if bucket.sources != frozenset({GuardianSampleSource.TRAFFIC}):
+                    raise ValueError("only TRAFFIC buckets can be persisted as traffic")
+                connection.execute(
+                    "INSERT INTO guardian_traffic_buckets"
+                    "(channel_id, bucket_at, event_count, score_sum, ttfb_p95_ms, "
+                    "details_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(channel_id, bucket_at) DO UPDATE SET "
+                    "event_count = excluded.event_count, score_sum = excluded.score_sum, "
+                    "ttfb_p95_ms = excluded.ttfb_p95_ms, "
+                    "details_json = excluded.details_json, updated_at = excluded.updated_at",
+                    (
+                        bucket.channel_id,
+                        _iso(bucket.bucket_at),
+                        bucket.event_count,
+                        bucket.score * bucket.event_count,
+                        bucket.ttfb_p95_ms,
+                        _json({"quality": bucket.quality}),
+                        now,
+                        now,
+                    ),
+                )
 
     async def list_samples(self, channel_id: str, *, limit: int = 60) -> list[GuardianSample]:
         return await asyncio.to_thread(self._list_samples_sync, channel_id, limit)
@@ -1412,6 +1596,10 @@ class GuardianRepository:
             "upstream_schedulable": bool(row["upstream_schedulable"]),
             "health": row["health"],
             "score": float(row["score"]),
+            "confidence": float(row["confidence"]),
+            "freshness_state": row["freshness_state"],
+            "last_evidence_at": row["last_evidence_at"],
+            "warmup_buckets": int(row["warmup_buckets"]),
             "latency_ms": row["latency_ms"],
             "desired_schedulable": bool(row["desired_schedulable"]),
             "manual_control": row["manual_control"],

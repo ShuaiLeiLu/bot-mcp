@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from .contracts import (
+    GuardianEvidence,
     GuardianEvidenceBucket,
     GuardianSampleSource,
     GuardianTrafficObservation,
@@ -97,3 +98,60 @@ def build_traffic_buckets(
         excluded_monitor_count=excluded_monitor_count,
         unattributed_count=unattributed_count,
     )
+
+
+def fuse_evidence_buckets(
+    evidence: list[GuardianEvidence],
+    traffic_buckets: list[GuardianEvidenceBucket],
+    *,
+    bucket_seconds: int = 60,
+) -> list[GuardianEvidenceBucket]:
+    grouped: dict[tuple[str, datetime], list[tuple[float, float, int, int | None]]] = (
+        defaultdict(list)
+    )
+    sources: dict[tuple[str, datetime], set[GuardianSampleSource]] = defaultdict(set)
+
+    by_source: dict[
+        tuple[str, datetime, GuardianSampleSource], list[GuardianEvidence]
+    ] = defaultdict(list)
+    for item in evidence:
+        by_source[
+            (item.channel_id, _bucket_at(item.occurred_at, bucket_seconds), item.source)
+        ].append(item)
+    for (channel_id, bucket_at, source), values in by_source.items():
+        reliability = max(value.reliability for value in values)
+        grouped[(channel_id, bucket_at)].append(
+            (
+                sum(value.score for value in values) / len(values),
+                reliability,
+                sum(value.event_count for value in values),
+                _nearest_rank_p95(
+                    [value.ttfb_ms for value in values if value.ttfb_ms is not None]
+                ),
+            )
+        )
+        sources[(channel_id, bucket_at)].add(source)
+    for bucket in traffic_buckets:
+        grouped[(bucket.channel_id, bucket.bucket_at)].append(
+            (bucket.score, bucket.quality, bucket.event_count, bucket.ttfb_p95_ms)
+        )
+        sources[(bucket.channel_id, bucket.bucket_at)].update(bucket.sources)
+
+    fused: list[GuardianEvidenceBucket] = []
+    for (channel_id, bucket_at), values in sorted(grouped.items()):
+        reliability_total = sum(value[1] for value in values)
+        score = sum(value[0] * value[1] for value in values) / reliability_total
+        quality = 1 - math.prod(1 - value[1] for value in values)
+        latencies = [value[3] for value in values if value[3] is not None]
+        fused.append(
+            GuardianEvidenceBucket(
+                channel_id=channel_id,
+                bucket_at=bucket_at,
+                score=score,
+                quality=quality,
+                sources=frozenset(sources[(channel_id, bucket_at)]),
+                event_count=sum(value[2] for value in values),
+                ttfb_p95_ms=max(latencies) if latencies else None,
+            )
+        )
+    return fused

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -15,6 +16,8 @@ from .contracts import (
     ChannelPolicyOverride,
     GroupPolicyOverride,
     GuardianEventType,
+    GuardianEvidence,
+    GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
     GuardianSample,
@@ -29,7 +32,8 @@ from .contracts import (
     WeightsPolicy,
 )
 from .repository import GuardianRepository
-from .scoring import calculate_health_score
+from .sampling import fuse_evidence_buckets
+from .scoring import calculate_health_score, calculate_health_score_v2
 from .state_machine import decide_channel_state
 from .weights import allocate_weights
 
@@ -132,9 +136,16 @@ def _effective_group_policy(
 
 
 class GuardianEngine:
-    def __init__(self, repository: GuardianRepository, operations: GuardianOperations) -> None:
+    def __init__(
+        self,
+        repository: GuardianRepository,
+        operations: GuardianOperations,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.repository = repository
         self._operations = operations
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def run_once(
         self,
@@ -196,11 +207,20 @@ class GuardianEngine:
                 probe = await self._operations.probe()
                 raw_snapshot = probe.snapshot
             snapshot = UpstreamProbeSnapshot.model_validate(raw_snapshot)
+            snapshot_id = None
+            captured_at = None
+            if claimed_snapshot is not None:
+                snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
+                captured_at = datetime.fromisoformat(
+                    cast(str, claimed_snapshot["captured_at"]).replace("Z", "+00:00")
+                )
             result = await self._evaluate(
                 snapshot,
                 policy,
                 requested_dry_run=dry_run,
                 run_id=run_id,
+                snapshot_id=snapshot_id,
+                captured_at=captured_at,
             )
             cancelled = bool(result.pop("_cancelled"))
             result["no_new_evidence"] = False
@@ -245,8 +265,12 @@ class GuardianEngine:
         *,
         requested_dry_run: bool,
         run_id: str,
+        snapshot_id: str | None = None,
+        captured_at: datetime | None = None,
     ) -> dict[str, Any]:
-        now = datetime.now(UTC)
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("Guardian engine clock must be timezone-aware")
         evaluated: list[
             tuple[
                 UpstreamProbeEntry,
@@ -307,35 +331,104 @@ class GuardianEngine:
             )
             event_type = _event_for(entry, policy)
             if should_monitor:
-                await self.repository.append_sample(
-                    GuardianSample(
-                        channel_id=entry.monitor_id,
-                        event_type=event_type,
-                        score=policy.scoring.event_scores[event_type],
-                        occurred_at=now,
-                        source=GuardianSampleSource.PROBE,
-                        ttfb_ms=entry.latency_ms,
-                        message=entry.status,
+                if snapshot_id is not None and captured_at is not None:
+                    bucket_timestamp = int(captured_at.timestamp())
+                    bucket_at = datetime.fromtimestamp(
+                        bucket_timestamp
+                        - bucket_timestamp % policy.sampling.bucket_seconds,
+                        tz=UTC,
                     )
+                    await self.repository.append_evidence(
+                        GuardianEvidence(
+                            source_event_id=f"{snapshot_id}:{entry.monitor_id}",
+                            channel_id=entry.monitor_id,
+                            source=GuardianSampleSource.SHARED_MONITOR,
+                            event_type=event_type,
+                            score=policy.scoring.event_scores[event_type],
+                            occurred_at=captured_at,
+                            reliability=0.85,
+                            ttfb_ms=entry.latency_ms,
+                            message=entry.status,
+                        ),
+                        bucket_at=bucket_at,
+                    )
+                else:
+                    await self.repository.append_sample(
+                        GuardianSample(
+                            channel_id=entry.monitor_id,
+                            event_type=event_type,
+                            score=policy.scoring.event_scores[event_type],
+                            occurred_at=now,
+                            source=GuardianSampleSource.PROBE,
+                            ttfb_ms=entry.latency_ms,
+                            message=entry.status,
+                        )
+                    )
+            assessment = None
+            evidence: list[GuardianEvidence] = []
+            if snapshot_id is not None:
+                since = now - timedelta(minutes=policy.scoring.long_window_minutes)
+                evidence = await self.repository.list_evidence(
+                    entry.monitor_id,
+                    since=since,
                 )
-            samples = await self.repository.list_samples(
-                entry.monitor_id, limit=policy.scoring.long_window
-            )
-            score = calculate_health_score(
-                samples,
-                short_window=policy.scoring.short_window,
-                long_window=policy.scoring.long_window,
-                latest_weight=policy.scoring.latest_weight,
-                short_ratio=policy.scoring.short_ratio,
-                decay=policy.scoring.decay,
-            )
-            score_value = (
-                score.final_score
-                if samples
-                else float(existing["score"] if existing is not None else 0)
-            )
-            recent_events = tuple(item.event_type for item in samples)
-            recent_ttfb = tuple(item.ttfb_ms for item in samples if item.ttfb_ms is not None)
+                traffic_buckets = await self.repository.list_traffic_buckets(
+                    entry.monitor_id,
+                    since=since,
+                )
+                fused_buckets = fuse_evidence_buckets(
+                    evidence,
+                    traffic_buckets,
+                    bucket_seconds=policy.sampling.bucket_seconds,
+                )
+                assessment = calculate_health_score_v2(
+                    fused_buckets,
+                    now=now,
+                    previous_score=float(existing["score"] if existing is not None else 0),
+                    scoring=policy.scoring,
+                    sampling=policy.sampling,
+                )
+                score_value = assessment.health_score
+                short_score_value = assessment.short_score
+                long_score_value = assessment.long_score
+                sample_count_value = assessment.evidence_bucket_count
+                evidence_sources = sorted(
+                    {
+                        source.value
+                        for bucket in fused_buckets
+                        for source in bucket.sources
+                    }
+                )
+                recent_events = tuple(item.event_type for item in evidence)
+                recent_ttfb = tuple(
+                    item.ttfb_ms for item in evidence if item.ttfb_ms is not None
+                )
+                score = None
+            else:
+                samples = await self.repository.list_samples(
+                    entry.monitor_id, limit=policy.scoring.long_window
+                )
+                score = calculate_health_score(
+                    samples,
+                    short_window=policy.scoring.short_window,
+                    long_window=policy.scoring.long_window,
+                    latest_weight=policy.scoring.latest_weight,
+                    short_ratio=policy.scoring.short_ratio,
+                    decay=policy.scoring.decay,
+                )
+                score_value = (
+                    score.final_score
+                    if samples
+                    else float(existing["score"] if existing is not None else 0)
+                )
+                short_score_value = score.short_score
+                long_score_value = score.long_score
+                sample_count_value = score.sample_count
+                evidence_sources = ["PROBE"]
+                recent_events = tuple(item.event_type for item in samples)
+                recent_ttfb = tuple(
+                    item.ttfb_ms for item in samples if item.ttfb_ms is not None
+                )
             current_health = GuardianHealth(
                 existing["health"] if existing else GuardianHealth.PENDING.value
             )
@@ -359,6 +452,26 @@ class GuardianEngine:
                 fused_until = None
 
             decision = scope_decision
+            if decision is None and assessment is not None and assessment.warming_up:
+                decision = ChannelDecision(
+                    health=GuardianHealth.WARMING_UP,
+                    should_schedule=entry.upstream_schedulable,
+                    should_probe=False,
+                    can_auto_recover=False,
+                    reason="warming_up",
+                )
+            if (
+                decision is None
+                and assessment is not None
+                and assessment.freshness is not GuardianFreshness.FRESH
+            ):
+                decision = ChannelDecision(
+                    health=GuardianHealth.STALE,
+                    should_schedule=entry.upstream_schedulable,
+                    should_probe=False,
+                    can_auto_recover=False,
+                    reason=f"evidence_{assessment.freshness.value.casefold()}",
+                )
             if decision is None:
                 decision = decide_channel_state(
                     ChannelDecisionInput(
@@ -464,9 +577,14 @@ class GuardianEngine:
                 manual_control=manual_control,
                 details={
                     "reason": decision.reason,
-                    "short_score": score.short_score,
-                    "long_score": score.long_score,
-                    "sample_count": score.sample_count,
+                    "short_score": short_score_value,
+                    "long_score": long_score_value,
+                    "sample_count": sample_count_value,
+                    "confidence": assessment.confidence if assessment is not None else 1.0,
+                    "freshness_state": (
+                        assessment.freshness.value if assessment is not None else "FRESH"
+                    ),
+                    "evidence_sources": evidence_sources,
                     "event_type": event_type.value,
                     "group_name": entry.group_name,
                     "available_count": entry.available_count,
@@ -497,6 +615,16 @@ class GuardianEngine:
                     "boost_active": boost_active,
                 },
                 seen_at=now,
+                confidence=assessment.confidence if assessment is not None else 1.0,
+                freshness_state=(
+                    assessment.freshness if assessment is not None else GuardianFreshness.FRESH
+                ),
+                last_evidence_at=(
+                    assessment.last_evidence_at if assessment is not None else now
+                ),
+                warmup_buckets=(
+                    assessment.evidence_bucket_count if assessment is not None else 0
+                ),
             )
             evaluated.append((entry, score_value, decision.health, channel_override))
 
