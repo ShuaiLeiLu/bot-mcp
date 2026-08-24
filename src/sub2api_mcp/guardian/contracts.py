@@ -100,6 +100,10 @@ class ScoringPolicy(StrictModel):
     latest_weight: float = Field(default=0.5, ge=0.05, le=1)
     short_ratio: float = Field(default=0.7, ge=0.05, le=1)
     decay: float = Field(default=0.5, gt=0, le=1)
+    short_window_minutes: int = Field(default=10, ge=1, le=1440)
+    long_window_minutes: int = Field(default=120, ge=1, le=10080)
+    short_half_life_minutes: float = Field(default=3, gt=0, le=1440)
+    long_half_life_minutes: float = Field(default=30, gt=0, le=10080)
     slow_ttfb_ms: int = Field(default=5000, ge=100, le=600000)
     event_scores: dict[GuardianEventType, int] = Field(
         default_factory=lambda: {
@@ -133,6 +137,8 @@ class ScoringPolicy(StrictModel):
     def validate_windows(self) -> ScoringPolicy:
         if self.short_window > self.long_window:
             raise ValueError("short_window cannot exceed long_window")
+        if self.short_window_minutes > self.long_window_minutes:
+            raise ValueError("short_window_minutes cannot exceed long_window_minutes")
         if any(not 0 <= score <= 100 for score in self.event_scores.values()):
             raise ValueError("event scores must be between 0 and 100")
         return self
@@ -393,6 +399,7 @@ class GuardianScoreV2(StrictModel):
     freshness: GuardianFreshness
     evidence_bucket_count: int = Field(ge=0)
     last_evidence_at: datetime | None = None
+    warming_up: bool = False
 
     @model_validator(mode="after")
     def validate_evidence_time(self) -> GuardianScoreV2:

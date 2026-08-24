@@ -6,10 +6,18 @@ import pytest
 
 from sub2api_mcp.guardian.contracts import (
     GuardianEventType,
+    GuardianEvidenceBucket,
+    GuardianFreshness,
     GuardianSample,
     GuardianSampleSource,
+    SamplingPolicy,
+    ScoringPolicy,
 )
-from sub2api_mcp.guardian.scoring import calculate_health_score, calculate_short_score
+from sub2api_mcp.guardian.scoring import (
+    calculate_health_score,
+    calculate_health_score_v2,
+    calculate_short_score,
+)
 
 
 def _sample(score: int, index: int) -> GuardianSample:
@@ -56,3 +64,88 @@ def test_empty_samples_have_zero_score_without_nan() -> None:
     assert result.final_score == 0
     assert result.short_score == 0
     assert result.long_score == 0
+
+
+def _bucket(
+    score: float,
+    quality: float,
+    age_minutes: int,
+    *,
+    now: datetime,
+) -> GuardianEvidenceBucket:
+    return GuardianEvidenceBucket(
+        channel_id="channel-1",
+        bucket_at=now - timedelta(minutes=age_minutes),
+        score=score,
+        quality=quality,
+        sources=frozenset({GuardianSampleSource.SHARED_MONITOR}),
+        event_count=1,
+    )
+
+
+def test_v2_score_matches_the_published_golden_example() -> None:
+    now = datetime(2026, 8, 24, 2, 2, tzinfo=UTC)
+    result = calculate_health_score_v2(
+        [
+            _bucket(100, 0.85, 0, now=now),
+            _bucket(65, 1.0, 1, now=now),
+            _bucket(25, 0.85, 2, now=now),
+        ],
+        now=now,
+    )
+
+    assert result.short_score == pytest.approx(68.82317750686934, abs=1e-12)
+    assert result.long_score == pytest.approx(63.971259697525845, abs=1e-12)
+    assert result.health_score == pytest.approx(67.36760216406628, abs=1e-12)
+    assert result.confidence == pytest.approx(0.7196488001243996, abs=1e-12)
+    assert result.freshness is GuardianFreshness.FRESH
+    assert result.warming_up is True
+
+
+def test_v2_no_evidence_preserves_previous_score_but_removes_confidence() -> None:
+    result = calculate_health_score_v2(
+        [],
+        now=datetime(2026, 8, 24, 2, 2, tzinfo=UTC),
+        previous_score=91.5,
+    )
+
+    assert result.short_score == 91.5
+    assert result.long_score == 91.5
+    assert result.health_score == 91.5
+    assert result.confidence == 0
+    assert result.freshness is GuardianFreshness.EXPIRED
+    assert result.evidence_bucket_count == 0
+    assert result.warming_up is True
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "expected"),
+    [
+        (180, GuardianFreshness.FRESH),
+        (181, GuardianFreshness.STALE),
+        (600, GuardianFreshness.STALE),
+        (601, GuardianFreshness.EXPIRED),
+    ],
+)
+def test_v2_freshness_boundaries_are_deterministic(
+    age_seconds: int,
+    expected: GuardianFreshness,
+) -> None:
+    now = datetime(2026, 8, 24, 2, 2, tzinfo=UTC)
+    bucket = GuardianEvidenceBucket(
+        channel_id="channel-1",
+        bucket_at=now - timedelta(seconds=age_seconds),
+        score=100,
+        quality=0.85,
+        sources=frozenset({GuardianSampleSource.SHARED_MONITOR}),
+        event_count=1,
+    )
+
+    result = calculate_health_score_v2(
+        [bucket],
+        now=now,
+        scoring=ScoringPolicy(),
+        sampling=SamplingPolicy(),
+    )
+
+    assert result.freshness is expected

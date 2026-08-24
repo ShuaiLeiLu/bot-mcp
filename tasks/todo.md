@@ -33,7 +33,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: monitor filtering, request de-dup, volume-neutral time weighting.
   - Verify: sampling unit/property tests.
   - Dependencies: Task 1.
-- [ ] Task 6: Implement V2 health, confidence, freshness, and cold start.
+- [x] Task 6: Implement V2 health, confidence, freshness, and cold start.
   - Acceptance: published golden example within `1e-9`; stale/no-data behavior.
   - Verify: scoring unit/property tests.
   - Dependencies: Tasks 1 and 5.

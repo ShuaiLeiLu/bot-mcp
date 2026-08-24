@@ -16,6 +16,9 @@
 - Guardian V2 traffic sampling now filters monitor requests, rejects conflicting duplicate
   request hashes, keeps unattributed evidence out of decisions, and aggregates traffic into
   deterministic minute buckets with volume-neutral cross-time weight.
+- Guardian V2 now computes time-decayed short/long health, independent evidence confidence,
+  deterministic freshness, and cold-start state; missing evidence preserves the prior health
+  score while confidence falls to zero.
 
 ### Changed
 
