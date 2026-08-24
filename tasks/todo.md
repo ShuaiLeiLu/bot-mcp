@@ -57,7 +57,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: budget/cap invariants, missing-data penalty, cooldown/step behavior.
   - Verify: weight property and golden tests.
   - Dependencies: Tasks 6–7.
-- [ ] Task 10: Add field ownership and disabled dry-run writeback boundary.
+- [x] Task 10: Add field ownership and disabled dry-run writeback boundary.
   - Acceptance: human takeover, idempotency, observe-only non-mutation.
   - Verify: ownership/writeback tests.
   - Dependencies: Tasks 8–9.
@@ -65,7 +65,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
 ### Checkpoint C
 
 - [ ] Dry-run recommendation report reviewed for a representative group.
-- [ ] Production writeback adapter remains disabled.
+- [x] Production writeback adapter remains disabled.
 
 ## Phase 4 — Recovery, interfaces, and operations
 

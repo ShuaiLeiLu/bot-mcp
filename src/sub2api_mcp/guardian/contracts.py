@@ -61,6 +61,14 @@ class GuardianFieldOwner(StrEnum):
     GUARDIAN = "GUARDIAN"
 
 
+class GuardianWriteOutcome(StrEnum):
+    DRY_RUN = "DRY_RUN"
+    NO_CHANGE = "NO_CHANGE"
+    BLOCKED = "BLOCKED"
+    APPLIED = "APPLIED"
+    FAILED = "FAILED"
+
+
 class GuardianHealth(StrEnum):
     PENDING = "PENDING"
     WARMING_UP = "WARMING_UP"
@@ -424,6 +432,24 @@ class GuardianFieldOwnership(StrictModel):
         if self.last_write_at is not None and self.last_write_at.tzinfo is None:
             raise ValueError("last_write_at must be timezone-aware")
         return self
+
+
+class GuardianWriteProposal(StrictModel):
+    channel_id: str = Field(min_length=1, max_length=128)
+    field_name: GuardianFieldName
+    current_value: int | float | bool | str
+    desired_value: int | float | bool | str
+    reason: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class GuardianWriteDecision(StrictModel):
+    channel_id: str
+    field_name: GuardianFieldName
+    outcome: GuardianWriteOutcome
+    current_value: int | float | bool | str
+    desired_value: int | float | bool | str
+    reason: str
 
 
 class ClassifiedSample(StrictModel):

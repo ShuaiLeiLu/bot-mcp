@@ -17,6 +17,8 @@ from .contracts import (
     ChannelPolicyOverride,
     GuardianEvidence,
     GuardianEvidenceBucket,
+    GuardianFieldName,
+    GuardianFieldOwnership,
     GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
@@ -436,6 +438,121 @@ class GuardianRepository:
         data = cast(dict[str, Any], json.loads(row["policy_json"]))
         data["revision"] = int(row["revision"])
         return GuardianPolicy.model_validate(data)
+
+    async def get_field_ownership(
+        self,
+        channel_id: str,
+        field_name: GuardianFieldName,
+    ) -> GuardianFieldOwnership | None:
+        return await asyncio.to_thread(
+            self._get_field_ownership_sync,
+            channel_id,
+            field_name,
+        )
+
+    def _get_field_ownership_sync(
+        self,
+        channel_id: str,
+        field_name: GuardianFieldName,
+    ) -> GuardianFieldOwnership | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM guardian_field_ownership "
+                "WHERE channel_id = ? AND field_name = ?",
+                (channel_id, field_name.value),
+            ).fetchone()
+        if row is None:
+            return None
+        return GuardianFieldOwnership(
+            channel_id=row["channel_id"],
+            field_name=row["field_name"],
+            owner=row["owner"],
+            baseline_value=(json.loads(row["baseline_json"]) if row["baseline_json"] else None),
+            last_guardian_value=(
+                json.loads(row["last_guardian_json"])
+                if row["last_guardian_json"]
+                else None
+            ),
+            last_write_at=_dt(row["last_write_at"]),
+        )
+
+    async def save_field_ownership(self, value: GuardianFieldOwnership) -> None:
+        await asyncio.to_thread(self._save_field_ownership_sync, value)
+
+    def _save_field_ownership_sync(self, value: GuardianFieldOwnership) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guardian_field_ownership"
+                "(channel_id, field_name, owner, baseline_json, last_guardian_json, "
+                "last_write_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel_id, field_name) DO UPDATE SET "
+                "owner = excluded.owner, baseline_json = excluded.baseline_json, "
+                "last_guardian_json = excluded.last_guardian_json, "
+                "last_write_at = excluded.last_write_at, updated_at = excluded.updated_at",
+                (
+                    value.channel_id,
+                    value.field_name.value,
+                    value.owner.value,
+                    _json(value.baseline_value),
+                    (
+                        _json(value.last_guardian_value)
+                        if value.last_guardian_value is not None
+                        else None
+                    ),
+                    _iso(value.last_write_at) if value.last_write_at is not None else None,
+                    _iso(self._clock()),
+                ),
+            )
+
+    async def add_write_audit(
+        self,
+        *,
+        channel_id: str,
+        action: str,
+        before: object,
+        after: object,
+        reason: str,
+        idempotency_key: str,
+        outcome: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._add_write_audit_sync,
+            channel_id,
+            action,
+            before,
+            after,
+            reason,
+            idempotency_key,
+            outcome,
+        )
+
+    def _add_write_audit_sync(
+        self,
+        channel_id: str,
+        action: str,
+        before: object,
+        after: object,
+        reason: str,
+        idempotency_key: str,
+        outcome: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO guardian_write_audits"
+                "(audit_id, channel_id, action, before_json, after_json, reason, "
+                "idempotency_key, outcome, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    channel_id,
+                    action[:64],
+                    _json(before),
+                    _json(after),
+                    reason[:500],
+                    idempotency_key,
+                    outcome[:32],
+                    _iso(self._clock()),
+                ),
+            )
 
     async def pending_input_snapshot_count(self) -> int:
         return await asyncio.to_thread(self._pending_input_snapshot_count_sync)

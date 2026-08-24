@@ -28,6 +28,9 @@
 - Guardian V2 weight recommendations now use dimensionless price/speed signals, reserve low-
   confidence channel budget, penalize missing signals, enforce integer caps and explicit
   unallocated budget, bound load changes, and keep priority tied only to health tiers.
+- Guardian V2 now tracks per-field baselines and ownership, detects sticky human takeover,
+  audits every decision, replays idempotent results, and blocks all real writes unless the
+  rollout stage, field approval, observe-mode gate, and an explicit writer all permit them.
 
 ### Changed
 
