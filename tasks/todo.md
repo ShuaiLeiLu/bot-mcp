@@ -53,7 +53,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: stale/low-confidence freeze; fatal confirmation; manual states immutable.
   - Verify: state-machine matrix/property tests.
   - Dependencies: Tasks 6–7.
-- [ ] Task 9: Implement V2 weights and priority recommendations.
+- [x] Task 9: Implement V2 weights and priority recommendations.
   - Acceptance: budget/cap invariants, missing-data penalty, cooldown/step behavior.
   - Verify: weight property and golden tests.
   - Dependencies: Tasks 6–7.

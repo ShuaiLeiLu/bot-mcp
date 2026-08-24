@@ -25,6 +25,9 @@
 - Guardian state decisions now freeze on stale or low-confidence evidence, require trusted
   fatal confirmation, prohibit probes or recovery for human-controlled channels, and allow
   recovery only for Guardian-owned fuses meeting the recovery confidence gate.
+- Guardian V2 weight recommendations now use dimensionless price/speed signals, reserve low-
+  confidence channel budget, penalize missing signals, enforce integer caps and explicit
+  unallocated budget, bound load changes, and keep priority tied only to health tiers.
 
 ### Changed
 

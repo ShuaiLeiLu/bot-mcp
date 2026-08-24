@@ -197,6 +197,7 @@ class WeightsPolicy(StrictModel):
     max_load_factor: int = Field(default=100, ge=1, le=100000)
     price_exp: float = Field(default=1, ge=0.1, le=10)
     speed_exp: float = Field(default=1, ge=0.1, le=10)
+    confidence_exp: float = Field(default=1, ge=0.1, le=10)
 
     @model_validator(mode="after")
     def validate_load_bounds(self) -> WeightsPolicy:
@@ -469,6 +470,15 @@ class WeightCandidate(StrictModel):
     effective_rate: float | None = Field(default=None, ge=0)
     ttfb_p95_ms: int | None = Field(default=None, ge=0)
     schedule_multiplier: float = Field(default=1, ge=0, le=10_000)
+    confidence: float = Field(default=1, ge=0, le=1)
+    current_load_factor: int = Field(default=1, ge=0, le=1_000_000)
+
+
+class WeightAllocation(StrictModel):
+    target_load_factors: dict[str, int]
+    reserved_budget: int = Field(ge=0)
+    unallocated_budget: int = Field(ge=0)
+    blocked_reason: str | None = None
 
 
 class UpstreamProbeEntry(StrictModel):

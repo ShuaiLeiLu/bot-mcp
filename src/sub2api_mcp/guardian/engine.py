@@ -35,7 +35,7 @@ from .repository import GuardianRepository
 from .sampling import fuse_evidence_buckets
 from .scoring import calculate_health_score, calculate_health_score_v2
 from .state_machine import decide_channel_state
-from .weights import allocate_weights
+from .weights import allocate_weights_v2, recommend_priority
 
 
 class GuardianOperations(Protocol):
@@ -277,6 +277,8 @@ class GuardianEngine:
                 float,
                 GuardianHealth,
                 ChannelPolicyOverride | None,
+                float,
+                GuardianFreshness,
             ]
         ] = []
         group_overrides = await self.repository.list_group_overrides()
@@ -597,6 +599,26 @@ class GuardianEngine:
                 and channel_override.boost_until is not None
                 and channel_override.boost_until > now
             )
+            confidence_value = assessment.confidence if assessment is not None else 1.0
+            freshness_value = (
+                assessment.freshness if assessment is not None else GuardianFreshness.FRESH
+            )
+            baseline_priority = (
+                channel_override.priority
+                if channel_override is not None and channel_override.priority is not None
+                else int(existing_details.get("baseline_priority") or 1)
+            )
+            desired_priority = (
+                1
+                if boost_active
+                else recommend_priority(
+                    baseline=baseline_priority,
+                    score=score_value,
+                    confidence=confidence_value,
+                    freshness=freshness_value,
+                    forced_keep=decision.health is GuardianHealth.FORCED_KEEP,
+                )
+            )
             await self.repository.upsert_channel(
                 channel_id=entry.monitor_id,
                 name=entry.name,
@@ -631,11 +653,8 @@ class GuardianEngine:
                         healthy_since.isoformat() if healthy_since is not None else None
                     ),
                     "fused_until": (fused_until.isoformat() if fused_until is not None else None),
-                    "desired_priority": (
-                        1
-                        if boost_active
-                        else (channel_override.priority if channel_override is not None else None)
-                    ),
+                    "baseline_priority": baseline_priority,
+                    "desired_priority": desired_priority,
                     "desired_load_factor": self._desired_load_factor(
                         channel_override, boost_active
                     ),
@@ -648,10 +667,8 @@ class GuardianEngine:
                     "boost_active": boost_active,
                 },
                 seen_at=now,
-                confidence=assessment.confidence if assessment is not None else 1.0,
-                freshness_state=(
-                    assessment.freshness if assessment is not None else GuardianFreshness.FRESH
-                ),
+                confidence=confidence_value,
+                freshness_state=freshness_value,
                 last_evidence_at=(
                     assessment.last_evidence_at if assessment is not None else now
                 ),
@@ -659,10 +676,26 @@ class GuardianEngine:
                     assessment.evidence_bucket_count if assessment is not None else 0
                 ),
             )
-            evaluated.append((entry, score_value, decision.health, channel_override))
+            evaluated.append(
+                (
+                    entry,
+                    score_value,
+                    decision.health,
+                    channel_override,
+                    confidence_value,
+                    freshness_value,
+                )
+            )
 
         group_candidates: dict[str, list[WeightCandidate]] = defaultdict(list)
-        for entry, score_value, health, channel_override in evaluated:
+        for (
+            entry,
+            score_value,
+            health,
+            channel_override,
+            confidence_value,
+            _freshness_value,
+        ) in evaluated:
             if health not in {
                 GuardianHealth.FUSED,
                 GuardianHealth.EXCLUDED,
@@ -681,23 +714,46 @@ class GuardianEngine:
                             and channel_override.schedule_multiplier is not None
                             else 1
                         ),
+                        confidence=confidence_value,
+                        current_load_factor=(
+                            channel_override.load_factor
+                            if channel_override is not None
+                            and channel_override.load_factor is not None
+                            else 1
+                        ),
                     )
                 )
         weights: dict[str, dict[str, float]] = {}
         for group_id, candidates in group_candidates.items():
             strategy, weights_policy = group_weight_settings[group_id]
-            weights[group_id] = (
-                allocate_weights(
+            allocation = (
+                allocate_weights_v2(
                     candidates,
                     strategy=strategy,
                     policy=weights_policy,
+                    confidence_floor=policy.confidence.weight_min,
                 )
                 if weights_policy.enabled
+                else None
+            )
+            weights[group_id] = (
+                {
+                    channel_id: float(value)
+                    for channel_id, value in allocation.target_load_factors.items()
+                }
+                if allocation is not None
                 else {candidate.channel_id: 0.0 for candidate in candidates}
             )
             for channel_id, candidate_weight in weights[group_id].items():
                 await self.repository.merge_channel_details(
-                    channel_id, {"candidate_weight": candidate_weight}
+                    channel_id,
+                    {
+                        "candidate_weight": candidate_weight,
+                        "desired_load_factor": int(candidate_weight),
+                        "unallocated_group_budget": (
+                            allocation.unallocated_budget if allocation is not None else 0
+                        ),
+                    },
                 )
         return {
             "_cancelled": False,
