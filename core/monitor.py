@@ -757,7 +757,6 @@ class Sub2APIClient:
         if (
             candidate.bucket != "error"
             or candidate.status != "error"
-            or not candidate.schedulable
         ):
             return RecoveryOutcome(
                 candidate.account_id,
@@ -855,6 +854,16 @@ class Sub2APIClient:
                     payload={"status": "active"},
                 )
                 self._require_success_envelope(activated)
+            except (MonitorDataError, MonitorRequestError):
+                pass
+        if not candidate.schedulable and may_write():
+            try:
+                scheduled = self._request_json(
+                    f"{account_url}/schedulable",
+                    method="POST",
+                    payload={"schedulable": True},
+                )
+                self._require_success_envelope(scheduled)
             except (MonitorDataError, MonitorRequestError):
                 pass
         try:

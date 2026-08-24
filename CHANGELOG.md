@@ -40,6 +40,8 @@
 
 ### Changed
 
+- Error accounts whose dispatch switch is off are now probed; a successful probe restores both
+  account status and dispatch, while non-error paused accounts remain excluded.
 - Equal recovery-window start and end times now represent a true 24-hour window.
 - Status reports and Guardian transition notifications now show their trigger time in the
   Asia/Shanghai timezone.

@@ -293,7 +293,7 @@ def parse_recovery_account_page(
             "temp_unschedulable_until",
         ):
             _future_timestamp(item.get(field), field, now)
-        if status != "error" or not schedulable:
+        if status != "error":
             continue
         bucket = "error"
 

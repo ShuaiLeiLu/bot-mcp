@@ -234,9 +234,12 @@ RUNNING -> INTERRUPTED (service restart without resumable upstream job ID)
 - Snapshot advancement occurs only after the internal delivery worker records a successful LangBot send response for every required target.
 - Quiet hours defer outbox delivery while probes, recovery, and maintenance continue.
 - Scheduled recovery is opt-in and runs only inside the configured Asia/Shanghai daily window.
-- Recovery tests only accounts in `error` state whose scheduling switch is already enabled.
+- Recovery tests every account in `error` state, including accounts whose scheduling switch was
+  turned off as part of entering the error state.
 - Manually paused, disabled, inactive, expired, rate-limited, overloaded, or temporarily unschedulable accounts are excluded before every test and write.
-- Recovery may restore error state to active only after explicit test success and read-back verification; it never turns scheduling back on.
+- Recovery may restore error state and its scheduling switch only after explicit test success and
+  read-back verification. Non-error paused, disabled, inactive, expired, rate-limited,
+  overloaded, or temporarily unschedulable accounts remain excluded.
 - Maintenance mutations are opt-in, capped, audited, and fail closed when no administrator delivery target is configured.
 - The v0.1.0 service enforces a single active scheduler process using a database lease and refuses to run a second scheduler against the same database.
 

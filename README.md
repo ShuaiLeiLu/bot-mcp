@@ -12,7 +12,8 @@ server, domain, public port, or reverse proxy is assumed.
 
 - All Sub2API channel/provider values are treated as data; no provider allowlist.
 - Channel/group-account probing with latency-only change suppression.
-- Scheduled error-account recovery that never enables a manually paused account.
+- Scheduled error-account recovery that restores dispatch after a successful error probe while
+  leaving non-error paused accounts untouched.
 - Unhealthy-channel and recent-log account protection using the existing rules.
 - Durable video jobs with user-selected length, steps, and resolution.
 - Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
