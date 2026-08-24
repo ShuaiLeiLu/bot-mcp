@@ -473,6 +473,23 @@ class GuardianEngine:
                     reason=f"evidence_{assessment.freshness.value.casefold()}",
                 )
             if decision is None:
+                fatal_confirmed = any(
+                    item.event_type is GuardianEventType.FATAL
+                    and item.source
+                    in {
+                        GuardianSampleSource.RECOVERY_PROBE,
+                        GuardianSampleSource.MANUAL_PROBE,
+                    }
+                    for item in evidence[:1]
+                ) or (
+                    sum(
+                        item.event_type is GuardianEventType.FATAL
+                        and item.source is GuardianSampleSource.TRAFFIC
+                        and (now - item.occurred_at).total_seconds() <= 300
+                        for item in evidence
+                    )
+                    >= 2
+                )
                 decision = decide_channel_state(
                     ChannelDecisionInput(
                         channel_id=entry.monitor_id,
@@ -480,6 +497,21 @@ class GuardianEngine:
                         recent_events=recent_events,
                         recent_ttfb_ms=recent_ttfb,
                         current_health=current_health,
+                        confidence=(
+                            assessment.confidence if assessment is not None else 1.0
+                        ),
+                        freshness=(
+                            assessment.freshness
+                            if assessment is not None
+                            else GuardianFreshness.FRESH
+                        ),
+                        warming_up=(
+                            assessment.warming_up if assessment is not None else False
+                        ),
+                        fatal_confirmed=fatal_confirmed,
+                        guardian_owned_fuse=bool(
+                            existing_details.get("fuse_owner", "GUARDIAN") == "GUARDIAN"
+                        ),
                         manual_control=manual_control,
                         schedulable=entry.upstream_schedulable,
                         group_available_count=(
@@ -492,6 +524,7 @@ class GuardianEngine:
                         breaker=breaker,
                         degrade=policy.degrade,
                         recovery=recovery,
+                        confidence_policy=policy.confidence,
                     )
                 )
             if decision.health is GuardianHealth.FUSED:

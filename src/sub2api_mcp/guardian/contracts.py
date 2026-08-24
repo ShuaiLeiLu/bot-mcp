@@ -437,6 +437,11 @@ class ChannelDecisionInput(StrictModel):
     recent_events: tuple[GuardianEventType, ...] = ()
     recent_ttfb_ms: tuple[int, ...] = ()
     current_health: GuardianHealth = GuardianHealth.PENDING
+    confidence: float = Field(default=1, ge=0, le=1)
+    freshness: GuardianFreshness = GuardianFreshness.FRESH
+    warming_up: bool = False
+    fatal_confirmed: bool = False
+    guardian_owned_fuse: bool = True
     manual_control: ManualControl = ManualControl.NONE
     schedulable: bool = True
     group_available_count: int = Field(default=1, ge=0)
@@ -447,6 +452,7 @@ class ChannelDecisionInput(StrictModel):
     breaker: BreakerPolicy = Field(default_factory=BreakerPolicy)
     degrade: DegradePolicy = Field(default_factory=DegradePolicy)
     recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
+    confidence_policy: ConfidencePolicy = Field(default_factory=ConfidencePolicy)
 
 
 class ChannelDecision(StrictModel):

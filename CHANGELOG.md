@@ -22,6 +22,9 @@
 - Guardian runs now persist de-duplicated shared-monitor evidence, fuse matching traffic
   buckets by source reliability, exclude legacy samples from V2 scoring, and expose each
   channel's confidence, freshness, evidence age, warm-up count, and source mix.
+- Guardian state decisions now freeze on stale or low-confidence evidence, require trusted
+  fatal confirmation, prohibit probes or recovery for human-controlled channels, and allow
+  recovery only for Guardian-owned fuses meeting the recovery confidence gate.
 
 ### Changed
 

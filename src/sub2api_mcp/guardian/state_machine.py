@@ -6,6 +6,7 @@ from .contracts import (
     ChannelDecision,
     ChannelDecisionInput,
     GuardianEventType,
+    GuardianFreshness,
     GuardianHealth,
     ManualControl,
 )
@@ -24,19 +25,20 @@ def _would_break_minimum_pool(value: ChannelDecisionInput) -> bool:
 
 
 def _fused_or_forced(value: ChannelDecisionInput, reason: str) -> ChannelDecision:
+    can_recover = value.recovery.enabled and value.guardian_owned_fuse
     if _would_break_minimum_pool(value):
         return ChannelDecision(
             health=GuardianHealth.FORCED_KEEP,
             should_schedule=True,
-            should_probe=True,
-            can_auto_recover=True,
+            should_probe=can_recover,
+            can_auto_recover=can_recover,
             reason=f"minimum_pool:{reason}",
         )
     return ChannelDecision(
         health=GuardianHealth.FUSED,
         should_schedule=False,
-        should_probe=value.recovery.enabled,
-        can_auto_recover=value.recovery.enabled,
+        should_probe=can_recover,
+        can_auto_recover=can_recover,
         reason=reason,
     )
 
@@ -54,7 +56,7 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
         return ChannelDecision(
             health=GuardianHealth.MANUALLY_PAUSED,
             should_schedule=False,
-            should_probe=True,
+            should_probe=False,
             can_auto_recover=False,
             reason="manual_pause",
         )
@@ -62,7 +64,7 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
         return ChannelDecision(
             health=GuardianHealth.FUSED,
             should_schedule=False,
-            should_probe=True,
+            should_probe=False,
             can_auto_recover=False,
             reason="manual_fuse",
         )
@@ -76,7 +78,32 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
             reason="upstream_disabled",
         )
 
+    if value.warming_up:
+        return ChannelDecision(
+            health=GuardianHealth.WARMING_UP,
+            should_schedule=value.schedulable,
+            should_probe=False,
+            can_auto_recover=False,
+            reason="warming_up",
+        )
+    if value.freshness is not GuardianFreshness.FRESH:
+        return ChannelDecision(
+            health=GuardianHealth.STALE,
+            should_schedule=value.schedulable,
+            should_probe=False,
+            can_auto_recover=False,
+            reason=f"evidence_{value.freshness.value.casefold()}",
+        )
+
     if value.current_health is GuardianHealth.FUSED:
+        if not value.guardian_owned_fuse:
+            return ChannelDecision(
+                health=GuardianHealth.FUSED,
+                should_schedule=False,
+                should_probe=False,
+                can_auto_recover=False,
+                reason="fuse_not_guardian_owned",
+            )
         if value.fused_until is not None and value.now < value.fused_until:
             return ChannelDecision(
                 health=GuardianHealth.FUSED,
@@ -91,6 +118,7 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
         )
         if (
             value.recovery.enabled
+            and value.confidence >= value.confidence_policy.recover_min
             and value.score >= value.recovery.target_score
             and value.success_streak >= value.recovery.success_count
             and held_long_enough
@@ -102,50 +130,72 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
                 can_auto_recover=True,
                 reason="recovery_threshold_met",
             )
+        if value.confidence < value.confidence_policy.recover_min:
+            reason = "awaiting_recovery_confidence"
+        else:
+            reason = "awaiting_recovery"
         return ChannelDecision(
             health=GuardianHealth.FUSED,
             should_schedule=False,
             should_probe=value.recovery.enabled,
             can_auto_recover=value.recovery.enabled,
-            reason="awaiting_recovery",
+            reason=reason,
         )
 
     if value.breaker.enabled:
-        if value.breaker.hard_fatal and GuardianEventType.FATAL in value.recent_events[:1]:
+        if (
+            value.breaker.hard_fatal
+            and value.fatal_confirmed
+            and GuardianEventType.FATAL in value.recent_events[:1]
+        ):
             return _fused_or_forced(value, "fatal_event")
         http_events = value.recent_events[: value.breaker.http_window]
         if (
             sum(event in _FAILURES for event in http_events) >= value.breaker.http_failures
             and value.score < value.breaker.http_score_below
+            and value.confidence >= value.confidence_policy.fuse_min
         ):
             return _fused_or_forced(value, "error_window")
         latency_values = value.recent_ttfb_ms[: value.breaker.latency_window]
         if (
             sum(ttfb > value.breaker.latency_ttfb_ms for ttfb in latency_values)
             >= value.breaker.latency_occurrences
+            and value.confidence >= value.confidence_policy.degrade_min
         ):
             if not value.breaker.latency_degrade_only:
                 return _fused_or_forced(value, "latency_window")
             return ChannelDecision(
                 health=GuardianHealth.DEGRADED,
                 should_schedule=True,
-                should_probe=True,
+                should_probe=False,
                 can_auto_recover=True,
                 reason="latency_degraded",
             )
 
-    if value.degrade.enabled and value.score < value.degrade.score_threshold:
+    if (
+        value.degrade.enabled
+        and value.score < value.degrade.score_threshold
+        and value.confidence >= value.confidence_policy.degrade_min
+    ):
         return ChannelDecision(
             health=GuardianHealth.DEGRADED,
             should_schedule=True,
-            should_probe=True,
+            should_probe=False,
             can_auto_recover=True,
             reason="score_degraded",
+        )
+    if value.confidence < value.confidence_policy.degrade_min:
+        return ChannelDecision(
+            health=value.current_health,
+            should_schedule=value.schedulable,
+            should_probe=False,
+            can_auto_recover=False,
+            reason="low_confidence",
         )
     return ChannelDecision(
         health=GuardianHealth.HEALTHY,
         should_schedule=True,
-        should_probe=True,
+        should_probe=False,
         can_auto_recover=True,
         reason="healthy",
     )

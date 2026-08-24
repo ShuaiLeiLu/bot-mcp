@@ -49,7 +49,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
 
 ## Phase 3 — Decisions and recommendations
 
-- [ ] Task 8: Add confidence-aware, ownership-safe state transitions.
+- [x] Task 8: Add confidence-aware, ownership-safe state transitions.
   - Acceptance: stale/low-confidence freeze; fatal confirmation; manual states immutable.
   - Verify: state-machine matrix/property tests.
   - Dependencies: Tasks 6–7.
