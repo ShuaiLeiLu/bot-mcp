@@ -13,6 +13,9 @@
   from the same validated response, without making an additional upstream probe request.
 - Guardian shared mode now leases and consumes each published snapshot exactly once; repeated
   scans and service restarts become local no-ops until new evidence arrives.
+- Guardian V2 traffic sampling now filters monitor requests, rejects conflicting duplicate
+  request hashes, keeps unattributed evidence out of decisions, and aggregates traffic into
+  deterministic minute buckets with volume-neutral cross-time weight.
 
 ### Changed
 

@@ -29,7 +29,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
 
 ## Phase 2 — Historical sampling and scoring
 
-- [ ] Task 5: Build deterministic traffic buckets and de-duplication.
+- [x] Task 5: Build deterministic traffic buckets and de-duplication.
   - Acceptance: monitor filtering, request de-dup, volume-neutral time weighting.
   - Verify: sampling unit/property tests.
   - Dependencies: Task 1.

@@ -352,12 +352,37 @@ class GuardianEvidenceBucket(StrictModel):
     quality: float = Field(ge=0, le=1)
     sources: frozenset[GuardianSampleSource] = Field(min_length=1)
     event_count: int = Field(ge=1, le=1_000_000_000)
+    ttfb_p95_ms: int | None = Field(default=None, ge=0, le=3_600_000)
 
     @model_validator(mode="after")
     def validate_bucket_at(self) -> GuardianEvidenceBucket:
         if self.bucket_at.tzinfo is None:
             raise ValueError("bucket_at must be timezone-aware")
         return self
+
+
+class GuardianTrafficObservation(StrictModel):
+    request_id_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    channel_id: str | None = Field(default=None, min_length=1, max_length=128)
+    occurred_at: datetime
+    event_type: GuardianEventType
+    score: int = Field(ge=0, le=100)
+    ttfb_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    status_code: int | None = Field(default=None, ge=0, le=999)
+    is_monitor_request: bool = False
+
+    @model_validator(mode="after")
+    def validate_observed_at(self) -> GuardianTrafficObservation:
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at must be timezone-aware")
+        return self
+
+
+class TrafficBucketBuildResult(StrictModel):
+    buckets: tuple[GuardianEvidenceBucket, ...]
+    duplicate_count: int = Field(ge=0)
+    excluded_monitor_count: int = Field(ge=0)
+    unattributed_count: int = Field(ge=0)
 
 
 class GuardianScoreV2(StrictModel):
