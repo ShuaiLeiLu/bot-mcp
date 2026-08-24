@@ -197,3 +197,80 @@ async def test_outbox_tracks_delivery_per_target(tmp_path: Path) -> None:
     await repository.mark_delivery_succeeded(delivery.delivery_id)
 
     assert await repository.outbox_backlog() == 0
+
+
+@pytest.mark.asyncio
+async def test_new_status_event_supersedes_older_undelivered_status_for_target(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    target = await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="status",
+            bot_uuid="bot-uuid",
+            target_type=TargetType.PERSON,
+            target_id="person-id",
+            purposes=frozenset({DeliveryPurpose.STATUS}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    first = await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"notification": {"text": "old status"}},
+        [target.delivery_target_id],
+    )
+    latest = await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"notification": {"text": "latest status"}},
+        [target.delivery_target_id],
+    )
+
+    delivery = await repository.claim_next_delivery("delivery-worker", lease_seconds=30)
+
+    assert first.event_id != latest.event_id
+    assert await repository.outbox_backlog() == 1
+    assert delivery is not None
+    assert delivery.event_id == latest.event_id
+    assert delivery.payload["notification"]["text"] == "latest status"
+
+
+@pytest.mark.asyncio
+async def test_new_status_event_supersedes_an_older_failed_attempt(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    target = await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="status",
+            bot_uuid="bot-uuid",
+            target_type=TargetType.PERSON,
+            target_id="person-id",
+            purposes=frozenset({DeliveryPurpose.STATUS}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"notification": {"text": "failed status"}},
+        [target.delivery_target_id],
+    )
+    failed = await repository.claim_next_delivery("delivery-worker", lease_seconds=30)
+    assert failed is not None
+    await repository.mark_delivery_failed(
+        failed.delivery_id,
+        "UPSTREAM_UNAVAILABLE",
+        retry_after_seconds=300,
+    )
+
+    latest = await repository.enqueue_outbox(
+        OutboxEventType.STATUS_CHANGED,
+        {"notification": {"text": "latest status"}},
+        [target.delivery_target_id],
+    )
+    delivery = await repository.claim_next_delivery("delivery-worker", lease_seconds=30)
+
+    assert await repository.outbox_backlog() == 1
+    assert delivery is not None
+    assert delivery.event_id == latest.event_id
