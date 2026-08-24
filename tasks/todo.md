@@ -1,55 +1,98 @@
-# Sub2API Scheduler MCP Service Tasks
+# Guardian Shared Sampling V2 Task Checklist
 
-- [x] Task 1: Scaffold the independent Python project and validated configuration.
-  - Acceptance: own `pyproject.toml`, lockfile, source package, rules, environment template.
-  - Verify: config contract tests fail first, then pass; `uv lock --check`.
-  - Files: project metadata, `config.py`, contract tests.
+Status: **Draft — pending human approval of `tasks/plan.md`**
 
-- [x] Task 2: Add scoped authentication, request context, logging, and metrics.
-  - Acceptance: X-API-Key/Bearer authentication, 401/403 behavior, no secret logging.
-  - Verify: auth abuse tests and telemetry tests pass.
-  - Files: `auth.py`, `logging.py`, `metrics.py`, tests.
+## Phase 1 — Shared evidence foundation
 
-- [x] Task 3: Add versioned SQLite repository.
-  - Acceptance: migrations, durable jobs/scheduler/targets/outbox/bindings/audit, parameterized transactions.
-  - Verify: empty/restart/concurrency repository tests pass.
-  - Files: `contracts.py`, `repository.py`, repository tests.
+- [ ] Task 1: Add V2 policy and evidence contracts.
+  - Acceptance: V1 policy compatibility; strict V2 validation; safe disabled defaults.
+  - Verify: focused contract tests, Ruff, Pyright.
+  - Dependencies: none.
+- [ ] Task 2: Add additive Guardian V2 schema migration.
+  - Acceptance: empty/V1/restart/idempotency/rollback tests.
+  - Verify: Guardian repository tests.
+  - Dependencies: Task 1.
+- [ ] Task 3: Publish canonical snapshots from the existing scheduler.
+  - Acceptance: no extra upstream call; idempotent publication; notifications unchanged.
+  - Verify: scheduler tests and fake adapter call counts.
+  - Dependencies: Tasks 1–2.
+- [ ] Task 4: Consume each shared snapshot exactly once.
+  - Acceptance: local-only no-op scans; no restart replay; no zero-score on missing data.
+  - Verify: engine and shared-snapshot integration tests.
+  - Dependencies: Tasks 2–3.
 
-- [x] Task 4: Add platform-neutral LangBot delivery.
-  - Acceptance: discovers arbitrary adapter names, passes person/group targets unchanged, supports media policy fallback.
-  - Verify: fake LangBot API integration matrix passes.
-  - Files: `adapters/langbot.py`, `delivery.py`, tests.
+### Checkpoint A
 
-- [x] Task 5: Add durable job manager and video jobs.
-  - Acceptance: bounded queue, two video workers, job polling/cancellation, restart interruption semantics.
-  - Verify: job state-machine and fake-video tests pass.
-  - Files: `jobs.py`, `adapters/video.py`, tests.
+- [ ] Full quality gate passes.
+- [ ] Zero-extra-upstream-call proof passes.
+- [ ] Human review before Phase 2.
 
-- [x] Task 6: Add Sub2API operations and scheduler.
-  - Acceptance: probe/recovery/maintenance reuse parent invariants, scheduler lease, quiet-hour/outbox behavior.
-  - Verify: fake core integration tests and relevant parent tests pass.
-  - Files: `adapters/sub2api.py`, `scheduler.py`, tests.
+## Phase 2 — Historical sampling and scoring
 
-- [x] Task 7: Add platform-neutral actor bridge and bindings.
-  - Acceptance: signed requests, replay protection, HMAC actor key, one-to-one bindings, masked responses.
-  - Verify: spoofing/replay/uniqueness/privacy tests pass.
-  - Files: `actor_bridge.py`, binding service, tests.
+- [ ] Task 5: Build deterministic traffic buckets and de-duplication.
+  - Acceptance: monitor filtering, request de-dup, volume-neutral time weighting.
+  - Verify: sampling unit/property tests.
+  - Dependencies: Task 1.
+- [ ] Task 6: Implement V2 health, confidence, freshness, and cold start.
+  - Acceptance: published golden example within `1e-9`; stale/no-data behavior.
+  - Verify: scoring unit/property tests.
+  - Dependencies: Tasks 1 and 5.
+- [ ] Task 7: Integrate durable evidence ingestion into Guardian runs.
+  - Acceptance: source fusion, persisted confidence, legacy samples blocked from writes.
+  - Verify: engine/repository integration tests.
+  - Dependencies: Tasks 4–6.
 
-- [x] Task 8: Add curated MCP tools.
-  - Acceptance: deterministic tool list, scopes, stable compact JSON results, no raw identities or secrets.
-  - Verify: MCP contract tests pass with in-memory/ASGI client.
-  - Files: `tools.py`, `service.py`, contract tests.
+### Checkpoint B
 
-- [x] Task 9: Assemble the ASGI application.
-  - Acceptance: `/mcp`, `/healthz`, `/metrics`, actor route, correct lifespan/start/stop behavior.
-  - Verify: ASGI integration and shutdown tests pass.
-  - Files: `app.py`, `__main__.py`, integration tests.
+- [ ] Historical replay matrix passes.
+- [ ] Human reviews score/confidence traces.
 
-- [x] Task 10: Add deployment-neutral packaging and documentation.
-  - Acceptance: non-root/read-only Docker image, Compose template, README/runbook, no host assumption.
-  - Verify: full tests/static checks/audit/Docker build and local smoke test pass.
-  - Files: Docker/Compose/README/runbook and smoke tests.
+## Phase 3 — Decisions and recommendations
 
-- [x] Final review
-  - Acceptance: all spec success criteria met; no existing dirty plugin changes included.
-  - Verify: code review, secret scan, final `git diff -- mcp-server` inspection.
+- [ ] Task 8: Add confidence-aware, ownership-safe state transitions.
+  - Acceptance: stale/low-confidence freeze; fatal confirmation; manual states immutable.
+  - Verify: state-machine matrix/property tests.
+  - Dependencies: Tasks 6–7.
+- [ ] Task 9: Implement V2 weights and priority recommendations.
+  - Acceptance: budget/cap invariants, missing-data penalty, cooldown/step behavior.
+  - Verify: weight property and golden tests.
+  - Dependencies: Tasks 6–7.
+- [ ] Task 10: Add field ownership and disabled dry-run writeback boundary.
+  - Acceptance: human takeover, idempotency, observe-only non-mutation.
+  - Verify: ownership/writeback tests.
+  - Dependencies: Tasks 8–9.
+
+### Checkpoint C
+
+- [ ] Dry-run recommendation report reviewed for a representative group.
+- [ ] Production writeback adapter remains disabled.
+
+## Phase 4 — Recovery, interfaces, and operations
+
+- [ ] Task 11: Add budgeted recovery-probe selection and ledger.
+  - Acceptance: only uniquely mapped Guardian fuses; hard budget; 3-success recovery.
+  - Verify: recovery and budget tests.
+  - Dependencies: Tasks 7–8 and 10.
+- [ ] Task 12: Extend REST and MCP contracts.
+  - Acceptance: additive reads; guarded rollout/ownership mutations; compatibility.
+  - Verify: API integration and MCP contract tests.
+  - Dependencies: Tasks 7–11.
+- [ ] Task 13: Update Guardian UI for V2 evidence and controls.
+  - Acceptance: parameter/help completeness; confirmations; responsive/a11y/browser checks.
+  - Verify: JS syntax, API integration, 390px/1440px browser matrix.
+  - Dependencies: Task 12.
+- [ ] Task 14: Add notifications, metrics, and retention.
+  - Acceptance: structured Chinese messages; coalescing rules; bounded cleanup.
+  - Verify: notification, metric, and retention tests.
+  - Dependencies: Tasks 7–12.
+
+### Checkpoint D — Feature complete, writeback off
+
+- [ ] `uv run pytest -q`
+- [ ] `uv run ruff check .`
+- [ ] `uv run pyright`
+- [ ] `uv run pip-audit`
+- [ ] `docker build --tag bot-mcp-ci:guardian-v2 .`
+- [ ] Browser and accessibility matrix passes.
+- [ ] Backup/migration/stop/restore drill passes.
+- [ ] Product approves merge and deployment.
