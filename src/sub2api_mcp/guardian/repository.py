@@ -1615,6 +1615,62 @@ class GuardianRepository:
             "currency": "USD",
         }
 
+    async def sampling_status(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self._sampling_status_sync)
+
+    def _sampling_status_sync(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            snapshots = connection.execute(
+                "SELECT COUNT(*) AS total, "
+                "COUNT(CASE WHEN consumed_at IS NULL THEN 1 END) AS pending, "
+                "MAX(captured_at) AS latest FROM guardian_input_snapshots"
+            ).fetchone()
+            traffic = connection.execute(
+                "SELECT COUNT(*) AS count, MAX(bucket_at) AS latest "
+                "FROM guardian_traffic_buckets"
+            ).fetchone()
+            freshness = connection.execute(
+                "SELECT freshness_state, COUNT(*) AS count FROM guardian_channels "
+                "GROUP BY freshness_state"
+            ).fetchall()
+        return {
+            "shared_snapshots": int(snapshots["total"] or 0),
+            "pending_snapshots": int(snapshots["pending"] or 0),
+            "latest_snapshot_at": snapshots["latest"],
+            "traffic_buckets": int(traffic["count"] or 0),
+            "latest_traffic_bucket_at": traffic["latest"],
+            "channels_by_freshness": {
+                row["freshness_state"]: int(row["count"]) for row in freshness
+            },
+        }
+
+    async def list_field_ownership(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_field_ownership_sync)
+
+    def _list_field_ownership_sync(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_field_ownership "
+                "ORDER BY channel_id, field_name"
+            ).fetchall()
+        return [
+            {
+                "channel_id": row["channel_id"],
+                "field_name": row["field_name"],
+                "owner": row["owner"],
+                "baseline_value": (
+                    json.loads(row["baseline_json"]) if row["baseline_json"] else None
+                ),
+                "last_guardian_value": (
+                    json.loads(row["last_guardian_json"])
+                    if row["last_guardian_json"]
+                    else None
+                ),
+                "last_write_at": row["last_write_at"],
+            }
+            for row in rows
+        ]
+
     async def record_recovery_probe(
         self,
         *,

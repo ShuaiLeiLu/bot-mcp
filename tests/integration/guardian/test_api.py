@@ -302,3 +302,47 @@ async def test_state_transition_enqueues_existing_all_channel_notification(
     assert "（北京时间）" in text
     assert "健康分" in text
     assert "探测 PERFECT" in text
+
+
+def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+    reader = {"X-API-Key": "r" * 32}
+    admin = {"X-API-Key": "a" * 32}
+
+    with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
+        sampling = client.get("/api/guardian/v1/sampling/status", headers=reader)
+        budget = client.get("/api/guardian/v1/probe-budget", headers=reader)
+        ownership = client.get("/api/guardian/v1/write-ownership", headers=reader)
+        denied = client.post(
+            "/api/guardian/v1/rollout/advance",
+            headers={**admin, "If-Match": "1"},
+            json={"confirm": False},
+        )
+        advanced = client.post(
+            "/api/guardian/v1/rollout/advance",
+            headers={**admin, "If-Match": "1"},
+            json={"confirm": True},
+        )
+        stopped = client.post(
+            "/api/guardian/v1/rollout/stop",
+            headers={**admin, "If-Match": "2"},
+            json={},
+        )
+
+    assert sampling.status_code == 200
+    assert sampling.json()["data"]["mode"] == "SHARED"
+    assert budget.status_code == 200
+    assert budget.json()["data"]["enabled"] is False
+    assert ownership.status_code == 200
+    assert ownership.json()["data"]["items"] == []
+    assert denied.status_code == 409
+    assert denied.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert advanced.status_code == 200
+    assert advanced.json()["data"]["policy"]["rollout"]["stage"] == "LOAD_FACTOR"
+    assert stopped.status_code == 200
+    assert stopped.json()["data"]["policy"]["rollout"]["stage"] == "OBSERVE"
+    assert stopped.json()["data"]["policy"]["observe_only"] is True

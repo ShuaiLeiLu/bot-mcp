@@ -70,6 +70,16 @@ class GuardianAPI:
             ),
             Route("/api/guardian/v1/live-routing", self.live_routing, methods=["GET"]),
             Route("/api/guardian/v1/probe-spend", self.probe_spend, methods=["GET"]),
+            Route("/api/guardian/v1/probe-budget", self.probe_budget, methods=["GET"]),
+            Route("/api/guardian/v1/sampling/status", self.sampling_status, methods=["GET"]),
+            Route("/api/guardian/v1/write-ownership", self.write_ownership, methods=["GET"]),
+            Route(
+                "/api/guardian/v1/channels/{channel_id:str}/explanation",
+                self.channel_explanation,
+                methods=["GET"],
+            ),
+            Route("/api/guardian/v1/rollout/advance", self.advance_rollout, methods=["POST"]),
+            Route("/api/guardian/v1/rollout/stop", self.stop_writeback, methods=["POST"]),
             Route("/api/guardian/v1/events", self.events, methods=["GET"]),
             Route(
                 "/api/guardian/v1/restores/preview",
@@ -251,6 +261,52 @@ class GuardianAPI:
 
     async def probe_spend(self, request: Request) -> Response:
         return await self._execute(request, "sub2api:read", self.service.probe_spend)
+
+    async def probe_budget(self, request: Request) -> Response:
+        return await self._execute(request, "sub2api:read", self.service.probe_budget)
+
+    async def sampling_status(self, request: Request) -> Response:
+        return await self._execute(request, "sub2api:read", self.service.sampling_status)
+
+    async def write_ownership(self, request: Request) -> Response:
+        return await self._execute(request, "sub2api:read", self.service.write_ownership)
+
+    async def channel_explanation(self, request: Request) -> Response:
+        channel_id = request.path_params["channel_id"][:128]
+        return await self._execute(
+            request,
+            "sub2api:read",
+            lambda: self.service.channel_explanation(channel_id),
+        )
+
+    async def advance_rollout(self, request: Request) -> Response:
+        async def advance() -> dict[str, Any]:
+            body = await self._body(request)
+            return await self.service.advance_rollout(
+                confirm=body.get("confirm") is True,
+                expected_revision=self._revision(request),
+            )
+
+        return await self._execute(
+            request,
+            "sub2api:admin",
+            advance,
+            mutation="guardian_advance_rollout",
+        )
+
+    async def stop_writeback(self, request: Request) -> Response:
+        async def stop() -> dict[str, Any]:
+            await self._body(request)
+            return await self.service.stop_writeback(
+                expected_revision=self._revision(request)
+            )
+
+        return await self._execute(
+            request,
+            "sub2api:admin",
+            stop,
+            mutation="guardian_stop_writeback",
+        )
 
     async def events(self, request: Request) -> Response:
         async def listing() -> dict[str, Any]:

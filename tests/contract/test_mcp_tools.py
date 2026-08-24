@@ -130,6 +130,12 @@ async def test_tool_inventory_is_curated_and_deterministic(tmp_path: Path) -> No
         "guardian_channel_action",
         "guardian_list_events",
         "guardian_get_probe_spend",
+        "guardian_get_sampling_status",
+        "guardian_explain_channel_score",
+        "guardian_get_write_ownership",
+        "guardian_get_probe_budget",
+        "guardian_advance_rollout",
+        "guardian_stop_writeback",
         "guardian_preview_restore",
         "guardian_execute_restore",
     ]

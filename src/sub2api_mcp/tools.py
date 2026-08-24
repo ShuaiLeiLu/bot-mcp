@@ -446,6 +446,65 @@ class Sub2APIMCPServer:
                 self._guardian().probe_spend,
             )
 
+        @mcp.tool(description="Get shared-sampling backlog, freshness, and latest evidence.")
+        async def guardian_get_sampling_status() -> str:
+            return await self._execute(
+                "guardian_get_sampling_status",
+                "sub2api:read",
+                self._guardian().sampling_status,
+            )
+
+        @mcp.tool(description="Explain one channel's V2 score, confidence, and recommendation.")
+        async def guardian_explain_channel_score(channel_id: str) -> str:
+            return await self._execute(
+                "guardian_explain_channel_score",
+                "sub2api:read",
+                lambda: self._guardian().channel_explanation(channel_id),
+                subject=channel_id,
+            )
+
+        @mcp.tool(description="List Guardian field baselines and current ownership.")
+        async def guardian_get_write_ownership() -> str:
+            return await self._execute(
+                "guardian_get_write_ownership",
+                "sub2api:read",
+                self._guardian().write_ownership,
+            )
+
+        @mcp.tool(description="Get recovery-probe requests, Token budget, and blocked count.")
+        async def guardian_get_probe_budget() -> str:
+            return await self._execute(
+                "guardian_get_probe_budget",
+                "sub2api:read",
+                self._guardian().probe_budget,
+            )
+
+        @mcp.tool(description="Advance one Guardian rollout stage with explicit confirmation.")
+        async def guardian_advance_rollout(
+            expected_revision: int,
+            confirm: bool = False,
+        ) -> str:
+            return await self._execute(
+                "guardian_advance_rollout",
+                "sub2api:admin",
+                lambda: self._guardian().advance_rollout(
+                    confirm=confirm,
+                    expected_revision=expected_revision,
+                ),
+                mutation=True,
+            )
+
+        @mcp.tool(description="Immediately stop Guardian writeback and return to observe mode.")
+        async def guardian_stop_writeback(expected_revision: int) -> str:
+            return await self._execute(
+                "guardian_stop_writeback",
+                "sub2api:admin",
+                lambda: self._guardian().stop_writeback(
+                    expected_revision=expected_revision
+                ),
+                mutation=True,
+            )
+
         @mcp.tool(description="Preview original channel settings available for restoration.")
         async def guardian_preview_restore() -> str:
             return await self._execute(

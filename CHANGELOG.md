@@ -34,6 +34,9 @@
 - Guardian recovery probing now selects only uniquely mapped Guardian-owned fuses and enforces
   interval, concurrency, per-channel hourly, global daily request, and daily Token budgets with
   durable request, cost, Token, and blocked-attempt accounting.
+- Guardian REST and MCP surfaces now expose V2 sampling status, channel score explanations,
+  write ownership, and recovery budgets, plus confirmed revision-locked rollout advance and
+  immediate writeback-stop operations.
 
 ### Changed
 

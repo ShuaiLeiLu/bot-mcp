@@ -73,7 +73,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: only uniquely mapped Guardian fuses; hard budget; 3-success recovery.
   - Verify: recovery and budget tests.
   - Dependencies: Tasks 7–8 and 10.
-- [ ] Task 12: Extend REST and MCP contracts.
+- [x] Task 12: Extend REST and MCP contracts.
   - Acceptance: additive reads; guarded rollout/ownership mutations; compatibility.
   - Verify: API integration and MCP contract tests.
   - Dependencies: Tasks 7–11.

@@ -16,9 +16,11 @@ from ..errors import ServiceError
 from ..metrics import Metrics
 from ..repository import SqliteRepository
 from .contracts import (
+    AutoApplyPolicy,
     ChannelPolicyOverride,
     GroupPolicyOverride,
     GuardianPolicy,
+    GuardianRolloutStage,
     ManualControl,
 )
 from .engine import GuardianEngine
@@ -425,6 +427,98 @@ class GuardianService:
 
     async def probe_spend(self) -> dict[str, Any]:
         return await self.repository.probe_spend()
+
+    async def sampling_status(self) -> dict[str, Any]:
+        policy = await self.repository.get_policy()
+        status = await self.repository.sampling_status()
+        return {
+            **status,
+            "mode": policy.sampling.mode.value,
+            "fresh_seconds": policy.sampling.fresh_seconds,
+            "expire_seconds": policy.sampling.expire_seconds,
+        }
+
+    async def channel_explanation(self, channel_id: str) -> dict[str, Any]:
+        channel = await self.repository.get_channel(channel_id)
+        if channel is None:
+            raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
+        return {
+            "channel_id": channel_id,
+            "health": channel["health"],
+            "score": channel["score"],
+            "confidence": channel["confidence"],
+            "freshness_state": channel["freshness_state"],
+            "last_evidence_at": channel["last_evidence_at"],
+            "warmup_buckets": channel["warmup_buckets"],
+            "reason": channel["details"].get("reason"),
+            "evidence_sources": channel["details"].get("evidence_sources", []),
+            "short_score": channel["details"].get("short_score"),
+            "long_score": channel["details"].get("long_score"),
+            "desired_priority": channel["details"].get("desired_priority"),
+            "desired_load_factor": channel["details"].get("desired_load_factor"),
+            "expected_action": channel["details"].get("expected_action"),
+        }
+
+    async def write_ownership(self) -> dict[str, Any]:
+        return {"items": await self.repository.list_field_ownership()}
+
+    async def probe_budget(self) -> dict[str, Any]:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        policy = await self.repository.get_policy()
+        usage = await self.repository.recovery_probe_budget_summary(now.date())
+        return {
+            **usage,
+            "daily_request_limit": policy.recovery_budget.daily_requests,
+            "daily_token_limit": policy.recovery_budget.daily_tokens,
+            "enabled": policy.recovery_budget.enabled,
+        }
+
+    async def advance_rollout(
+        self,
+        *,
+        confirm: bool,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        if not confirm:
+            raise ServiceError("CONFIRMATION_REQUIRED", "Rollout advance requires confirm=true")
+        current = await self.repository.get_policy()
+        stages = list(GuardianRolloutStage)
+        index = stages.index(current.rollout.stage)
+        if index >= len(stages) - 1:
+            raise ServiceError("ROLLOUT_COMPLETE", "Guardian rollout is already at the final stage")
+        updated = current.model_copy(
+            update={
+                "rollout": current.rollout.model_copy(update={"stage": stages[index + 1]})
+            }
+        )
+        saved = await self.repository.update_policy(
+            updated,
+            expected_revision=expected_revision,
+        )
+        await self.repository.add_event(
+            event_type="ROLLOUT_ADVANCED",
+            severity="WARNING",
+            message=f"Guardian rollout advanced to {saved.rollout.stage.value}",
+            details={"stage": saved.rollout.stage.value},
+        )
+        return {"policy": saved.model_dump(mode="json")}
+
+    async def stop_writeback(self, *, expected_revision: int) -> dict[str, Any]:
+        current = await self.repository.get_policy()
+        updated = current.model_copy(
+            update={
+                "observe_only": True,
+                "auto_apply": AutoApplyPolicy(),
+                "rollout": current.rollout.model_copy(
+                    update={"stage": GuardianRolloutStage.OBSERVE}
+                ),
+            }
+        )
+        saved = await self.repository.update_policy(
+            updated,
+            expected_revision=expected_revision,
+        )
+        return {"policy": saved.model_dump(mode="json")}
 
     async def restore_preview(self) -> dict[str, Any]:
         return await self.repository.restore_preview()
