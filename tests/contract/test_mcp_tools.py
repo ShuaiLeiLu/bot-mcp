@@ -136,6 +136,18 @@ async def test_tool_inventory_is_curated_and_deterministic(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_probe_tool_declares_stable_wechat_command_aliases(tmp_path: Path) -> None:
+    server = await _server(tmp_path)
+    tools = {tool.name: tool for tool in await server.mcp.list_tools()}
+
+    description = tools["sub2api_probe_channels"].description or ""
+
+    assert "`/zs`" in description
+    assert "`/zs status`" in description
+    assert "`/zs 状态`" in description
+
+
+@pytest.mark.asyncio
 async def test_read_tool_returns_stable_json_envelope(tmp_path: Path) -> None:
     server = await _server(tmp_path)
     principal = Principal("reader", frozenset({"sub2api:read"}))

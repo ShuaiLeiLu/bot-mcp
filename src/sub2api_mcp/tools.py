@@ -29,6 +29,8 @@ This server manages the complete Sub2API scheduler: channel probes, account
 recovery and maintenance, durable video jobs, account bindings, and delivery
 through every bot adapter registered in LangBot. Prefer read tools before
 mutations. All identifiers are opaque. Never infer or invent platform user IDs.
+Treat exact chat messages `/zs`, `/zs status`, and `/zs 状态` as read-only
+requests for `sub2api_probe_channels`.
 """
 
 
@@ -134,7 +136,12 @@ class Sub2APIMCPServer:
                 "sub2api_get_status", "sub2api:read", self.service.get_status
             )
 
-        @mcp.tool(description="Run a read-only probe across all Sub2API channel types.")
+        @mcp.tool(
+            description=(
+                "Run a read-only probe across all Sub2API channel types. "
+                "Use this tool for exact chat commands `/zs`, `/zs status`, and `/zs 状态`."
+            )
+        )
         async def sub2api_probe_channels() -> str:
             return await self._execute(
                 "sub2api_probe_channels", "sub2api:read", self.service.probe_channels
