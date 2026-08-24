@@ -8,7 +8,7 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -1613,6 +1613,106 @@ class GuardianRepository:
             "estimated_cost": float(row["cost"] or 0),
             "unpriced_count": int(row["unpriced"] or 0),
             "currency": "USD",
+        }
+
+    async def record_recovery_probe(
+        self,
+        *,
+        channel_id: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        estimated_cost: float | None,
+        priced: bool,
+        occurred_at: datetime,
+    ) -> None:
+        await asyncio.to_thread(
+            self._record_recovery_probe_sync,
+            channel_id,
+            model,
+            input_tokens,
+            output_tokens,
+            estimated_cost,
+            priced,
+            occurred_at,
+            None,
+        )
+
+    async def record_recovery_probe_blocked(
+        self,
+        *,
+        channel_id: str,
+        reason: str,
+        occurred_at: datetime,
+    ) -> None:
+        await asyncio.to_thread(
+            self._record_recovery_probe_sync,
+            channel_id,
+            "",
+            None,
+            None,
+            None,
+            False,
+            occurred_at,
+            reason,
+        )
+
+    def _record_recovery_probe_sync(
+        self,
+        channel_id: str,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        estimated_cost: float | None,
+        priced: bool,
+        occurred_at: datetime,
+        blocked_reason: str | None,
+    ) -> None:
+        if occurred_at.tzinfo is None:
+            raise ValueError("probe ledger time must be timezone-aware")
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guardian_probe_ledger"
+                "(ledger_id, channel_id, model, input_tokens, output_tokens, estimated_cost, "
+                "priced, budget_date, request_source, blocked_reason, occurred_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'RECOVERY_PROBE', ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    channel_id,
+                    model[:200],
+                    input_tokens,
+                    output_tokens,
+                    estimated_cost,
+                    int(priced),
+                    occurred_at.astimezone(UTC).date().isoformat(),
+                    blocked_reason[:200] if blocked_reason else None,
+                    _iso(occurred_at),
+                ),
+            )
+
+    async def recovery_probe_budget_summary(self, budget_date: date) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._recovery_probe_budget_summary_sync,
+            budget_date.isoformat(),
+        )
+
+    def _recovery_probe_budget_summary_sync(self, budget_date: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(CASE WHEN blocked_reason IS NULL THEN 1 END) AS requests, "
+                "SUM(CASE WHEN blocked_reason IS NULL "
+                "THEN COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) ELSE 0 END) "
+                "AS tokens, SUM(CASE WHEN blocked_reason IS NULL THEN estimated_cost ELSE 0 END) "
+                "AS cost, COUNT(CASE WHEN blocked_reason IS NOT NULL THEN 1 END) AS blocked "
+                "FROM guardian_probe_ledger "
+                "WHERE request_source = 'RECOVERY_PROBE' AND budget_date = ?",
+                (budget_date,),
+            ).fetchone()
+        return {
+            "request_count": int(row["requests"] or 0),
+            "total_tokens": int(row["tokens"] or 0),
+            "estimated_cost": float(row["cost"] or 0),
+            "blocked_count": int(row["blocked"] or 0),
         }
 
     async def restore_preview(self) -> dict[str, Any]:

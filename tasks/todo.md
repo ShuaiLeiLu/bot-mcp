@@ -69,7 +69,7 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
 
 ## Phase 4 — Recovery, interfaces, and operations
 
-- [ ] Task 11: Add budgeted recovery-probe selection and ledger.
+- [x] Task 11: Add budgeted recovery-probe selection and ledger.
   - Acceptance: only uniquely mapped Guardian fuses; hard budget; 3-success recovery.
   - Verify: recovery and budget tests.
   - Dependencies: Tasks 7–8 and 10.

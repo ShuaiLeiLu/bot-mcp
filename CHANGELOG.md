@@ -31,6 +31,9 @@
 - Guardian V2 now tracks per-field baselines and ownership, detects sticky human takeover,
   audits every decision, replays idempotent results, and blocks all real writes unless the
   rollout stage, field approval, observe-mode gate, and an explicit writer all permit them.
+- Guardian recovery probing now selects only uniquely mapped Guardian-owned fuses and enforces
+  interval, concurrency, per-channel hourly, global daily request, and daily Token budgets with
+  durable request, cost, Token, and blocked-attempt accounting.
 
 ### Changed
 

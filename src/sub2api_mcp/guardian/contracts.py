@@ -284,6 +284,27 @@ class RecoveryProbeBudgetPolicy(StrictModel):
     daily_tokens: int = Field(default=10_000, ge=1, le=1_000_000_000)
 
 
+class RecoveryProbeCandidate(StrictModel):
+    channel_id: str = Field(min_length=1, max_length=128)
+    health: GuardianHealth
+    manual_control: ManualControl
+    fuse_owner: GuardianFieldOwner
+    uniquely_mapped: bool
+    last_probe_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_last_probe_at(self) -> RecoveryProbeCandidate:
+        if self.last_probe_at is not None and self.last_probe_at.tzinfo is None:
+            raise ValueError("last_probe_at must be timezone-aware")
+        return self
+
+
+class RecoveryProbeSelection(StrictModel):
+    selected_channel_ids: tuple[str, ...]
+    blocked_counts: dict[str, int]
+    global_block_reason: str | None = None
+
+
 class RolloutPolicy(StrictModel):
     stage: GuardianRolloutStage = GuardianRolloutStage.OBSERVE
 
