@@ -308,3 +308,167 @@ Final release additionally requires:
 - Required duration of one complete business peak.
 - Whether priority rollout always requires a second explicit approval.
 - The stable Sub2API field used for traffic-to-channel attribution.
+
+---
+
+# Approved Addendum Implementation Plan: Account Latency Quarantine
+
+Spec: `tasks/account-latency-quarantine-spec.md`  
+Status: **Plan proposed after PRD approval**
+
+## Dependency Graph
+
+```text
+Quarantine schema and repository
+        |
+        +--> minimum-pool decision
+        |         |
+        |         +--> verified disable + durable marker
+        |
+        +--> measured quarantine probe
+                  |
+                  +--> verified re-entry + marker removal
+                  |
+                  +--> MCP status/listing + notifications
+```
+
+## Architecture Decisions
+
+- SQLite is the authority for system-owned latency quarantine; Sub2API status alone cannot
+  distinguish human pause, ordinary error, and automated latency isolation.
+- Account-group membership is captured at quarantine time and revalidated before every disable
+  and re-entry decision.
+- The minimum usable pool is enforced inside the core maintenance decision before any upstream
+  mutation. Missing or ambiguous groups fail closed.
+- Quarantine probes are a separate scheduler path and never enter ordinary error recovery.
+- First-token latency is measured at the first valid SSE `data:` event; total request duration is
+  not used as a substitute.
+- All new behavior remains disabled until the schema, minimum-pool, re-entry, and visibility
+  slices are complete and production backup/migration checks pass.
+
+## Phase 1 — Durable isolation foundation
+
+### Task AQ1 — Add versioned quarantine persistence
+
+Add the strict quarantine record, additive SQLite table, idempotent upsert, bounded listing,
+probe-result update, and verified removal operations.
+
+Acceptance:
+- Empty/current/restart initialization is additive and idempotent.
+- Quarantine reason, group IDs, thresholds, counts, timestamps, and probe result round-trip.
+- Invalid account/group IDs and malformed persisted JSON fail closed.
+
+Verification: focused repository migration/restart tests, Ruff, Pyright.  
+Dependencies: approved spec.  
+Likely files: `schema.py`, `contracts.py`, `repository.py`, `tests/unit/test_repository.py`.  
+Scope: M (4 files).
+
+### Task AQ2 — Enforce one usable account per group
+
+Add a deterministic minimum-pool decision to log maintenance before disabling slow/error-log
+candidates, including multi-group and missing-group fail-closed behavior.
+
+Acceptance:
+- The final usable account in any group is never disabled.
+- Multi-group candidates require spare capacity in every group.
+- Successful disables decrement counts; failed/skipped disables do not.
+
+Verification: RED/GREEN core maintenance matrix and existing compatibility tests.  
+Dependencies: AQ1 contract shape only.  
+Likely files: `core/maintenance.py`, `tests/unit/test_maintenance_min_pool.py`; parent equivalents.  
+Scope: S (2 files per repository).
+
+### Checkpoint AQ-A
+
+- [ ] Schema/restart and minimum-pool matrices pass.
+- [ ] No upstream mutation is possible without the minimum-pool decision.
+- [ ] Human reviews persisted marker and group semantics.
+
+## Phase 2 — Quarantine and re-entry lifecycle
+
+### Task AQ3 — Persist verified system quarantines
+
+Connect successful slow-first-token maintenance adjustments to the repository marker in the same
+control-job flow and emit explicit minimum-pool-protected/quarantined results.
+
+Acceptance:
+- Only a verified successful disable creates a marker.
+- Slow candidates blocked by minimum pool create no marker or mutation.
+- Restarted services retain marker ownership and never infer it from upstream status.
+
+Verification: scheduler/repository integration tests with fake Sub2API.  
+Dependencies: AQ1–AQ2.  
+Likely files: `core/maintenance.py`, `adapters/sub2api.py`, `scheduler.py`,
+`tests/unit/test_scheduler.py`, `tests/integration/test_sub2api_adapter.py`.  
+Scope: M (5 files).
+
+### Task AQ4 — Measure probes and restore quarantined accounts
+
+Add bounded SSE first-event timing, rotating quarantine probe selection, fail-closed slow/failed
+updates, and verified active+schedulable re-entry.
+
+Acceptance:
+- Missing latency, malformed SSE, timeout, explicit failure, or latency over threshold stays
+  quarantined.
+- Explicit success at/below threshold restores active scheduling and removes the marker.
+- Ordinary error recovery and human-paused accounts never consume quarantine records.
+
+Verification: timing parser unit tests, adapter integration tests, restart/retry test.  
+Dependencies: AQ1 and AQ3.  
+Likely files: `core/maintenance_gateway.py`, `core/monitor.py`, `adapters/sub2api.py`,
+`scheduler.py`, `tests/integration/test_quarantine_reentry.py`.  
+Scope: M (5 files).
+
+### Checkpoint AQ-B
+
+- [ ] Quarantine -> slow -> quarantine and quarantine -> fast -> available paths pass.
+- [ ] Failure injection proves zero accidental re-entry.
+- [ ] Parent shared-core compatibility suite passes.
+
+## Phase 3 — Visibility and rollout
+
+### Task AQ5 — Expose quarantine state safely
+
+Add status count, bounded read-only MCP listing, structured Chinese notifications, metrics, and
+operator documentation.
+
+Acceptance:
+- Quarantine is visibly distinct from error and human pause.
+- MCP results contain no credentials or upstream response bodies.
+- Notifications distinguish quarantined, min-pool protected, still slow, failed, and recovered.
+
+Verification: MCP inventory/schema, redaction, notification, and metric tests.  
+Dependencies: AQ1–AQ4.  
+Likely files: `contracts.py`, `service.py`, `tools.py`, `scheduler.py`,
+`tests/contract/test_mcp_tools.py`.  
+Scope: M (5 files).
+
+### Task AQ6 — Migrate and roll out production
+
+Back up SQLite and environment config, deploy with the guard disabled, migrate and seed only
+verified system-owned slow quarantines, smoke-test probes, then enable the completed guard.
+
+Acceptance:
+- Every channel starts and ends with at least one usable account.
+- Current qualifying slow accounts are either quarantined or explicitly min-pool protected.
+- A controlled fast probe demonstrates automatic re-entry; rollback restores DB/config.
+
+Verification: backup checksum, migration count, health, job/outbox logs, production state report.  
+Dependencies: AQ1–AQ5 and product rollout approval.  
+Likely files: environment/config only; no committed secrets.  
+Scope: operational.
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Multi-group account empties another channel | High | Require spare capacity in every captured group. |
+| System quarantine mistaken for human pause | High | Durable local ownership marker; never infer from upstream switch. |
+| Buffered test hides first-token latency | High | Measure first valid SSE event, not total duration. |
+| Crash between disable and marker write | High | Verified mutation result, immediate durable write, audit event, startup reconciliation alert. |
+| Probe cost grows with quarantine count | Medium | Existing cap of 5 per cycle, deterministic rotation, one control worker. |
+| Stale group membership | Medium | Revalidate before disable/re-entry; fail closed on ambiguity. |
+
+## Addendum Approval Gate
+
+Implementation starts only after human approval of this plan and the AQ task checklist.
