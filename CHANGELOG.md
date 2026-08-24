@@ -11,6 +11,8 @@
 - Automatic media delivery now uses an atomic media-only first attempt and retries as text
   when a LangBot adapter reports an internal media-send failure; ordinary transient upstream
   failures remain queued for retry.
+- Account maintenance and recovery notifications now use structured Chinese copy with a
+  Beijing trigger time, account identity, localized reason, and explicit result.
 
 ## [0.1.0] - 2026-08-23
 

@@ -23,6 +23,22 @@ from .errors import ServiceError
 from .metrics import Metrics
 from .repository import SqliteRepository
 
+_MAINTENANCE_REASON_LABELS = {
+    "channel_test_failed": "渠道异常且可用性测试失败",
+    "repeated_errors": "30 分钟内重复出现上游错误",
+    "slow_first_token": "首字响应延迟连续超过 30 秒",
+}
+_RECOVERY_BUCKET_LABELS = {
+    "error": "错误",
+    "temporary": "临时不可调度",
+    "closed": "关闭",
+}
+_RECOVERY_RESULT_LABELS = {
+    "recovered": "已恢复正常",
+    "test_failed": "测试失败，未调整",
+    "recovery_failed": "测试成功，但恢复失败",
+}
+
 
 class Sub2APIOperations(Protocol):
     async def probe(self) -> ProbeResult: ...
@@ -150,7 +166,10 @@ class SchedulerService:
                 OutboxEventType.RECOVERY_RESULT,
                 {
                     "notification": {
-                        "text": self._format_adjustments("Account recovery", outcomes)
+                        "text": self._format_recovery_results(
+                            outcomes,
+                            triggered_at=self._clock(),
+                        )
                     }
                 },
                 targets,
@@ -167,8 +186,9 @@ class SchedulerService:
                 OutboxEventType.MAINTENANCE_RESULT,
                 {
                     "notification": {
-                        "text": self._format_adjustments(
-                            "Account maintenance", adjustments
+                        "text": self._format_maintenance_results(
+                            adjustments,
+                            triggered_at=self._clock(),
                         )
                     },
                 },
@@ -205,9 +225,69 @@ class SchedulerService:
             if target.enabled and purpose in target.purposes
         ]
 
+    @classmethod
+    def _format_maintenance_results(
+        cls,
+        values: list[dict[str, object]],
+        *,
+        triggered_at: datetime,
+    ) -> str:
+        blocks = [
+            f"账号维护结果｜{len(values)} 个账号\n"
+            f"{cls._format_trigger_time(triggered_at)}"
+        ]
+        for index, value in enumerate(values, start=1):
+            account_name = cls._display_text(value.get("account_name"), "未知账号")
+            account_id = cls._display_text(value.get("account_id"), "--")
+            reason_code = str(value.get("reason") or "")
+            reason = _MAINTENANCE_REASON_LABELS.get(reason_code, "触发账号健康规则")
+            blocks.append(
+                f"{index}. {account_name}（账号 #{account_id}）\n"
+                f"原因：{reason}\n"
+                "结果：已关闭账号调度"
+            )
+        return "\n\n".join(blocks)
+
+    @classmethod
+    def _format_recovery_results(
+        cls,
+        values: list[dict[str, object]],
+        *,
+        triggered_at: datetime,
+    ) -> str:
+        blocks = [
+            f"账号恢复结果｜{len(values)} 个账号\n"
+            f"{cls._format_trigger_time(triggered_at)}"
+        ]
+        for index, value in enumerate(values, start=1):
+            account_name = cls._display_text(value.get("name"), "未知账号")
+            account_id = cls._display_text(value.get("account_id"), "--")
+            bucket = _RECOVERY_BUCKET_LABELS.get(
+                str(value.get("bucket") or ""),
+                "未知",
+            )
+            result = _RECOVERY_RESULT_LABELS.get(
+                str(value.get("result") or ""),
+                "处理完成",
+            )
+            blocks.append(
+                f"{index}. {account_name}（账号 #{account_id}）\n"
+                f"原状态：{bucket}\n"
+                f"结果：{result}"
+            )
+        return "\n\n".join(blocks)
+
     @staticmethod
-    def _format_adjustments(title: str, values: list[dict[str, object]]) -> str:
-        return "\n".join([title, *(str(item) for item in values)])
+    def _format_trigger_time(triggered_at: datetime) -> str:
+        if triggered_at.tzinfo is None:
+            raise ValueError("triggered_at must be timezone-aware")
+        local = triggered_at.astimezone(ZoneInfo("Asia/Shanghai"))
+        return f"触发时间：{local:%Y-%m-%d %H:%M:%S}（北京时间）"
+
+    @staticmethod
+    def _display_text(value: object, fallback: str) -> str:
+        normalized = " ".join(str(value or "").split()).strip()
+        return normalized[:200] or fallback
 
     async def start(self) -> None:
         if self._task is not None:

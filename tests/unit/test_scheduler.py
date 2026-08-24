@@ -11,6 +11,7 @@ from sub2api_mcp.contracts import (
     DeliveryTargetCreate,
     JobType,
     MediaPolicy,
+    OutboxEventType,
     ProbeResult,
     TargetType,
 )
@@ -233,3 +234,99 @@ async def test_recovery_and_maintenance_fail_closed_without_admin_target(
     assert maintenance_error.value.code == "MAINTENANCE_ADMIN_TARGET_REQUIRED"
     assert adapter.recovery_calls == 0
     assert adapter.maintenance_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_maintenance_notification_uses_readable_chinese_layout(tmp_path: Path) -> None:
+    repository = await _repository(tmp_path)
+    target = await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        maintenance_results=[
+            {
+                "account_id": "1032",
+                "account_name": "ai 特惠",
+                "reason": "slow_first_token",
+            }
+        ],
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=True),
+        clock=lambda: datetime(2026, 8, 24, 2, 15, 30, tzinfo=UTC),
+    )
+
+    job = await repository.create_job(JobType.MAINTENANCE, {})
+    await service.handle_maintenance(job)
+    delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
+
+    assert delivery is not None
+    assert delivery.event_type is OutboxEventType.MAINTENANCE_RESULT
+    assert delivery.payload["notification"]["text"] == (
+        "账号维护结果｜1 个账号\n"
+        "触发时间：2026-08-24 10:15:30（北京时间）\n\n"
+        "1. ai 特惠（账号 #1032）\n"
+        "原因：首字响应延迟连续超过 30 秒\n"
+        "结果：已关闭账号调度"
+    )
+    assert target.delivery_target_id == delivery.target.delivery_target_id
+
+
+@pytest.mark.asyncio
+async def test_recovery_notification_uses_readable_chinese_layout(tmp_path: Path) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        recovery_results=[
+            {
+                "account_id": "42",
+                "name": "Claude 主账号",
+                "bucket": "error",
+                "result": "recovered",
+            }
+        ],
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, recovery_enabled=True),
+        clock=lambda: datetime(2026, 8, 24, 2, 16, 0, tzinfo=UTC),
+    )
+
+    job = await repository.create_job(JobType.RECOVERY, {})
+    await service.handle_recovery(job)
+    delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
+
+    assert delivery is not None
+    assert delivery.event_type is OutboxEventType.RECOVERY_RESULT
+    assert delivery.payload["notification"]["text"] == (
+        "账号恢复结果｜1 个账号\n"
+        "触发时间：2026-08-24 10:16:00（北京时间）\n\n"
+        "1. Claude 主账号（账号 #42）\n"
+        "原状态：错误\n"
+        "结果：已恢复正常"
+    )
