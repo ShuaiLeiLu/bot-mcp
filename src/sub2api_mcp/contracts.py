@@ -245,6 +245,13 @@ class ProbeResult(StrictModel):
 
 class OutboxPayload(StrictModel):
     notification: NotificationPayload
+    coalesce_key: str | None = Field(
+        default=None,
+        alias="coalesceKey",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
     delivered_snapshot: dict[str, Any] | None = Field(
         default=None, alias="deliveredSnapshot"
     )

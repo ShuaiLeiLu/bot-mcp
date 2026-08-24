@@ -13,6 +13,7 @@ from sub2api_mcp.contracts import (
     JobType,
     MediaPolicy,
     OutboxEventType,
+    OutboxPayload,
     TargetType,
 )
 from sub2api_mcp.errors import ServiceError
@@ -304,3 +305,8 @@ async def test_status_events_with_distinct_coalesce_keys_are_both_preserved(
     )
 
     assert await repository.outbox_backlog() == 2
+    first = await repository.claim_next_delivery("delivery-worker", lease_seconds=30)
+    assert first is not None
+    parsed = OutboxPayload.model_validate(first.payload)
+    assert parsed.coalesce_key is not None
+    assert parsed.coalesce_key.startswith("guardian:")
