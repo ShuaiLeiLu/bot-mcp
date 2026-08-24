@@ -20,3 +20,17 @@ def test_equal_recovery_window_is_a_real_twenty_four_hour_window() -> None:
 
     assert active is not None
     assert active.ends_at == datetime(2026, 8, 24, 16, 0, tzinfo=UTC)
+
+
+def test_equal_recovery_window_uses_the_latest_daily_boundary() -> None:
+    before_beijing_anchor = datetime(2026, 8, 23, 17, 30, tzinfo=UTC)
+
+    active = active_recovery_window(
+        before_beijing_anchor,
+        "02:00",
+        "02:00",
+    )
+
+    assert active is not None
+    assert active.window_id == "2026-08-23/02:00-02:00"
+    assert active.ends_at == datetime(2026, 8, 23, 18, 0, tzinfo=UTC)
