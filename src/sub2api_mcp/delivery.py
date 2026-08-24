@@ -10,7 +10,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .adapters.langbot import LangBotClient, LangBotUnsupportedMediaError
+from .adapters.langbot import (
+    LangBotClient,
+    LangBotRequestError,
+    LangBotUnsupportedMediaError,
+)
 from .contracts import (
     DeliveryResult,
     DeliveryTargetRecord,
@@ -40,6 +44,15 @@ class DeliveryService:
                 raise
             await self._client.send_message(target, self._text_chain(payload, include_links=True))
             return DeliveryResult(used_fallback=True)
+        except LangBotRequestError as exc:
+            if (
+                exc.status_code != 500
+                or target.media_policy is not MediaPolicy.AUTO
+                or not self._has_media(payload)
+            ):
+                raise
+            await self._client.send_message(target, self._text_chain(payload, include_links=True))
+            return DeliveryResult(used_fallback=True)
 
     @classmethod
     def _preferred_chain(
@@ -51,13 +64,11 @@ class DeliveryService:
             return cls._text_chain(payload, include_links=True)
         if policy in {MediaPolicy.AUTO, MediaPolicy.FILE} and payload.file_url:
             return [
-                {"type": "Plain", "text": payload.text},
                 {"type": "File", "url": payload.file_url, "name": payload.file_name},
             ]
         if policy in {MediaPolicy.AUTO, MediaPolicy.IMAGE}:
             if payload.image_base64:
                 return [
-                    {"type": "Plain", "text": payload.text},
                     {
                         "type": "Image",
                         "base64": f"data:image/png;base64,{payload.image_base64}",
@@ -65,7 +76,6 @@ class DeliveryService:
                 ]
             if payload.image_url:
                 return [
-                    {"type": "Plain", "text": payload.text},
                     {"type": "Image", "url": payload.image_url},
                 ]
         return cls._text_chain(payload, include_links=True)

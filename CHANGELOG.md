@@ -8,6 +8,9 @@
   Asia/Shanghai timezone.
 - A new status event now supersedes older undelivered status events for the same target to
   prevent stale notification bursts after a delivery outage.
+- Automatic media delivery now uses an atomic media-only first attempt and retries as text
+  when a LangBot adapter reports an internal media-send failure; ordinary transient upstream
+  failures remain queued for retry.
 
 ## [0.1.0] - 2026-08-23
 

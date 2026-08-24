@@ -115,11 +115,12 @@ async def test_inline_png_is_sent_as_a_data_uri() -> None:
         NotificationPayload(text="status", image_base64="aGVsbG8="),
     )
 
-    chain = requests[0]["message_chain"]  # type: ignore[index]
-    assert chain[1] == {  # type: ignore[index]
-        "type": "Image",
-        "base64": "data:image/png;base64,aGVsbG8=",
-    }
+    assert requests[0]["message_chain"] == [  # type: ignore[index]
+        {
+            "type": "Image",
+            "base64": "data:image/png;base64,aGVsbG8=",
+        }
+    ]
     await client.close()
 
 
@@ -149,12 +150,55 @@ async def test_auto_media_policy_falls_back_only_for_explicit_unsupported_media(
     result = await service.deliver(_target(), payload)
 
     assert result.used_fallback is True
-    assert requests[0]["message_chain"][-1]["type"] == "File"  # type: ignore[index]
+    assert requests[0]["message_chain"] == [  # type: ignore[index]
+        {
+            "type": "File",
+            "url": "https://video.example/outputs/result.mp4",
+            "name": "result.mp4",
+        }
+    ]
     assert requests[1]["message_chain"] == [  # type: ignore[index]
         {
             "type": "Plain",
             "text": "video ready\nhttps://video.example/outputs/result.mp4",
         }
+    ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_media_policy_falls_back_after_internal_media_failure() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(500, json={"code": -1, "msg": "Internal server error"})
+        return httpx.Response(200, json={"code": 0, "data": {"sent": True}})
+
+    client = LangBotClient(
+        "https://langbot.example",
+        "api-key",
+        transport=httpx.MockTransport(handler),
+    )
+    service = DeliveryService(client)
+    payload = NotificationPayload(
+        text="status with trigger time",
+        image_base64="aGVsbG8=",
+    )
+
+    result = await service.deliver(_target(), payload)
+
+    assert result.used_fallback is True
+    assert requests[0]["message_chain"] == [  # type: ignore[index]
+        {
+            "type": "Image",
+            "base64": "data:image/png;base64,aGVsbG8=",
+        }
+    ]
+    assert requests[1]["message_chain"] == [  # type: ignore[index]
+        {"type": "Plain", "text": "status with trigger time"}
     ]
     await client.close()
 

@@ -37,12 +37,13 @@ class _BotsData(BaseModel):
 
 
 class LangBotRequestError(ServiceError):
-    def __init__(self, *, retryable: bool) -> None:
+    def __init__(self, *, retryable: bool, status_code: int | None = None) -> None:
         super().__init__(
             "LANGBOT_REQUEST_FAILED",
             "LangBot could not deliver the message",
             retryable=retryable,
         )
+        self.status_code = status_code
 
 
 class LangBotUnsupportedMediaError(ServiceError):
@@ -115,19 +116,31 @@ class LangBotClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise LangBotRequestError(retryable=True) from exc
         if len(response.content) > self.MAX_RESPONSE_BYTES:
-            raise LangBotRequestError(retryable=False)
+            raise LangBotRequestError(
+                retryable=False,
+                status_code=response.status_code,
+            )
         try:
             payload: object = response.json()
         except (json.JSONDecodeError, UnicodeError) as exc:
-            raise LangBotRequestError(retryable=response.status_code >= 500) from exc
+            raise LangBotRequestError(
+                retryable=response.status_code >= 500,
+                status_code=response.status_code,
+            ) from exc
         try:
             envelope = _Envelope.model_validate(payload)
         except ValidationError as exc:
-            raise LangBotRequestError(retryable=response.status_code >= 500) from exc
+            raise LangBotRequestError(
+                retryable=response.status_code >= 500,
+                status_code=response.status_code,
+            ) from exc
         if response.status_code in {400, 422} and self._is_unsupported_media(envelope):
             raise LangBotUnsupportedMediaError
         if response.status_code >= 400:
-            raise LangBotRequestError(retryable=response.status_code >= 500)
+            raise LangBotRequestError(
+                retryable=response.status_code >= 500,
+                status_code=response.status_code,
+            )
         return envelope
 
     @staticmethod
