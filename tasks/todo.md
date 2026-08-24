@@ -96,3 +96,41 @@ Status: **Implementation active — final release verification**
 - [x] Browser and accessibility matrix passes.
 - [ ] Backup/migration/stop/restore drill passes.
 - [ ] Product approves merge and deployment.
+
+---
+
+# Account Latency Quarantine Task Checklist
+
+Status: **Plan proposed after PRD approval**
+
+- [ ] AQ1: Add durable latency-quarantine schema and repository operations.
+  - Acceptance: additive/idempotent migration; strict marker round-trip; restart durability.
+  - Verify: repository focused tests, Ruff, Pyright.
+  - Dependencies: approved spec.
+- [ ] AQ2: Add per-group minimum usable account protection.
+  - Acceptance: min 1 per group; multi-group safe; unknown mapping fail closed.
+  - Verify: core RED/GREEN matrix and parent compatibility tests.
+  - Dependencies: AQ1 contract.
+- [ ] AQ3: Persist only verified system-owned quarantine mutations.
+  - Acceptance: successful disable creates marker; blocked/failed disable does not.
+  - Verify: scheduler + fake Sub2API integration tests.
+  - Dependencies: AQ1–AQ2.
+- [ ] AQ4: Add measured quarantine probes and verified automatic re-entry.
+  - Acceptance: slow/failure stays isolated; fast explicit success restores; human pause untouched.
+  - Verify: SSE timing, retry, restart, and re-entry integration tests.
+  - Dependencies: AQ1 and AQ3.
+- [ ] AQ5: Expose quarantine status, MCP listing, notifications, and metrics.
+  - Acceptance: distinct state; bounded/redacted reads; structured Chinese action messages.
+  - Verify: contract, redaction, notification, and metric tests.
+  - Dependencies: AQ1–AQ4.
+- [ ] AQ6: Back up, migrate, seed verified records, deploy disabled, smoke-test, and enable.
+  - Acceptance: no zero-account channel; current slow accounts safely classified; rollback tested.
+  - Verify: production health, DB/config checksums, job logs, and account-group counts.
+  - Dependencies: AQ1–AQ5 and rollout approval.
+
+## Account Quarantine Checkpoints
+
+- [ ] AQ-A: persistence and minimum-pool behavior reviewed.
+- [ ] AQ-B: slow/stay and fast/re-entry lifecycle reviewed.
+- [ ] AQ-C: full quality gate and parent compatibility pass.
+- [ ] AQ-D: product approves production enablement.
