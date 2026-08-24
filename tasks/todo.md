@@ -16,15 +16,15 @@ Status: **Draft — pending human approval of `tasks/plan.md`**
   - Acceptance: no extra upstream call; idempotent publication; notifications unchanged.
   - Verify: scheduler tests and fake adapter call counts.
   - Dependencies: Tasks 1–2.
-- [ ] Task 4: Consume each shared snapshot exactly once.
+- [x] Task 4: Consume each shared snapshot exactly once.
   - Acceptance: local-only no-op scans; no restart replay; no zero-score on missing data.
   - Verify: engine and shared-snapshot integration tests.
   - Dependencies: Tasks 2–3.
 
 ### Checkpoint A
 
-- [ ] Full quality gate passes.
-- [ ] Zero-extra-upstream-call proof passes.
+- [x] Full quality gate passes.
+- [x] Zero-extra-upstream-call proof passes.
 - [ ] Human review before Phase 2.
 
 ## Phase 2 — Historical sampling and scoring

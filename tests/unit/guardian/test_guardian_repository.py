@@ -139,7 +139,7 @@ async def test_repository_initializes_v2_evidence_schema(tmp_path: Path) -> None
             row[1] for row in connection.execute("PRAGMA table_info(guardian_channels)")
         }
 
-    assert version == "2"
+    assert version == str(repository.SCHEMA_VERSION)
     assert {
         "guardian_input_snapshots",
         "guardian_traffic_buckets",
@@ -173,7 +173,7 @@ async def test_v1_database_migrates_without_losing_policy_or_channels(tmp_path: 
             "FROM guardian_channels WHERE channel_id = 'channel-legacy'"
         ).fetchone()
 
-    assert version == "2"
+    assert version == str(repository.SCHEMA_VERSION)
     assert policy.observe_only is True
     assert policy.sampling.mode.value == "SHARED"
     assert channel is not None

@@ -924,6 +924,11 @@ class SqliteRepository:
                     _iso(self._clock()),
                 ),
             )
+            connection.execute(
+                "INSERT INTO guardian_metadata(key, value) "
+                "VALUES('shared_sampling_started', 'true') "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
         return snapshot_id
 
     async def get_snapshot(self, key: str) -> dict[str, Any] | None:

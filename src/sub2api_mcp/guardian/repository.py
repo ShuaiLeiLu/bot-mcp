@@ -21,7 +21,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 2
+GUARDIAN_SCHEMA_VERSION = 3
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -162,11 +162,13 @@ CREATE TABLE IF NOT EXISTS guardian_input_snapshots (
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     captured_at TEXT NOT NULL,
+    claim_owner TEXT,
+    claim_expires_at TEXT,
     consumed_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_claim
-    ON guardian_input_snapshots(consumed_at, captured_at, snapshot_id);
+    ON guardian_input_snapshots(consumed_at, claim_expires_at, captured_at, snapshot_id);
 CREATE TABLE IF NOT EXISTS guardian_traffic_buckets (
     channel_id TEXT NOT NULL,
     bucket_at TEXT NOT NULL,
@@ -271,6 +273,8 @@ class GuardianRepository:
                 raise RuntimeError("Guardian database schema is newer than this service")
             if current_version < 2:
                 self._migrate_v1_to_v2_sync(connection)
+            if current_version < 3:
+                self._migrate_v2_to_v3_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -381,6 +385,27 @@ class GuardianRepository:
         )
 
     @staticmethod
+    def _migrate_v2_to_v3_sync(connection: sqlite3.Connection) -> None:
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_input_snapshots",
+            "claim_owner",
+            "TEXT",
+        )
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_input_snapshots",
+            "claim_expires_at",
+            "TEXT",
+        )
+        connection.execute("DROP INDEX IF EXISTS idx_guardian_input_snapshots_claim")
+        connection.execute(
+            "CREATE INDEX idx_guardian_input_snapshots_claim "
+            "ON guardian_input_snapshots"
+            "(consumed_at, claim_expires_at, captured_at, snapshot_id)"
+        )
+
+    @staticmethod
     def _ensure_column_sync(
         connection: sqlite3.Connection,
         table: str,
@@ -418,6 +443,108 @@ class GuardianRepository:
                 "WHERE consumed_at IS NULL"
             ).fetchone()
         return int(row["count"] if row is not None else 0)
+
+    async def shared_sampling_started(self) -> bool:
+        return await asyncio.to_thread(self._shared_sampling_started_sync)
+
+    def _shared_sampling_started_sync(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM guardian_metadata "
+                "WHERE key = 'shared_sampling_started'"
+            ).fetchone()
+        return bool(row is not None and row["value"] == "true")
+
+    async def claim_input_snapshot(
+        self,
+        owner: str,
+        *,
+        lease_seconds: int,
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(
+            self._claim_input_snapshot_sync,
+            owner,
+            lease_seconds,
+        )
+
+    def _claim_input_snapshot_sync(
+        self,
+        owner: str,
+        lease_seconds: int,
+    ) -> dict[str, Any] | None:
+        if not owner or len(owner) > 200:
+            raise ValueError("invalid snapshot claim owner")
+        now_value = self._clock().astimezone(UTC)
+        now = _iso(now_value)
+        expires_at = _iso(now_value + timedelta(seconds=max(1, lease_seconds)))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT snapshot_id FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NULL AND "
+                "(claim_owner IS NULL OR claim_expires_at <= ?) "
+                "ORDER BY captured_at, snapshot_id LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row is None:
+                connection.execute("COMMIT")
+                return None
+            connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET claim_owner = ?, claim_expires_at = ? "
+                "WHERE snapshot_id = ? AND consumed_at IS NULL",
+                (owner, expires_at, row["snapshot_id"]),
+            )
+            claimed = connection.execute(
+                "SELECT snapshot_id, payload_json, captured_at "
+                "FROM guardian_input_snapshots WHERE snapshot_id = ?",
+                (row["snapshot_id"],),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert claimed is not None
+        payload: object = json.loads(claimed["payload_json"])
+        if not isinstance(payload, dict):
+            raise RuntimeError("Guardian input snapshot payload is invalid")
+        return {
+            "snapshot_id": claimed["snapshot_id"],
+            "payload": cast(dict[str, Any], payload),
+            "captured_at": claimed["captured_at"],
+        }
+
+    async def consume_input_snapshot(self, snapshot_id: str, owner: str) -> bool:
+        return await asyncio.to_thread(
+            self._consume_input_snapshot_sync,
+            snapshot_id,
+            owner,
+        )
+
+    def _consume_input_snapshot_sync(self, snapshot_id: str, owner: str) -> bool:
+        with self._connect() as connection:
+            result = connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET consumed_at = ?, claim_owner = NULL, claim_expires_at = NULL "
+                "WHERE snapshot_id = ? AND claim_owner = ? AND consumed_at IS NULL",
+                (_iso(self._clock()), snapshot_id, owner),
+            )
+        return result.rowcount == 1
+
+    async def release_input_snapshot(self, snapshot_id: str, owner: str) -> None:
+        await asyncio.to_thread(self._release_input_snapshot_sync, snapshot_id, owner)
+
+    def _release_input_snapshot_sync(self, snapshot_id: str, owner: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET claim_owner = NULL, claim_expires_at = NULL "
+                "WHERE snapshot_id = ? AND claim_owner = ? AND consumed_at IS NULL",
+                (snapshot_id, owner),
+            )
 
     async def update_policy(
         self, policy: GuardianPolicy, *, expected_revision: int

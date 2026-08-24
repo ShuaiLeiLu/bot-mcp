@@ -11,6 +11,8 @@
   preserving V1 policy, channel, sample, run, event, and audit data.
 - Each successful existing scheduler probe now publishes one canonical rich Guardian snapshot
   from the same validated response, without making an additional upstream probe request.
+- Guardian shared mode now leases and consumes each published snapshot exactly once; repeated
+  scans and service restarts become local no-ops until new evidence arrives.
 
 ### Changed
 

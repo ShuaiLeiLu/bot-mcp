@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from sub2api_mcp.contracts import ProbeResult
 from sub2api_mcp.guardian.engine import GuardianEngine
 from sub2api_mcp.guardian.repository import GuardianRepository
+from sub2api_mcp.repository import SqliteRepository
 
 
 @dataclass
@@ -85,6 +87,40 @@ async def test_engine_runs_complete_observe_only_cycle(tmp_path: Path) -> None:
     assert repeated["run_id"] == run["run_id"]
     assert operations.calls == 1
     assert {item["channel_id"] for item in channels["items"]} == {"11", "12"}
+
+
+@pytest.mark.asyncio
+async def test_shared_snapshot_is_consumed_once_without_guardian_upstream_calls(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    scheduler_repository = SqliteRepository(path)
+    repository = GuardianRepository(path)
+    await scheduler_repository.initialize()
+    await repository.initialize()
+    seed = await FakeOperations().probe()
+    await scheduler_repository.publish_guardian_snapshot(
+        seed.snapshot,
+        captured_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+    )
+    operations = FakeOperations()
+    engine = GuardianEngine(repository, operations)
+
+    first = await engine.run_once(dry_run=True, idempotency_key="shared-1")
+    second = await engine.run_once(dry_run=True, idempotency_key="shared-2")
+    reopened = GuardianRepository(path)
+    await reopened.initialize()
+    third = await GuardianEngine(reopened, operations).run_once(
+        dry_run=True,
+        idempotency_key="shared-3",
+    )
+
+    assert first["result"]["channels_evaluated"] == 2
+    assert first["result"]["snapshot_id"]
+    assert second["result"]["no_new_evidence"] is True
+    assert third["result"]["no_new_evidence"] is True
+    assert operations.calls == 0
+    assert await reopened.pending_input_snapshot_count() == 0
 
 
 @pytest.mark.asyncio

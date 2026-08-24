@@ -22,6 +22,7 @@ from .contracts import (
     GuardianStrategy,
     ManualControl,
     RecoveryPolicy,
+    SamplingMode,
     UpstreamProbeEntry,
     UpstreamProbeSnapshot,
     WeightCandidate,
@@ -148,6 +149,7 @@ class GuardianEngine:
         run_id = cast(str, run["run_id"])
         owner = f"run:{run_id}:{uuid.uuid4()}"
         leased = False
+        claimed_snapshot: dict[str, Any] | None = None
         try:
             policy = await self.repository.get_policy()
             leased = await self.repository.acquire_lease(
@@ -160,7 +162,35 @@ class GuardianEngine:
                     error_code="GUARDIAN_BUSY",
                     error_message="Another Guardian cycle currently owns the lease",
                 )
-            if isinstance(self._operations, GuardianSnapshotOperations):
+            if (
+                policy.sampling.mode is SamplingMode.SHARED
+                and await self.repository.shared_sampling_started()
+            ):
+                claimed_snapshot = await self.repository.claim_input_snapshot(
+                    owner,
+                    lease_seconds=max(policy.scan_interval_seconds * 2, 30),
+                )
+                if claimed_snapshot is None:
+                    return await self.repository.finish_run(
+                        run_id,
+                        status="SUCCEEDED",
+                        result={
+                            "observe_only": policy.observe_only,
+                            "requested_dry_run": dry_run,
+                            "channels_evaluated": 0,
+                            "state_transitions": 0,
+                            "transitions": [],
+                            "expected_changes": 0,
+                            "writes_applied": 0,
+                            "strategy": policy.strategy.value,
+                            "weight_candidates": {},
+                            "writeback_blocked_reason": "no_new_evidence",
+                            "no_new_evidence": True,
+                            "snapshot_id": None,
+                        },
+                    )
+                raw_snapshot = cast(dict[str, Any], claimed_snapshot["payload"])
+            elif isinstance(self._operations, GuardianSnapshotOperations):
                 raw_snapshot = await self._operations.guardian_snapshot()
             else:
                 probe = await self._operations.probe()
@@ -173,6 +203,17 @@ class GuardianEngine:
                 run_id=run_id,
             )
             cancelled = bool(result.pop("_cancelled"))
+            result["no_new_evidence"] = False
+            result["snapshot_id"] = (
+                claimed_snapshot["snapshot_id"] if claimed_snapshot is not None else None
+            )
+            if claimed_snapshot is not None:
+                snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
+                if cancelled:
+                    await self.repository.release_input_snapshot(snapshot_id, owner)
+                    claimed_snapshot = None
+                elif not await self.repository.consume_input_snapshot(snapshot_id, owner):
+                    raise RuntimeError("Guardian input snapshot claim was lost")
             finished = await self.repository.finish_run(
                 run_id,
                 status="CANCELLED" if cancelled else "SUCCEEDED",
@@ -181,6 +222,11 @@ class GuardianEngine:
             finished["idempotent_replay"] = False
             return finished
         except Exception:
+            if claimed_snapshot is not None:
+                await self.repository.release_input_snapshot(
+                    cast(str, claimed_snapshot["snapshot_id"]),
+                    owner,
+                )
             await self.repository.finish_run(
                 run_id,
                 status="FAILED",
