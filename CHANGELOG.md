@@ -44,6 +44,10 @@
   read-back verification. A failed verification stops the remaining run.
 - The Guardian console is now a light, responsive operations dashboard with explicit scheduling
   controls and redacted recovery status.
+- SQLite retention now runs every ten minutes even when direct scheduling is stopped. It removes
+  bounded batches of expired observations, runs, events, recovery history, terminal jobs, and
+  successfully delivered notifications while preserving live recovery state, queued/failed
+  deliveries, human ownership, current channel state, and recent audit history.
 
 ### Changed
 
@@ -59,6 +63,8 @@
   failures remain queued for retry.
 - Account maintenance and recovery notifications now use structured Chinese copy with a
   Beijing trigger time, account identity, localized reason, and explicit result.
+- Retention migrations add time-oriented indexes, checkpoint the WAL after each bounded cleanup,
+  and expose cleanup outcome, deleted-row, and database-size metrics.
 
 ## [0.1.0] - 2026-08-23
 

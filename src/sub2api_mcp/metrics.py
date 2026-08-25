@@ -35,6 +35,9 @@ class Metrics:
     guardian_field_ownership_changes: Counter
     guardian_scheduling_writes: Counter
     guardian_account_recovery_results: Counter
+    retention_runs: Counter
+    retention_rows: Counter
+    database_size_bytes: Gauge
     outbox_backlog: Gauge
     outbox_oldest_age_seconds: Gauge
 
@@ -188,6 +191,23 @@ class Metrics:
                 "guardian_account_recovery_results_total",
                 "Guardian conditional account recovery outcomes",
                 ("result",),
+                registry=registry,
+            ),
+            retention_runs=Counter(
+                "sub2api_retention_runs_total",
+                "Scheduled SQLite retention runs",
+                ("status",),
+                registry=registry,
+            ),
+            retention_rows=Counter(
+                "sub2api_retention_rows_total",
+                "Rows processed by scheduled SQLite retention",
+                ("store", "operation"),
+                registry=registry,
+            ),
+            database_size_bytes=Gauge(
+                "sub2api_database_size_bytes",
+                "SQLite database, WAL, and shared-memory bytes",
                 registry=registry,
             ),
             outbox_backlog=Gauge(

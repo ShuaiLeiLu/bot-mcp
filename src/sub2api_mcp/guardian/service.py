@@ -1,4 +1,4 @@
-"""Guardian application service and safe background observe-only scheduler."""
+"""Guardian application service and safe background direct scheduler."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from ..contracts import DeliveryPurpose, JobRecord, JobType, NotificationPayload, OutboxEventType
 from ..errors import ServiceError
+from ..logging import log_event
 from ..metrics import Metrics
 from ..repository import SqliteRepository
 from .account_recovery import AccountRecoveryExecutor, AccountRecoveryOperations
@@ -34,6 +36,18 @@ from .contracts import (
 )
 from .engine import GuardianEngine
 from .repository import GuardianRepository
+
+_RETENTION_INTERVAL = timedelta(minutes=10)
+_RETENTION_BATCH_SIZE = 20_000
+_RETENTION_TOTAL_KEYS = frozenset({"processed_total", "deleted_total"})
+
+
+def _sqlite_database_bytes(path: Path) -> int:
+    return sum(
+        candidate.stat().st_size
+        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+        if candidate.exists()
+    )
 
 
 def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -132,6 +146,7 @@ class GuardianService:
                 pass
             if self._stop.is_set():
                 break
+            await self._run_retention_if_due(now=datetime.now(UTC))
             try:
                 policy = await self.repository.get_policy()
                 if policy.enabled:
@@ -653,17 +668,74 @@ class GuardianService:
         try:
             await self._refresh_v2_metrics(run)
             await self._check_recovery_budget_alert()
-            now = datetime.now(UTC)
-            if (
-                self._last_retention_at is None
-                or now - self._last_retention_at >= timedelta(hours=1)
-            ):
-                await self.repository.cleanup_retention(now=now, batch_size=500)
-                self._last_retention_at = now
+            await self._run_retention_if_due(now=datetime.now(UTC))
         except Exception:
             self._logger.exception(
                 "guardian_post_run_operations_failed",
                 extra={"runId": run.get("run_id")},
+            )
+
+    async def _run_retention_if_due(self, *, now: datetime) -> None:
+        if now.tzinfo is None:
+            raise ValueError("retention schedule time must be timezone-aware")
+        if (
+            self._last_retention_at is not None
+            and now - self._last_retention_at < _RETENTION_INTERVAL
+        ):
+            return
+        self._last_retention_at = now
+        started = time.monotonic()
+        stores: tuple[tuple[str, GuardianRepository | SqliteRepository], ...] = (
+            (("guardian", self.repository),)
+            if self._notification_repository is None
+            else (
+                ("guardian", self.repository),
+                ("primary", self._notification_repository),
+            )
+        )
+        processed_total = 0
+        deleted_total = 0
+        try:
+            for store, repository in stores:
+                result = await repository.cleanup_retention(
+                    now=now,
+                    batch_size=_RETENTION_BATCH_SIZE,
+                )
+                processed_total += int(result.get("processed_total", 0))
+                deleted_total += int(result.get("deleted_total", 0))
+                if self._metrics is not None:
+                    for operation, raw_count in result.items():
+                        if operation in _RETENTION_TOTAL_KEYS:
+                            continue
+                        count = int(raw_count)
+                        if count > 0:
+                            self._metrics.retention_rows.labels(
+                                store=store,
+                                operation=operation,
+                            ).inc(count)
+            database_bytes = _sqlite_database_bytes(self.repository.path)
+            if self._metrics is not None:
+                self._metrics.retention_runs.labels(status="success").inc()
+                self._metrics.database_size_bytes.set(database_bytes)
+            log_event(
+                self._logger,
+                logging.INFO,
+                "guardian_retention_completed",
+                "scheduled retention completed",
+                processedRows=processed_total,
+                deletedRows=deleted_total,
+                databaseBytes=database_bytes,
+                durationMs=round((time.monotonic() - started) * 1000),
+            )
+        except Exception:
+            if self._metrics is not None:
+                self._metrics.retention_runs.labels(status="failed").inc()
+            self._logger.exception(
+                "scheduled retention failed",
+                extra={
+                    "event": "guardian_retention_failed",
+                    "durationMs": round((time.monotonic() - started) * 1000),
+                },
             )
 
     async def _refresh_v2_metrics(self, run: dict[str, Any]) -> None:

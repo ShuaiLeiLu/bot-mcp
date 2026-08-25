@@ -23,6 +23,10 @@ SAFE_FIELDS = frozenset(
         "attempt",
         "queueDepth",
         "principal",
+        "store",
+        "processedRows",
+        "deletedRows",
+        "databaseBytes",
     }
 )
 
