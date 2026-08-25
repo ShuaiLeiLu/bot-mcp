@@ -39,10 +39,19 @@ class FakeOperations:
     async def probe(self) -> ProbeResult:
         return ProbeResult(snapshot={"entries": []}, report="no channels")
 
-    async def recover(self) -> list[dict[str, object]]:
+    async def recover(
+        self,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         return []
 
-    async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]:
+    async def maintain(
+        self,
+        probe: ProbeResult,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         return []
 
     async def probe_quarantined(

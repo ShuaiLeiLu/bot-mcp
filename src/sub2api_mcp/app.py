@@ -44,9 +44,18 @@ from .tools import Sub2APIMCPServer
 
 
 class RuntimeOperations(ServiceOperations, Protocol):
-    async def recover(self) -> list[dict[str, object]]: ...
+    async def recover(
+        self,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]: ...
 
-    async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]: ...
+    async def maintain(
+        self,
+        probe: ProbeResult,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]: ...
 
     async def probe_quarantined(
         self,
