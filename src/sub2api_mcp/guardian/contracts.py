@@ -102,6 +102,32 @@ class GuardianAccountMutationOutcome(StrictModel):
     attempted: bool = False
 
 
+class GuardianAccountSchedulingState(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    success: bool
+    status: AccountObservationStatus | None = None
+    schedulable: bool | None = None
+    priority: int | None = Field(default=None, ge=0, le=1_000_000)
+    load_factor: int | None = Field(default=None, ge=0, le=10_000)
+    concurrency: int | None = Field(default=None, ge=0, le=1_000_000)
+    effective_load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
+    expired: bool = False
+    temporary_unavailable: bool = False
+
+    @model_validator(mode="after")
+    def validate_successful_scheduling_state(self) -> GuardianAccountSchedulingState:
+        required = (
+            self.status,
+            self.schedulable,
+            self.priority,
+            self.concurrency,
+            self.effective_load_factor,
+        )
+        if self.success and any(value is None for value in required):
+            raise ValueError("successful scheduling state requires every routing field")
+        return self
+
+
 class ChannelErrorEpisodeStatus(StrEnum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
@@ -648,6 +674,7 @@ class GuardianScoreV2(StrictModel):
 
 class GuardianFieldOwnership(StrictModel):
     channel_id: str = Field(min_length=1, max_length=128)
+    account_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
     field_name: GuardianFieldName
     owner: GuardianFieldOwner
     baseline_value: int | float | bool | str | None = None

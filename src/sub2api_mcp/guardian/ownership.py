@@ -10,11 +10,13 @@ def observe_field_value(
     *,
     current_value: int | float | bool | str,
     channel_id: str,
+    account_id: str | None = None,
     field_name: GuardianFieldName,
 ) -> GuardianFieldOwnership:
     if ownership is None:
         return GuardianFieldOwnership(
             channel_id=channel_id,
+            account_id=account_id,
             field_name=field_name,
             owner=GuardianFieldOwner.UPSTREAM,
             baseline_value=current_value,

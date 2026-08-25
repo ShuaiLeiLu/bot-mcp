@@ -16,13 +16,19 @@ from sub2api_mcp.guardian.contracts import (
     GuardianAccountObservation,
     GuardianAccountStatus,
     GuardianEventType,
+    GuardianFieldName,
+    GuardianFieldOwner,
     GuardianHealth,
     GuardianPolicy,
     GuardianSample,
     GuardianSampleSource,
     ManualControl,
 )
-from sub2api_mcp.guardian.repository import GUARDIAN_SCHEMA_SQL, GuardianRepository
+from sub2api_mcp.guardian.repository import (
+    GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL,
+    GUARDIAN_SCHEMA_SQL,
+    GuardianRepository,
+)
 
 
 def _create_minimal_v1_database(path: Path) -> None:
@@ -477,6 +483,7 @@ async def test_v3_database_migrates_account_recovery_tables_transactionally(
     path = tmp_path / "state.db"
     with sqlite3.connect(path) as connection:
         connection.executescript(GUARDIAN_SCHEMA_SQL)
+        connection.executescript(GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL)
         connection.execute(
             "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', '3')"
         )
@@ -502,6 +509,50 @@ async def test_v3_database_migrates_account_recovery_tables_transactionally(
         "guardian_account_recovery_runs",
         "guardian_account_recovery_ledger",
     } <= tables
+
+
+@pytest.mark.asyncio
+async def test_v4_field_ownership_migrates_to_account_scoped_keys(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(GUARDIAN_SCHEMA_SQL)
+        connection.executescript(GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL)
+        connection.execute("DROP TABLE guardian_field_ownership")
+        connection.execute(
+            "CREATE TABLE guardian_field_ownership ("
+            "channel_id TEXT NOT NULL, field_name TEXT NOT NULL, owner TEXT NOT NULL, "
+            "baseline_json TEXT, last_guardian_json TEXT, last_write_at TEXT, "
+            "updated_at TEXT NOT NULL, PRIMARY KEY(channel_id, field_name))"
+        )
+        connection.execute(
+            "INSERT INTO guardian_field_ownership VALUES(?, ?, ?, ?, NULL, NULL, ?)",
+            ("11", "LOAD_FACTOR", "HUMAN", "100", "2026-08-25T04:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', '4')"
+        )
+
+    repository = GuardianRepository(path)
+    await repository.initialize()
+    legacy = await repository.get_field_ownership(
+        "11",
+        GuardianFieldName.LOAD_FACTOR,
+        account_id="42",
+    )
+
+    assert legacy is not None
+    assert legacy.account_id is None
+    assert legacy.owner is GuardianFieldOwner.HUMAN
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(guardian_field_ownership)"
+            )
+        }
+    assert "account_id" in columns
 
 
 @pytest.mark.asyncio

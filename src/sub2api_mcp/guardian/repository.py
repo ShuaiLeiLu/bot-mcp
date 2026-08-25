@@ -38,7 +38,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 4
+GUARDIAN_SCHEMA_VERSION = 5
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -201,13 +201,14 @@ CREATE INDEX IF NOT EXISTS idx_guardian_traffic_buckets_recent
     ON guardian_traffic_buckets(bucket_at DESC, channel_id);
 CREATE TABLE IF NOT EXISTS guardian_field_ownership (
     channel_id TEXT NOT NULL,
+    account_id TEXT NOT NULL DEFAULT '*',
     field_name TEXT NOT NULL,
     owner TEXT NOT NULL,
     baseline_json TEXT,
     last_guardian_json TEXT,
     last_write_at TEXT,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY(channel_id, field_name)
+    PRIMARY KEY(channel_id, account_id, field_name)
 );
 """
 
@@ -376,6 +377,8 @@ class GuardianRepository:
                 self._migrate_v2_to_v3_sync(connection)
             if current_version < 4:
                 self._migrate_v3_to_v4_sync(connection)
+            if current_version < 5:
+                self._migrate_v4_to_v5_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -518,6 +521,37 @@ class GuardianRepository:
                 connection.execute(statement)
 
     @staticmethod
+    def _migrate_v4_to_v5_sync(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(guardian_field_ownership)"
+            ).fetchall()
+        }
+        if "account_id" in columns:
+            return
+        connection.execute(
+            "ALTER TABLE guardian_field_ownership "
+            "RENAME TO guardian_field_ownership_v4"
+        )
+        connection.execute(
+            "CREATE TABLE guardian_field_ownership ("
+            "channel_id TEXT NOT NULL, account_id TEXT NOT NULL DEFAULT '*', "
+            "field_name TEXT NOT NULL, owner TEXT NOT NULL, baseline_json TEXT, "
+            "last_guardian_json TEXT, last_write_at TEXT, updated_at TEXT NOT NULL, "
+            "PRIMARY KEY(channel_id, account_id, field_name))"
+        )
+        connection.execute(
+            "INSERT INTO guardian_field_ownership("
+            "channel_id, account_id, field_name, owner, baseline_json, "
+            "last_guardian_json, last_write_at, updated_at) "
+            "SELECT channel_id, '*', field_name, owner, baseline_json, "
+            "last_guardian_json, last_write_at, updated_at "
+            "FROM guardian_field_ownership_v4"
+        )
+        connection.execute("DROP TABLE guardian_field_ownership_v4")
+
+    @staticmethod
     def _ensure_column_sync(
         connection: sqlite3.Connection,
         table: str,
@@ -549,28 +583,42 @@ class GuardianRepository:
         self,
         channel_id: str,
         field_name: GuardianFieldName,
+        *,
+        account_id: str | None = None,
     ) -> GuardianFieldOwnership | None:
         return await asyncio.to_thread(
             self._get_field_ownership_sync,
             channel_id,
             field_name,
+            account_id,
         )
 
     def _get_field_ownership_sync(
         self,
         channel_id: str,
         field_name: GuardianFieldName,
+        account_id: str | None,
     ) -> GuardianFieldOwnership | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM guardian_field_ownership "
-                "WHERE channel_id = ? AND field_name = ?",
-                (channel_id, field_name.value),
-            ).fetchone()
+            if account_id is None:
+                row = connection.execute(
+                    "SELECT * FROM guardian_field_ownership "
+                    "WHERE channel_id = ? AND account_id = '*' AND field_name = ?",
+                    (channel_id, field_name.value),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM guardian_field_ownership "
+                    "WHERE channel_id = ? AND account_id IN (?, '*') "
+                    "AND field_name = ? "
+                    "ORDER BY CASE WHEN account_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (channel_id, account_id, field_name.value, account_id),
+                ).fetchone()
         if row is None:
             return None
         return GuardianFieldOwnership(
             channel_id=row["channel_id"],
+            account_id=(None if row["account_id"] == "*" else row["account_id"]),
             field_name=row["field_name"],
             owner=row["owner"],
             baseline_value=(json.loads(row["baseline_json"]) if row["baseline_json"] else None),
@@ -589,14 +637,15 @@ class GuardianRepository:
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO guardian_field_ownership"
-                "(channel_id, field_name, owner, baseline_json, last_guardian_json, "
-                "last_write_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(channel_id, field_name) DO UPDATE SET "
+                "(channel_id, account_id, field_name, owner, baseline_json, "
+                "last_guardian_json, last_write_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(channel_id, account_id, field_name) DO UPDATE SET "
                 "owner = excluded.owner, baseline_json = excluded.baseline_json, "
                 "last_guardian_json = excluded.last_guardian_json, "
                 "last_write_at = excluded.last_write_at, updated_at = excluded.updated_at",
                 (
                     value.channel_id,
+                    value.account_id or "*",
                     value.field_name.value,
                     value.owner.value,
                     _json(value.baseline_value),
@@ -2323,6 +2372,7 @@ class GuardianRepository:
         return [
             {
                 "channel_id": row["channel_id"],
+                "account_id": None if row["account_id"] == "*" else row["account_id"],
                 "field_name": row["field_name"],
                 "owner": row["owner"],
                 "baseline_value": (
