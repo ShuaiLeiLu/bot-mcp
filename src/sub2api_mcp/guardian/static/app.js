@@ -13,6 +13,7 @@ const pageMeta = {
   overview: ["总览", "Guardian 全局运行状态与健康快照"],
   groups: ["分组调度", "分组健康、可用池与独立策略覆盖"],
   channels: ["渠道池", "渠道评分、状态和人工控制"],
+  recovery: ["账号恢复", "异常账号、开放故障事件与恢复任务"],
   routing: ["实时路由", "当前状态与候选调度结果对比"],
   spend: ["探测费用", "主动探测 token 与成本估算"],
   guide: ["调度说明", "评分、熔断、保底、降级和回池规则"],
@@ -23,8 +24,6 @@ const pageMeta = {
 };
 
 const policyFields = [
-  ["#p-enabled", "enabled", "boolean"],
-  ["#p-observe", "observe_only", "boolean"],
   ["#p-scan", "scan_interval_seconds", "number"],
   ["#p-strategy", "strategy", "string"],
   ["#p-sampling-mode", "sampling.mode", "string"],
@@ -264,6 +263,7 @@ async function refreshPage(page = currentPage) {
     overview: loadOverview,
     groups: loadGroups,
     channels: loadChannels,
+    recovery: loadRecovery,
     routing: loadRouting,
     spend: loadSpend,
     events: () => loadEvents(true),
@@ -276,12 +276,25 @@ async function refreshPage(page = currentPage) {
 
 async function loadStatus() {
   const status = await api("/status");
-  const enabledLabel = status.enabled ? "后台运行中" : "后台已停用";
+  const enabledLabel = status.enabled ? "直接调度运行中" : "直接调度已停止";
   $("#metric-engine").textContent = enabledLabel;
-  $("#sidebar-status").textContent = status.observe_only ? "观察模式" : "执行模式";
-  $("#mode-label").textContent = status.observe_only ? "观察模式" : "执行模式";
-  $("#info-mode").textContent = status.observe_only ? "观察模式" : "执行模式";
+  $("#sidebar-status").textContent = status.enabled ? "直接调度运行中" : "调度已停止";
+  $("#mode-label").textContent = status.enabled ? "直接调度" : "调度已停止";
+  $("#info-mode").textContent = status.enabled ? "直接调度运行中" : "直接调度已停止";
   $("#sidebar-dot").style.background = status.enabled ? "var(--green)" : "var(--amber)";
+  $("#scheduling-start").hidden = status.enabled;
+  $("#scheduling-stop").hidden = !status.enabled;
+  const notice = $("#scheduling-notice");
+  notice.className = `notice ${status.enabled ? "info" : "safe"}`;
+  $("#scheduling-notice-title").textContent = status.enabled ? "直接调度运行中" : "直接调度已停止";
+  $("#scheduling-notice-copy").textContent = status.enabled
+    ? "写入器已就绪；仅对唯一映射、证据新鲜且归属明确的账号执行有界写入。"
+    : "启动后将执行当前读、单字段写和精确回读；任何验证失败都会停止剩余任务。";
+  const policyBadge = $("#policy-scheduling-state");
+  if (policyBadge) {
+    policyBadge.textContent = status.enabled ? "运行中" : "已停止";
+    policyBadge.className = `badge ${status.enabled ? "success" : "neutral"}`;
+  }
   return status;
 }
 
@@ -297,7 +310,7 @@ async function loadOverview() {
   const risk = Object.entries(counts)
     .filter(([name]) => !["HEALTHY", "PENDING"].includes(name))
     .reduce((total, [, count]) => total + Number(count), 0);
-  $("#metric-mode").textContent = overview.observe_only ? "观察" : "执行";
+  $("#metric-mode").textContent = "直接";
   $("#metric-channels").textContent = overview.channel_count;
   $("#metric-groups").textContent = `${overview.group_count} 个分组`;
   $("#metric-healthy").textContent = healthy;
@@ -308,6 +321,92 @@ async function loadOverview() {
   renderDistribution(counts, overview.channel_count);
   renderLastRun(status.last_run);
   renderEvents($("#overview-events"), events.items || []);
+}
+
+async function loadRecovery() {
+  const data = await api("/recovery/status?limit=20");
+  const episodes = data.open_episodes || [];
+  const runs = data.recent_runs || [];
+  $("#recovery-owner").textContent = data.owner || "GUARDIAN";
+  $("#recovery-snapshot").textContent = data.latest_abnormal_snapshot ? "待处理" : "无";
+  $("#recovery-episodes").textContent = episodes.length;
+  $("#recovery-runs").textContent = runs.length;
+
+  const episodeList = $("#recovery-episode-list");
+  episodeList.replaceChildren();
+  if (!episodes.length) {
+    episodeList.append(make("p", "empty", "暂无开放事件"));
+  } else {
+    episodes.forEach((item) => {
+      const row = make("article", "recovery-item");
+      const title = make("strong", "", `渠道 ${item.channel_id} · 分组 ${item.group_id || "未映射"}`);
+      const meta = make("span", "muted", `开始于 ${formatDate(item.opened_at)}`);
+      row.append(title, meta);
+      episodeList.append(row);
+    });
+  }
+
+  const runList = $("#recovery-run-list");
+  runList.replaceChildren();
+  if (!runs.length) {
+    runList.append(make("p", "empty", "暂无恢复任务"));
+  } else {
+    runs.forEach((item) => {
+      const row = make("article", "recovery-item");
+      const result = item.result || {};
+      const title = make("strong", "", `${item.trigger} · ${item.status}`);
+      const meta = make(
+        "span",
+        "muted",
+        `测试 ${result.tested || 0} · 启用 ${result.enabled || 0} · 禁用 ${result.disabled || 0} · 不确定 ${result.indeterminate || 0}`,
+      );
+      row.append(title, meta);
+      runList.append(row);
+    });
+  }
+}
+
+async function setScheduling(enabled) {
+  const action = enabled ? "启动直接调度" : "紧急停止直接调度";
+  const warning = enabled
+    ? "启用后会对符合安全条件的账号执行真实写入。"
+    : "停止后未开始的写入和账号恢复会立即被阻断。";
+  if (!window.confirm(`${action}？\n\n${warning}`)) return;
+  const policy = (await api("/policy")).policy;
+  const button = enabled ? $("#scheduling-start") : $("#scheduling-stop");
+  button.disabled = true;
+  try {
+    await api(`/scheduling/${enabled ? "start" : "stop"}`, {
+      method: "POST",
+      headers: {
+        "If-Match": String(policy.revision),
+        "Idempotency-Key": `ui:scheduling:${enabled}:${policy.revision}:${Date.now()}`,
+      },
+      body: { confirm: true },
+    });
+    toast(`${action}成功`);
+    await loadStatus();
+    if (currentPage === "overview") await loadOverview();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function submitRecovery() {
+  if (!window.confirm("确认处理当前待恢复账号吗？\n\n只会使用持久化异常证据，人工暂停账号不会被探测或修改。")) return;
+  const button = $("#recovery-run");
+  button.disabled = true;
+  try {
+    const data = await api("/recovery/runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": `ui:recovery:${Date.now()}` },
+      body: { confirm: true },
+    });
+    toast(`恢复任务已提交，队列 ${data.queue_count}`);
+    await loadRecovery();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderSamplingStatus(sampling) {
@@ -748,15 +847,15 @@ function fillPolicy(policy) {
     else input.value = value ?? "";
   }
   $("#policy-revision").textContent = policy.revision;
-  $("#rollout-stage").textContent = policy.rollout?.stage || "OBSERVE";
-  $("#rollout-advance").disabled = policy.rollout?.stage === "SCHEDULABLE";
+  const schedulingState = $("#policy-scheduling-state");
+  schedulingState.textContent = policy.enabled ? "运行中" : "已停止";
+  schedulingState.className = `badge ${policy.enabled ? "success" : "neutral"}`;
   $("#policy-message").textContent = "尚无未保存修改";
 }
 
 function collectPolicy() {
   const patch = {};
   for (const [selector, path, type] of policyFields) {
-    if (path === "observe_only") continue;
     const input = $(selector);
     let value;
     if (type === "boolean") value = input.checked;
@@ -803,50 +902,11 @@ async function savePolicy(event) {
   }
 }
 
-async function advanceRollout() {
-  if (!policyState) return;
-  const current = policyState.rollout?.stage || "OBSERVE";
-  if (!window.confirm(`确认把写回阶段从 ${current} 推进到下一阶段吗？此操作会记录审计事件。`)) return;
-  const button = $("#rollout-advance");
-  button.disabled = true;
-  try {
-    const data = await api("/rollout/advance", {
-      method: "POST",
-      headers: {
-        "If-Match": String(policyState.revision),
-        "Idempotency-Key": `ui:rollout-advance:${policyState.revision}:${Date.now()}`,
-      },
-      body: { confirm: true },
-    });
-    policyState = data.policy;
-    fillPolicy(policyState);
-    toast(`灰度阶段已推进到 ${policyState.rollout.stage}`);
-  } catch (error) {
-    toast(error.message, true);
-  } finally {
-    button.disabled = policyState?.rollout?.stage === "SCHEDULABLE";
-  }
-}
-
-async function stopRollout() {
-  if (!policyState) return;
-  if (!window.confirm("确认立即停止所有自动写回并回到 OBSERVE 阶段吗？")) return;
-  const data = await api("/rollout/stop", {
-    method: "POST",
-    headers: {
-      "If-Match": String(policyState.revision),
-      "Idempotency-Key": `ui:rollout-stop:${policyState.revision}:${Date.now()}`,
-    },
-    body: {},
-  });
-  policyState = data.policy;
-  fillPolicy(policyState);
-  toast("已停止写回并回到观察阶段");
-}
-
 async function loadConnection() {
   const status = await loadStatus();
-  $("#connection-writer").textContent = status.writeback_adapter === "disabled" ? "未启用" : "已启用";
+  const healthy = status.writeback_adapter === "verified_account_fields";
+  $("#connection-writer").textContent = healthy ? "已就绪" : "不可用";
+  $("#connection-writer").className = `badge ${healthy ? "success" : "warning"}`;
 }
 
 async function runCycle(source) {
@@ -903,6 +963,15 @@ $("#sidebar-scrim").addEventListener("click", closeSidebar);
 $("#logout-button").addEventListener("click", () => showLogin("已断开当前连接"));
 $("#sync-button").addEventListener("click", () => runCycle("sync"));
 $("#run-button").addEventListener("click", () => runCycle("run"));
+$("#scheduling-start").addEventListener("click", () => {
+  setScheduling(true).catch((error) => toast(error.message, true));
+});
+$("#scheduling-stop").addEventListener("click", () => {
+  setScheduling(false).catch((error) => toast(error.message, true));
+});
+$("#recovery-run").addEventListener("click", () => {
+  submitRecovery().catch((error) => toast(error.message, true));
+});
 $("#channel-filter").addEventListener("click", () => loadChannels().catch((error) => toast(error.message, true)));
 $("#channel-query").addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadChannels().catch((error) => toast(error.message, true));
@@ -922,10 +991,6 @@ $("#channel-unboost").addEventListener("click", () => {
   boostChannel("unboost").catch((error) => toast(error.message, true));
 });
 $("#policy-form").addEventListener("submit", savePolicy);
-$("#rollout-advance").addEventListener("click", advanceRollout);
-$("#rollout-stop").addEventListener("click", () => {
-  stopRollout().catch((error) => toast(error.message, true));
-});
 $("#policy-form").addEventListener("input", () => {
   $("#policy-message").textContent = "有尚未保存的修改";
 });

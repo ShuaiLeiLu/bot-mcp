@@ -167,23 +167,27 @@ def test_guardian_ui_uses_the_persisted_light_design_system(tmp_path: Path) -> N
         script = client.get("/guardian/assets/app.js")
 
     normalized_css = styles.text.casefold()
-    assert page.text.count('class="nav-icon"') == 10
+    assert page.text.count('class="nav-icon"') == 11
     assert "color-scheme: light" in normalized_css
-    assert "--color-background: #f8fafc" in normalized_css
+    assert "--color-background: #f4f7f8" in normalized_css
     assert "#07101c" not in normalized_css
     assert 'id="sampling-mode"' in page.text
     assert 'id="sampling-snapshot-age"' in page.text
     assert 'id="probe-budget-requests"' in page.text
     assert 'id="ownership-table"' in page.text
-    assert 'id="rollout-stage"' in page.text
-    assert 'id="rollout-advance"' in page.text
-    assert 'id="rollout-stop"' in page.text
+    assert 'id="scheduling-start"' in page.text
+    assert 'id="scheduling-stop"' in page.text
+    assert 'id="page-recovery"' in page.text
+    assert 'id="recovery-run"' in page.text
+    assert "观察模式" not in page.text
     assert "/sampling/status" in script.text
     assert "/probe-budget" in script.text
     assert "/write-ownership" in script.text
     assert "/explanation" in script.text
-    assert "/rollout/advance" in script.text
-    assert "/rollout/stop" in script.text
+    assert "/scheduling/" in script.text
+    assert "/recovery/status" in script.text
+    assert "/recovery/runs" in script.text
+    assert "/rollout/advance" not in script.text
 
 
 def test_policy_revision_and_writeback_safety_gate(tmp_path: Path) -> None:

@@ -1,31 +1,31 @@
 :root {
   color-scheme: light;
   font-family: "Fira Sans", Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --color-primary: #1e40af;
+  --color-primary: #12445a;
   --color-on-primary: #ffffff;
-  --color-secondary: #3b82f6;
-  --color-accent: #b45309;
-  --color-background: #f8fafc;
-  --color-foreground: #172554;
+  --color-secondary: #247684;
+  --color-accent: #0f766e;
+  --color-background: #f4f7f8;
+  --color-foreground: #102a3a;
   --color-card: #ffffff;
-  --color-muted: #e9eef6;
-  --color-muted-foreground: #52657a;
-  --color-border: #dbeafe;
-  --color-border-strong: #bfdbfe;
+  --color-muted: #e8eff1;
+  --color-muted-foreground: #526873;
+  --color-border: #d6e1e5;
+  --color-border-strong: #b8ced5;
   --color-destructive: #dc2626;
-  --color-ring: #1e40af;
-  --color-success: #15803d;
+  --color-ring: #247684;
+  --color-success: #16715b;
   --color-warning: #b45309;
-  --color-info: #0369a1;
-  --surface-subtle: #f1f5f9;
-  --surface-selected: #eff6ff;
-  --text-primary: #172554;
-  --text-secondary: #475569;
-  --text-tertiary: #64748b;
-  --green: #15803d;
+  --color-info: #176b87;
+  --surface-subtle: #edf3f5;
+  --surface-selected: #e6f1f3;
+  --text-primary: #102a3a;
+  --text-secondary: #465f6b;
+  --text-tertiary: #617985;
+  --green: #16715b;
   --amber: #b45309;
   --red: #dc2626;
-  --blue: #2563eb;
+  --blue: #247684;
   --space-xs: 0.125rem;
   --space-sm: 0.25rem;
   --space-md: 0.5rem;
@@ -37,7 +37,7 @@
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow-md: 0 4px 12px rgba(30, 64, 175, 0.08);
+  --shadow-md: 0 4px 12px rgba(16, 42, 58, 0.07);
   --shadow-lg: 0 16px 40px rgba(15, 23, 42, 0.16);
 }
 
@@ -76,7 +76,7 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 a:focus-visible {
-  outline: 3px solid rgba(30, 64, 175, 0.28);
+  outline: 3px solid rgba(36, 118, 132, 0.3);
   outline-offset: 2px;
 }
 
@@ -714,6 +714,18 @@ main {
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
 }
 
+.notice > div:not(.notice-actions) {
+  min-width: 0;
+  flex: 1;
+}
+
+.notice-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-md);
+  margin-left: auto;
+}
+
 .metric-grid.three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -762,6 +774,10 @@ main {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-xl);
   margin-bottom: var(--space-xl);
+}
+
+.metric-grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .sampling-panel {
@@ -1248,29 +1264,9 @@ tbody tr:hover {
   font-weight: 400;
 }
 
-.locked {
-  opacity: 0.65;
-}
-
-.locked-panel {
-  border-color: #fed7aa;
-}
-
-.rollout-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-md);
-}
-
 .danger-outline {
   border-color: #fecaca;
   color: var(--color-destructive);
-}
-
-.rollout-help {
-  margin-top: var(--space-lg) !important;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
 }
 
 .score-grid {
@@ -1530,7 +1526,8 @@ dialog::backdrop {
 }
 
 @media (max-width: 74rem) {
-  .metric-grid.five {
+  .metric-grid.five,
+  .metric-grid.four {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
@@ -1571,6 +1568,26 @@ dialog::backdrop {
   }
 }
 
+.recovery-item {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-lg) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.recovery-item:last-child {
+  border-bottom: 0;
+}
+
+.recovery-item strong {
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.recovery-item span {
+  font-size: 0.75rem;
+}
+
 @media (max-width: 43rem) {
   .login-screen {
     padding: var(--space-lg);
@@ -1602,6 +1619,7 @@ dialog::backdrop {
   }
 
   .metric-grid.five,
+  .metric-grid.four,
   .metric-grid.three {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1688,9 +1706,13 @@ dialog::backdrop {
     grid-template-columns: 1fr 1fr;
   }
 
-  .rollout-actions {
-    align-items: stretch;
-    flex-direction: column-reverse;
+  .notice {
+    flex-wrap: wrap;
+  }
+
+  .notice-actions {
+    width: 100%;
+    margin-left: 2.5rem;
   }
 
   .dialog-actions span,
@@ -1701,6 +1723,7 @@ dialog::backdrop {
 
 @media (max-width: 26rem) {
   .metric-grid.five,
+  .metric-grid.four,
   .metric-grid.three {
     grid-template-columns: 1fr;
   }
@@ -1715,6 +1738,14 @@ dialog::backdrop {
 
   .top-actions .secondary,
   .top-actions .primary {
+    flex: 1;
+  }
+
+  .notice-actions {
+    margin-left: 0;
+  }
+
+  .notice-actions button {
     flex: 1;
   }
 
