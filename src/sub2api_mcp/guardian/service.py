@@ -118,7 +118,7 @@ class GuardianService:
                 policy = await self.repository.get_policy()
                 if policy.enabled:
                     slot = int(datetime.now(UTC).timestamp()) // policy.scan_interval_seconds
-                    await self.run_once(dry_run=True, idempotency_key=f"scheduled:{slot}")
+                    await self.run_once(dry_run=False, idempotency_key=f"scheduled:{slot}")
             except Exception:
                 self._logger.exception("guardian_scheduled_cycle_failed")
 

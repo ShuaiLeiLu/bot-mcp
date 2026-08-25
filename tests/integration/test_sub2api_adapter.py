@@ -8,6 +8,7 @@ from maintenance import (
     AccountDisableResult,
     AccountDispatchState,
     AccountRestoreResult,
+    AccountSchedulingState,
     AccountSchedulingWriteResult,
     AccountTestResult,
     MaintenancePolicy,
@@ -243,6 +244,21 @@ class SchedulingWriterFakeClient:
         self.success = success
         self.calls: list[tuple[str, str, object]] = []
 
+    async def fetch_account_scheduling_state(
+        self,
+        account_id: str,
+    ) -> AccountSchedulingState:
+        return AccountSchedulingState(
+            account_id=account_id,
+            success=True,
+            status="active",
+            schedulable=True,
+            priority=50,
+            load_factor=10,
+            concurrency=4,
+            effective_load_factor=10,
+        )
+
     async def write_account_scheduling_field(
         self,
         account_id: str,
@@ -410,11 +426,15 @@ async def test_guardian_field_writer_accepts_only_verified_account_write() -> No
     failed_adapter = LegacySub2APIAdapter(cast(Sub2APIClient, failed))
 
     verified = await successful_adapter.write_field("42", GuardianFieldName.PRIORITY, 52)
+    state = await successful_adapter.read_account_scheduling_state("42")
     with pytest.raises(RuntimeError, match="scheduling field write failed"):
         await failed_adapter.write_field("42", GuardianFieldName.LOAD_FACTOR, 20)
 
     assert successful.calls == [("42", "priority", 52)]
     assert verified == 52
+    assert state.success is True
+    assert state.account_id == "42"
+    assert state.priority == 50
     assert failed.calls == [("42", "load_factor", 20)]
 
 

@@ -41,6 +41,7 @@ from ..guardian.contracts import (
     AccountMutationResult,
     AccountTestExecutionResult,
     GuardianAccountMutationOutcome,
+    GuardianAccountSchedulingState,
     GuardianAccountTestOutcome,
     GuardianFieldName,
     UpstreamProbeSnapshot,
@@ -308,6 +309,28 @@ class LegacySub2APIAdapter:
         if isinstance(verified, (bool, int)):
             return verified
         raise RuntimeError("Guardian account scheduling verification is missing")
+
+    async def read_account_scheduling_state(
+        self,
+        account_id: str,
+    ) -> GuardianAccountSchedulingState:
+        state = await self._client.fetch_account_scheduling_state(account_id)
+        return GuardianAccountSchedulingState(
+            account_id=state.account_id,
+            success=state.success,
+            status=(
+                AccountObservationStatus(state.status)
+                if state.success
+                else None
+            ),
+            schedulable=state.schedulable,
+            priority=state.priority,
+            load_factor=state.load_factor,
+            concurrency=state.concurrency,
+            effective_load_factor=state.effective_load_factor,
+            expired=state.expired,
+            temporary_unavailable=state.temporary_unavailable,
+        )
 
     @staticmethod
     def _build_guardian_snapshot(probes: list[ChannelProbe]) -> dict[str, Any]:

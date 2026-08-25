@@ -34,7 +34,7 @@ from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
 from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
-from .guardian.engine import GuardianEngine
+from .guardian.engine import GuardianEngine, GuardianSchedulingOperations
 from .guardian.repository import GuardianRepository
 from .guardian.service import GuardianService
 from .jobs import JobManager, VideoJobService
@@ -152,7 +152,11 @@ def build_runtime(
     outbox = OutboxWorker(repository, delivery, metrics) if delivery is not None else None
     guardian = GuardianService(
         guardian_repository,
-        GuardianEngine(guardian_repository, operations),
+        GuardianEngine(
+            guardian_repository,
+            operations,
+            scheduling_operations=cast(GuardianSchedulingOperations, operations),
+        ),
         metrics,
         repository,
         account_operations=cast(AccountRecoveryOperations, operations),
