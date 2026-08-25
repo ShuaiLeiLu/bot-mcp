@@ -22,7 +22,12 @@ from .adapters.video import LegacyVideoGenerator, VideoGenerator
 from .auth import ApiKeyAuthenticator, Principal, bind_principal
 from .bootstrap import bootstrap_legacy_core
 from .config import Settings
-from .contracts import JobType, ProbeResult
+from .contracts import (
+    AccountQuarantineRecord,
+    JobType,
+    ProbeResult,
+    QuarantineProbeAttempt,
+)
 from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
 from .guardian.api import GuardianAPI
@@ -42,6 +47,11 @@ class RuntimeOperations(ServiceOperations, Protocol):
     async def recover(self) -> list[dict[str, object]]: ...
 
     async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]: ...
+
+    async def probe_quarantined(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> QuarantineProbeAttempt: ...
 
 
 @dataclass(slots=True)

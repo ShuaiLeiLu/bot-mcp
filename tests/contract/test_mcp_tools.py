@@ -10,10 +10,13 @@ from mcp.types import TextContent
 
 from sub2api_mcp.auth import Principal, bind_principal
 from sub2api_mcp.contracts import (
+    AccountQuarantineRecord,
     DeliveryPurpose,
     DeliveryTargetCreate,
     MediaPolicy,
     ProbeResult,
+    QuarantineProbeAttempt,
+    QuarantineProbeResult,
     SubmitVideoInput,
     TargetType,
     VideoOutput,
@@ -39,6 +42,15 @@ class FakeOperations:
 
     async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]:
         return []
+
+    async def probe_quarantined(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> QuarantineProbeAttempt:
+        return QuarantineProbeAttempt(
+            account_id=marker.account_id,
+            result=QuarantineProbeResult.INVALID,
+        )
 
     async def find_active_account(self, email: str):  # type: ignore[no-untyped-def]
         return None
