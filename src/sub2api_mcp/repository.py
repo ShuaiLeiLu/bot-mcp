@@ -13,8 +13,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from pydantic import ValidationError
+
 from .contracts import (
     AccountBinding,
+    AccountQuarantinePage,
+    AccountQuarantineReason,
+    AccountQuarantineRecord,
     ClaimedDelivery,
     DeliveryStatus,
     DeliveryTargetCreate,
@@ -26,6 +31,7 @@ from .contracts import (
     JobType,
     OutboxEventRecord,
     OutboxEventType,
+    QuarantineProbeResult,
 )
 from .errors import ServiceError
 from .schema import SCHEMA_SQL
@@ -536,6 +542,227 @@ class SqliteRepository:
                 (_iso(self._clock()), delivery_target_id),
             )
 
+    async def upsert_account_quarantine(
+        self,
+        record: AccountQuarantineRecord,
+    ) -> AccountQuarantineRecord:
+        return await asyncio.to_thread(self._upsert_account_quarantine_sync, record)
+
+    def _upsert_account_quarantine_sync(
+        self,
+        record: AccountQuarantineRecord,
+    ) -> AccountQuarantineRecord:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO account_quarantines("
+                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+                "quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "last_probe_result, updated_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(account_id) DO UPDATE SET "
+                "reason = excluded.reason, group_ids_json = excluded.group_ids_json, "
+                "threshold_ms = excluded.threshold_ms, "
+                "observed_count = excluded.observed_count, "
+                "quarantined_at = excluded.quarantined_at, "
+                "last_probe_at = excluded.last_probe_at, "
+                "last_probe_latency_ms = excluded.last_probe_latency_ms, "
+                "last_probe_result = excluded.last_probe_result, "
+                "updated_at = excluded.updated_at",
+                (
+                    record.account_id,
+                    record.reason.value,
+                    _json(list(record.group_ids)),
+                    record.threshold_ms,
+                    record.observed_count,
+                    _iso(record.quarantined_at),
+                    _iso(record.last_probe_at) if record.last_probe_at is not None else None,
+                    record.last_probe_latency_ms,
+                    record.last_probe_result.value,
+                    _iso(self._clock()),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (record.account_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._quarantine_from_row(row)
+
+    async def get_account_quarantine(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        return await asyncio.to_thread(self._get_account_quarantine_sync, account_id)
+
+    def _get_account_quarantine_sync(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        return self._quarantine_from_row(row) if row is not None else None
+
+    async def list_account_quarantines(
+        self,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+        reason: AccountQuarantineReason | None = None,
+    ) -> AccountQuarantinePage:
+        return await asyncio.to_thread(
+            self._list_account_quarantines_sync,
+            limit,
+            cursor,
+            reason,
+        )
+
+    def _list_account_quarantines_sync(
+        self,
+        limit: int,
+        cursor: str | None,
+        reason: AccountQuarantineReason | None,
+    ) -> AccountQuarantinePage:
+        if not 1 <= limit <= 100:
+            raise ServiceError(
+                "INVALID_PAGE_SIZE",
+                "Account quarantine page size must be between 1 and 100",
+            )
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if reason is not None:
+            conditions.append("reason = ?")
+            parameters.append(reason.value)
+        if cursor:
+            kind, account_id = self._decode_cursor(cursor)
+            if kind != "account-quarantine":
+                raise ServiceError("INVALID_CURSOR", "The quarantine cursor is invalid")
+            conditions.append("account_id > ?")
+            parameters.append(account_id)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        parameters.append(limit + 1)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM account_quarantines {where} "
+                "ORDER BY account_id ASC LIMIT ?",
+                parameters,
+            ).fetchall()
+        selected = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit and selected:
+            next_cursor = self._encode_cursor(
+                "account-quarantine",
+                selected[-1]["account_id"],
+            )
+        return AccountQuarantinePage(
+            items=[self._quarantine_from_row(row) for row in selected],
+            next_cursor=next_cursor,
+        )
+
+    async def update_account_quarantine_probe(
+        self,
+        account_id: str,
+        *,
+        probed_at: datetime,
+        latency_ms: int | None,
+        result: QuarantineProbeResult,
+    ) -> AccountQuarantineRecord:
+        if result is QuarantineProbeResult.NEVER:
+            raise ValueError("a completed quarantine probe cannot use NEVER")
+        if probed_at.tzinfo is None:
+            raise ValueError("probed_at must be timezone-aware")
+        if latency_ms is not None and latency_ms < 0:
+            raise ValueError("latency_ms must be non-negative")
+        return await asyncio.to_thread(
+            self._update_account_quarantine_probe_sync,
+            account_id,
+            probed_at,
+            latency_ms,
+            result,
+        )
+
+    def _update_account_quarantine_probe_sync(
+        self,
+        account_id: str,
+        probed_at: datetime,
+        latency_ms: int | None,
+        result: QuarantineProbeResult,
+    ) -> AccountQuarantineRecord:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE account_quarantines SET last_probe_at = ?, "
+                "last_probe_latency_ms = ?, last_probe_result = ?, updated_at = ? "
+                "WHERE account_id = ?",
+                (
+                    _iso(probed_at),
+                    latency_ms,
+                    result.value,
+                    _iso(self._clock()),
+                    account_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ServiceError(
+                    "QUARANTINE_NOT_FOUND",
+                    "The account quarantine does not exist",
+                )
+            row = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._quarantine_from_row(row)
+
+    async def remove_verified_account_quarantine(self, account_id: str) -> bool:
+        return await asyncio.to_thread(
+            self._remove_verified_account_quarantine_sync,
+            account_id,
+        )
+
+    def _remove_verified_account_quarantine_sync(self, account_id: str) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            removed = connection.execute(
+                "DELETE FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return removed.rowcount == 1
+
+    async def account_quarantine_count(self) -> int:
+        return await asyncio.to_thread(self._account_quarantine_count_sync)
+
+    def _account_quarantine_count_sync(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM account_quarantines"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
     async def bind_actor(self, actor_key: str, user_id: str, masked_email: str) -> AccountBinding:
         return await asyncio.to_thread(self._bind_actor_sync, actor_key, user_id, masked_email)
 
@@ -1033,3 +1260,26 @@ class SqliteRepository:
                 "updated_at": updated_at,
             }
         )
+
+    @staticmethod
+    def _quarantine_from_row(row: sqlite3.Row) -> AccountQuarantineRecord:
+        try:
+            group_ids = json.loads(row["group_ids_json"])
+            return AccountQuarantineRecord.model_validate(
+                {
+                    "account_id": row["account_id"],
+                    "reason": row["reason"],
+                    "group_ids": group_ids,
+                    "threshold_ms": row["threshold_ms"],
+                    "observed_count": row["observed_count"],
+                    "quarantined_at": _datetime(row["quarantined_at"]),
+                    "last_probe_at": _datetime(row["last_probe_at"]),
+                    "last_probe_latency_ms": row["last_probe_latency_ms"],
+                    "last_probe_result": row["last_probe_result"],
+                }
+            )
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ServiceError(
+                "QUARANTINE_DATA_INVALID",
+                "Persisted account quarantine data is invalid",
+            ) from exc

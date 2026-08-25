@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from sub2api_mcp.contracts import (
+    AccountQuarantineReason,
+    AccountQuarantineRecord,
     DeliveryPurpose,
     DeliveryTargetCreate,
     JobStatus,
@@ -14,6 +17,7 @@ from sub2api_mcp.contracts import (
     MediaPolicy,
     OutboxEventType,
     OutboxPayload,
+    QuarantineProbeResult,
     TargetType,
 )
 from sub2api_mcp.errors import ServiceError
@@ -49,6 +53,100 @@ async def test_running_jobs_become_interrupted_after_restart(tmp_path: Path) -> 
     assert job is not None
     assert job.status is JobStatus.INTERRUPTED
     assert job.error_code == "SERVICE_RESTARTED"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_round_trips_and_survives_restart(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    marker = AccountQuarantineRecord(
+        account_id="997",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("36", "41"),
+        threshold_ms=30_000,
+        observed_count=3,
+        quarantined_at=clock.now,
+    )
+
+    saved = await repository.upsert_account_quarantine(marker)
+    clock.now += timedelta(minutes=1)
+    probed = await repository.update_account_quarantine_probe(
+        "997",
+        probed_at=clock.now,
+        latency_ms=45_001,
+        result=QuarantineProbeResult.SLOW,
+    )
+    restarted = await _repo(tmp_path, clock)
+    page = await restarted.list_account_quarantines(limit=20)
+
+    assert saved == marker
+    assert probed.last_probe_at == clock.now
+    assert probed.last_probe_latency_ms == 45_001
+    assert probed.last_probe_result is QuarantineProbeResult.SLOW
+    assert page.items == [probed]
+    assert await restarted.account_quarantine_count() == 1
+    assert await restarted.remove_verified_account_quarantine("997") is True
+    assert await restarted.remove_verified_account_quarantine("997") is False
+    assert await restarted.account_quarantine_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_quarantine_listing_is_bounded_and_cursor_paginated(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    for account_id in ("101", "102"):
+        await repository.upsert_account_quarantine(
+            AccountQuarantineRecord(
+                account_id=account_id,
+                reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+                group_ids=("36",),
+                threshold_ms=30_000,
+                observed_count=1,
+                quarantined_at=clock.now,
+            )
+        )
+
+    first = await repository.list_account_quarantines(limit=1)
+    second = await repository.list_account_quarantines(
+        limit=1,
+        cursor=first.next_cursor,
+    )
+
+    assert [item.account_id for item in first.items] == ["101"]
+    assert [item.account_id for item in second.items] == ["102"]
+    assert first.next_cursor is not None
+
+    with pytest.raises(ServiceError) as invalid_page:
+        await repository.list_account_quarantines(limit=101)
+    assert invalid_page.value.code == "INVALID_PAGE_SIZE"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_invalid_persisted_groups_fail_closed(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    with sqlite3.connect(repository.path) as connection:
+        connection.execute(
+            "INSERT INTO account_quarantines("
+            "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+            "quarantined_at, last_probe_result, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "997",
+                AccountQuarantineReason.SLOW_FIRST_TOKEN.value,
+                '["not-an-id"]',
+                30_000,
+                3,
+                clock.now.isoformat(),
+                QuarantineProbeResult.NEVER.value,
+                clock.now.isoformat(),
+            ),
+        )
+
+    with pytest.raises(ServiceError) as invalid_record:
+        await repository.list_account_quarantines(limit=20)
+
+    assert invalid_record.value.code == "QUARANTINE_DATA_INVALID"
 
 
 @pytest.mark.asyncio

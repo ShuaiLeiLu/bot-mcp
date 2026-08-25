@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -143,6 +144,67 @@ class AccountBinding(StrictModel):
     user_id: str
     masked_email: str
     bound_at: datetime
+
+
+class AccountQuarantineReason(StrEnum):
+    SLOW_FIRST_TOKEN = "SLOW_FIRST_TOKEN"
+    CHANNEL_TEST_FAILED = "CHANNEL_TEST_FAILED"
+
+
+class QuarantineProbeResult(StrEnum):
+    NEVER = "NEVER"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    SLOW = "SLOW"
+    INVALID = "INVALID"
+
+
+class AccountQuarantineRecord(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    reason: AccountQuarantineReason
+    group_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+    threshold_ms: int = Field(ge=1, le=3_600_000)
+    observed_count: int = Field(ge=1, le=1_000_000)
+    quarantined_at: datetime
+    last_probe_at: datetime | None = None
+    last_probe_latency_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    last_probe_result: QuarantineProbeResult = QuarantineProbeResult.NEVER
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("group IDs must be positive decimal identifiers")
+        normalized = tuple(sorted(set(value), key=int))
+        if normalized != value:
+            raise ValueError("group IDs must be unique and numerically sorted")
+        return value
+
+    @field_validator("quarantined_at", "last_probe_at")
+    @classmethod
+    def validate_quarantine_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("quarantine timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def validate_probe_fields(self) -> AccountQuarantineRecord:
+        if self.last_probe_result is QuarantineProbeResult.NEVER:
+            if self.last_probe_at is not None or self.last_probe_latency_ms is not None:
+                raise ValueError("an unprobed quarantine cannot have probe observations")
+        elif self.last_probe_at is None:
+            raise ValueError("last_probe_at is required after a quarantine probe")
+        if (
+            self.last_probe_result is QuarantineProbeResult.SLOW
+            and self.last_probe_latency_ms is None
+        ):
+            raise ValueError("slow quarantine probes require measured latency")
+        return self
+
+
+class AccountQuarantinePage(StrictModel):
+    items: list[AccountQuarantineRecord]
+    next_cursor: str | None = None
 
 
 class NotificationPayload(StrictModel):
