@@ -1,6 +1,6 @@
 # PRD: Guardian 异常状态与渠道错误驱动的账号恢复
 
-Status: Requirements confirmed; implementation pending worktree consolidation
+Status: Approved; implementation in progress on main
 Date: 2026-08-25
 Owner: Guardian
 Migration type: Strangler cutover followed by legacy removal

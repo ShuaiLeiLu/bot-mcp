@@ -147,7 +147,7 @@ Status: Plan proposed for approval
 - [x] GR0A: Review active quarantine core and adapter changes.
 - [x] GR0B: Review quarantine persistence and contracts.
 - [x] GR0C: Review quarantine runtime orchestration.
-- [ ] GR0D: Pass the full gate and consolidate the prerequisite on clean main.
+- [x] GR0D: Pass the full gate and consolidate the prerequisite on clean main.
 - [ ] GR1: Add direct-scheduling and conditional-recovery contracts.
 - [ ] GR2: Add account observation, error-episode, run and ledger persistence.
 - [ ] GR3: Expose sanitized account inventory from the existing probe with zero extra list calls.
@@ -169,7 +169,7 @@ Status: Plan proposed for approval
 
 ## Guardian Direct Scheduling Checkpoints
 
-- [ ] GR-A: Quarantine prerequisite is clean on main.
+- [x] GR-A: Quarantine prerequisite is clean on main.
 - [ ] GR-B: Contracts/schema migration reviewed.
 - [ ] GR-C: Same-probe account inventory proven with zero extra list calls.
 - [ ] GR-D: Guardian is the only recovery owner.
