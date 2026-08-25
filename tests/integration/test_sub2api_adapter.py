@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
 from maintenance import (
     AccountDisableResult,
+    AccountRestoreResult,
     AccountTestResult,
     MaintenancePolicy,
     RequestLogRecord,
@@ -15,6 +16,11 @@ from monitor import Sub2APIClient
 from probe import AccountGroupState, ChannelHealth, ChannelProbe, GroupAccountCounts
 
 from sub2api_mcp.adapters.sub2api import LegacySub2APIAdapter
+from sub2api_mcp.contracts import (
+    AccountQuarantineReason,
+    AccountQuarantineRecord,
+    QuarantineProbeResult,
+)
 
 
 class FakeClient:
@@ -117,6 +123,48 @@ class MaintenanceFakeClient(FakeClient):
         return []
 
 
+class QuarantineFakeClient:
+    def __init__(
+        self,
+        *,
+        success: bool,
+        definitive_failure: bool,
+        first_event_ms: int | None,
+        restore_success: bool = True,
+    ) -> None:
+        self.result = AccountTestResult(
+            "42",
+            success=success,
+            definitive_failure=definitive_failure,
+            first_event_ms=first_event_ms,
+        )
+        self.restore_success = restore_success
+        self.restore_calls = 0
+
+    async def test_account_availability(self, account_id: str) -> AccountTestResult:
+        assert account_id == "42"
+        return self.result
+
+    async def restore_account(
+        self, account_id: str, *, now: datetime
+    ) -> AccountRestoreResult:
+        assert account_id == "42"
+        assert now.tzinfo is not None
+        self.restore_calls += 1
+        return AccountRestoreResult(account_id, success=self.restore_success)
+
+
+def _quarantine(reason: AccountQuarantineReason) -> AccountQuarantineRecord:
+    return AccountQuarantineRecord(
+        account_id="42",
+        reason=reason,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=3,
+        quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+    )
+
+
 @pytest.mark.asyncio
 async def test_adapter_supports_all_provider_channel_values_without_branching() -> None:
     fake = FakeClient()
@@ -172,3 +220,95 @@ async def test_adapter_emits_strict_verified_quarantine_outcomes() -> None:
             "observed_count": 1,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_slow_quarantine_stays_isolated_until_latency_is_fast() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=45_000,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+    )
+
+    assert outcome.result is QuarantineProbeResult.SLOW
+    assert outcome.latency_ms == 45_000
+    assert outcome.recovered is False
+    assert fake.restore_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_fast_slow_quarantine_is_verified_and_restored() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=2_000,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+    )
+
+    assert outcome.result is QuarantineProbeResult.SUCCESS
+    assert outcome.recovered is True
+    assert fake.restore_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_failure_quarantine_does_not_require_latency_to_restore() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=None,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.CHANNEL_TEST_FAILED)
+    )
+
+    assert outcome.result is QuarantineProbeResult.SUCCESS
+    assert outcome.recovered is True
+    assert fake.restore_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_slow_latency_fails_closed_without_restore() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=None,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+    )
+
+    assert outcome.result is QuarantineProbeResult.INVALID
+    assert outcome.recovered is False
+    assert fake.restore_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_verification_failure_stays_quarantined() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=2_000,
+        restore_success=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+    )
+
+    assert outcome.result is QuarantineProbeResult.FAILED
+    assert outcome.recovered is False
+    assert fake.restore_calls == 1

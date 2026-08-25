@@ -159,6 +159,23 @@ class QuarantineProbeResult(StrEnum):
     INVALID = "INVALID"
 
 
+class QuarantineProbeAttempt(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    result: QuarantineProbeResult
+    latency_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    recovered: bool = False
+
+    @model_validator(mode="after")
+    def validate_probe_attempt(self) -> QuarantineProbeAttempt:
+        if self.result is QuarantineProbeResult.NEVER:
+            raise ValueError("a probe attempt cannot use NEVER")
+        if self.result is QuarantineProbeResult.SLOW and self.latency_ms is None:
+            raise ValueError("slow probe attempts require measured latency")
+        if self.recovered != (self.result is QuarantineProbeResult.SUCCESS):
+            raise ValueError("successful probe attempts require verified recovery")
+        return self
+
+
 class AccountQuarantineRecord(StrictModel):
     account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     reason: AccountQuarantineReason

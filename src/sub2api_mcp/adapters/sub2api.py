@@ -19,9 +19,12 @@ from ..actor_bridge import ActorAccount
 from ..config import Settings
 from ..contracts import (
     AccountQuarantineReason,
+    AccountQuarantineRecord,
     MaintenanceOutcome,
     MaintenanceOutcomeCode,
     ProbeResult,
+    QuarantineProbeAttempt,
+    QuarantineProbeResult,
 )
 from ..guardian.contracts import UpstreamProbeSnapshot
 
@@ -189,6 +192,48 @@ class LegacySub2APIAdapter:
             item.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
             for item in outcomes
         ]
+
+    async def probe_quarantined(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> QuarantineProbeAttempt:
+        tested = await self._client.test_account_availability(marker.account_id)
+        if not tested.success:
+            return QuarantineProbeAttempt(
+                account_id=marker.account_id,
+                result=(
+                    QuarantineProbeResult.FAILED
+                    if tested.definitive_failure
+                    else QuarantineProbeResult.INVALID
+                ),
+                latency_ms=tested.first_event_ms,
+            )
+        if marker.reason is AccountQuarantineReason.SLOW_FIRST_TOKEN:
+            if tested.first_event_ms is None:
+                return QuarantineProbeAttempt(
+                    account_id=marker.account_id,
+                    result=QuarantineProbeResult.INVALID,
+                )
+            if tested.first_event_ms > marker.threshold_ms:
+                return QuarantineProbeAttempt(
+                    account_id=marker.account_id,
+                    result=QuarantineProbeResult.SLOW,
+                    latency_ms=tested.first_event_ms,
+                )
+        restored = await self._client.restore_account(
+            marker.account_id,
+            now=datetime.now(UTC),
+        )
+        return QuarantineProbeAttempt(
+            account_id=marker.account_id,
+            result=(
+                QuarantineProbeResult.SUCCESS
+                if restored.success
+                else QuarantineProbeResult.FAILED
+            ),
+            latency_ms=tested.first_event_ms,
+            recovered=restored.success,
+        )
 
     async def find_active_account(self, email: str) -> ActorAccount | None:
         account = await self._client.find_account_by_email(email)
