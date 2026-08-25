@@ -4,9 +4,8 @@
 
 ### Added
 
-- Guardian V2 now has strict, backward-compatible contracts for shared sampling, evidence
-  reliability, confidence gates, rollout stages, recovery budgets, and field ownership; all
-  active probing and writeback capabilities remain disabled by default.
+- Guardian now has strict, backward-compatible contracts for shared sampling, evidence
+  reliability, confidence gates, conditional recovery, and per-account field ownership.
 - Guardian databases now migrate transactionally to the additive V2 evidence schema while
   preserving V1 policy, channel, sample, run, event, and audit data.
 - Each successful existing scheduler probe now publishes one canonical rich Guardian snapshot
@@ -28,15 +27,23 @@
 - Guardian V2 weight recommendations now use dimensionless price/speed signals, reserve low-
   confidence channel budget, penalize missing signals, enforce integer caps and explicit
   unallocated budget, bound load changes, and keep priority tied only to health tiers.
-- Guardian V2 now tracks per-field baselines and ownership, detects sticky human takeover,
-  audits every decision, replays idempotent results, and blocks all real writes unless the
-  rollout stage, field approval, observe-mode gate, and an explicit writer all permit them.
+- Guardian now tracks per-account field baselines and ownership, detects sticky human takeover,
+  audits every decision, replays idempotent results, and applies direct writes only while the
+  single `enabled` switch and verified account writer both permit them.
 - Guardian recovery probing now selects only uniquely mapped Guardian-owned fuses and enforces
   interval, concurrency, per-channel hourly, global daily request, and daily Token budgets with
   durable request, cost, Token, and blocked-attempt accounting.
-- Guardian REST and MCP surfaces now expose V2 sampling status, channel score explanations,
-  write ownership, and recovery budgets, plus confirmed revision-locked rollout advance and
-  immediate writeback-stop operations.
+- Guardian REST and MCP surfaces now expose direct scheduling status/start/stop, sampling status,
+  channel score explanations, write ownership, open recovery episodes, and confirmed pending
+  recovery submission. Legacy rollout endpoints return a stable deprecation error.
+- Conditional recovery reuses the existing inventory, tests only abnormal accounts per new
+  snapshot, broadens once for a new failed-channel episode, protects manual pauses, and persists
+  verified enable/disable/indeterminate outcomes.
+- Direct scheduling resolves unique monitor→group→account mappings and applies bounded
+  `load_factor` plus baseline-relative `priority` through current-read, one-field write, exact
+  read-back verification. A failed verification stops the remaining run.
+- The Guardian console is now a light, responsive operations dashboard with explicit scheduling
+  controls and redacted recovery status.
 
 ### Changed
 

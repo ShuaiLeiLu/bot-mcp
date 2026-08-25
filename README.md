@@ -12,11 +12,12 @@ server, domain, public port, or reverse proxy is assumed.
 
 - All Sub2API channel/provider values are treated as data; no provider allowlist.
 - Channel/group-account probing with latency-only change suppression.
-- Scheduled error-account recovery that restores dispatch after a successful error probe while
-  leaving non-error paused accounts untouched.
-- Failed-channel full account sweeps plus durable slow-first-token/channel-failure quarantine.
-- Every group retains at least one usable account; quarantines rotate through five bounded
-  reason-specific probes and re-enter only after verified recovery.
+- The existing 60-second inventory read is reused by Guardian without an extra account test.
+- Each new snapshot tests only error/disabled/inactive accounts; a new failed channel episode
+  tests its uniquely mapped group once. `active + schedulable=false` is always protected as a
+  human pause.
+- Explicit test success enables with exact read-back; definitive failure disables with exact
+  read-back; indeterminate results preserve state and stop unsafe follow-up writes.
 - Durable video jobs with user-selected length, steps, and resolution.
 - Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
 - Multi-target fan-out across different LangBot adapters.
@@ -34,15 +35,15 @@ http://127.0.0.1:5310/guardian/
 ```
 
 Enter an access token carrying `sub2api:admin`. The browser keeps it only in
-page memory and clears it on refresh. The console contains ten sections:
-overview, group scheduling, channel pool, live routing, probe spend,
+page memory and clears it on refresh. The console contains eleven sections:
+overview, group scheduling, channel pool, account recovery, live routing, probe spend,
 scheduling guide, events, policy, connections, and information/notifications.
 
-Guardian starts with background scheduling disabled, `observe_only=true`, and
-all `auto_apply` switches off. An administrator can enable periodic evaluation
-from **策略配置**, but this build still blocks production writeback at the
-service boundary. It reads and scores real state, persists candidate actions,
-and never re-enables or actively probes a channel already paused upstream.
+Guardian has one direct scheduling switch and no observe/rollout mode. Start and emergency stop
+require confirmation, policy revision, and an idempotency key. When enabled, Guardian resolves a
+unique monitor→group→account mapping, applies bounded `load_factor` and baseline-relative
+`priority` changes one field at a time, then performs an independent exact read-back. Account
+`schedulable` changes remain tied to explicit conditional account tests.
 State transitions are queued to existing `STATUS` delivery targets, so the same
 LangBot fan-out can notify WeChat and every other configured adapter.
 
@@ -101,10 +102,11 @@ errors retry the original representation.
   `sub2api_submit_recovery`, `sub2api_submit_maintenance`.
 - Bindings: `sub2api_bind_account`, `sub2api_unbind_account`.
 - Video/jobs: `sub2api_submit_video`, `sub2api_cancel_job`.
-- Guardian/read: `guardian_get_policy`, `guardian_get_overview`,
+- Guardian/read: `guardian_get_policy`, `guardian_get_status`,
+  `guardian_get_recovery_status`, `guardian_get_overview`,
   `guardian_list_groups`, `guardian_list_channels`, `guardian_get_channel`,
   `guardian_list_events`, `guardian_get_probe_spend`.
-- Guardian/admin: `guardian_update_policy`, `guardian_run_once`,
+- Guardian/admin: `guardian_set_scheduling_enabled`, `guardian_update_policy`, `guardian_run_once`,
   `guardian_cancel_run`, `guardian_channel_action`,
   `guardian_preview_restore`, `guardian_execute_restore`.
 

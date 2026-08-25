@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     quiet_hours_start: str = "23:00"
     quiet_hours_end: str = "08:00"
 
+    # Deprecated compatibility inputs. Guardian ignores the legacy periodic recovery window;
+    # direct conditional recovery is controlled by GuardianPolicy.enabled and durable evidence.
     recovery_enabled: bool = False
     recovery_window_start: str = "02:00"
     recovery_window_end: str = "05:00"
