@@ -122,6 +122,40 @@ async def test_quarantine_listing_is_bounded_and_cursor_paginated(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_quarantine_probe_selection_rotates_oldest_observations(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    for account_id in ("101", "102", "103", "104", "105", "106"):
+        await repository.upsert_account_quarantine(
+            AccountQuarantineRecord(
+                account_id=account_id,
+                reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+                group_ids=("36",),
+                threshold_ms=30_000,
+                observed_count=3,
+                quarantined_at=clock.now,
+            )
+        )
+
+    first = await repository.list_account_quarantines_for_probe(limit=5)
+    clock.now += timedelta(minutes=1)
+    await repository.update_account_quarantine_probe(
+        "101",
+        probed_at=clock.now,
+        latency_ms=45_000,
+        result=QuarantineProbeResult.SLOW,
+    )
+    rotated = await repository.list_account_quarantines_for_probe(limit=5)
+
+    assert [item.account_id for item in first] == ["101", "102", "103", "104", "105"]
+    assert [item.account_id for item in rotated] == ["102", "103", "104", "105", "106"]
+
+    with pytest.raises(ServiceError) as invalid_limit:
+        await repository.list_account_quarantines_for_probe(limit=6)
+    assert invalid_limit.value.code == "INVALID_PAGE_SIZE"
+
+
+@pytest.mark.asyncio
 async def test_quarantine_invalid_persisted_groups_fail_closed(tmp_path: Path) -> None:
     clock = MutableClock()
     repository = await _repo(tmp_path, clock)

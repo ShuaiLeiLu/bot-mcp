@@ -669,6 +669,34 @@ class SqliteRepository:
             next_cursor=next_cursor,
         )
 
+    async def list_account_quarantines_for_probe(
+        self,
+        *,
+        limit: int = 5,
+    ) -> list[AccountQuarantineRecord]:
+        return await asyncio.to_thread(
+            self._list_account_quarantines_for_probe_sync,
+            limit,
+        )
+
+    def _list_account_quarantines_for_probe_sync(
+        self,
+        limit: int,
+    ) -> list[AccountQuarantineRecord]:
+        if not 1 <= limit <= 5:
+            raise ServiceError(
+                "INVALID_PAGE_SIZE",
+                "Account quarantine probe limit must be between 1 and 5",
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM account_quarantines "
+                "ORDER BY CASE WHEN last_probe_at IS NULL THEN 0 ELSE 1 END, "
+                "last_probe_at ASC, quarantined_at ASC, account_id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._quarantine_from_row(row) for row in rows]
+
     async def update_account_quarantine_probe(
         self,
         account_id: str,
