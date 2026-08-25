@@ -610,7 +610,9 @@ class Sub2APIClient:
     async def fetch(self) -> list[ChannelHealth]:
         return await asyncio.to_thread(self.fetch_sync)
 
-    def fetch_group_account_counts_sync(self) -> list[GroupAccountCounts]:
+    def fetch_group_account_snapshot_sync(
+        self,
+    ) -> tuple[list[GroupAccountCounts], list[AccountGroupState]]:
         try:
             groups: list[GroupDefinition] = parse_group_definitions(
                 self._request_json(self.ADMIN_GROUPS_URL)
@@ -618,9 +620,13 @@ class Sub2APIClient:
             accounts = self._maintenance_adapter.fetch_account_group_states_sync(
                 now=self._now_provider()
             )
-            return aggregate_group_account_counts(groups, accounts)
+            return aggregate_group_account_counts(groups, accounts), accounts
         except MonitorDataError as exc:
             raise MonitorRequestError("Sub2API returned invalid group account data") from exc
+
+    def fetch_group_account_counts_sync(self) -> list[GroupAccountCounts]:
+        counts, _ = self.fetch_group_account_snapshot_sync()
+        return counts
 
     async def fetch_group_account_counts(self) -> list[GroupAccountCounts]:
         return await asyncio.to_thread(self.fetch_group_account_counts_sync)
@@ -717,9 +723,11 @@ class Sub2APIClient:
             end=end,
         )
 
-    def fetch_probe_sync(self) -> list[ChannelProbe]:
+    def fetch_probe_with_accounts_sync(
+        self,
+    ) -> tuple[list[ChannelProbe], list[AccountGroupState]]:
         channels = self.fetch_sync()
-        groups = self.fetch_group_account_counts_sync()
+        groups, accounts = self.fetch_group_account_snapshot_sync()
         try:
             usage_records = self.fetch_probe_usage_records_sync(channels)
         except (MonitorDataError, MonitorRequestError) as exc:
@@ -729,11 +737,18 @@ class Sub2APIClient:
             )
             usage_records = []
         bindings = resolve_channel_group_ids(channels, usage_records)
-        return build_channel_probes(
-            channels,
-            groups,
-            group_ids_by_monitor=bindings,
+        return (
+            build_channel_probes(
+                channels,
+                groups,
+                group_ids_by_monitor=bindings,
+            ),
+            accounts,
         )
+
+    def fetch_probe_sync(self) -> list[ChannelProbe]:
+        probes, _ = self.fetch_probe_with_accounts_sync()
+        return probes
 
     def fetch_probe_usage_records_sync(
         self,
@@ -822,6 +837,11 @@ class Sub2APIClient:
             else:
                 raise MonitorDataError("too many probe usage pages")
         return collected
+
+    async def fetch_probe_with_accounts(
+        self,
+    ) -> tuple[list[ChannelProbe], list[AccountGroupState]]:
+        return await asyncio.to_thread(self.fetch_probe_with_accounts_sync)
 
     async def fetch_probe(self) -> list[ChannelProbe]:
         return await asyncio.to_thread(self.fetch_probe_sync)

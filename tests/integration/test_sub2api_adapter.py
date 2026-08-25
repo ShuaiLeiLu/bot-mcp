@@ -18,6 +18,7 @@ from probe import AccountGroupState, ChannelHealth, ChannelProbe, GroupAccountCo
 
 from sub2api_mcp.adapters.sub2api import LegacySub2APIAdapter
 from sub2api_mcp.contracts import (
+    AccountObservationStatus,
     AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
@@ -58,6 +59,22 @@ class FakeClient:
                 )
             )
         return channels
+
+    async def fetch_probe_with_accounts(
+        self,
+    ) -> tuple[list[ChannelProbe], list[AccountGroupState]]:
+        probes = await self.fetch_probe()
+        accounts = [
+            AccountGroupState(
+                account_id=str(100 + index),
+                group_ids=(str(index),),
+                bucket="available",
+                status="active",
+                schedulable=True,
+            )
+            for index in range(1, 5)
+        ]
+        return probes, accounts
 
 
 class MaintenanceFakeClient(FakeClient):
@@ -232,6 +249,17 @@ async def test_adapter_supports_all_provider_channel_values_without_branching() 
         "gemini-channel",
         "future-provider-channel",
     ]
+    assert fake.calls == 1
+    assert [item.account_id for item in result.account_observations] == [
+        "101",
+        "102",
+        "103",
+        "104",
+    ]
+    assert all(
+        item.status is AccountObservationStatus.ACTIVE
+        for item in result.account_observations
+    )
     assert result.guardian_snapshot is not None
     assert result.guardian_snapshot["entries"][0]["latency_ms"] == 10  # type: ignore[index]
     assert result.captured_at is not None

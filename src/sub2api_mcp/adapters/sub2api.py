@@ -25,6 +25,8 @@ from recovery import active_recovery_window
 from ..actor_bridge import ActorAccount
 from ..config import Settings
 from ..contracts import (
+    AccountObservation,
+    AccountObservationStatus,
     AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
@@ -111,7 +113,7 @@ class LegacySub2APIAdapter:
 
     async def probe(self) -> ProbeResult:
         triggered_at = datetime.now(UTC)
-        probes = await self._client.fetch_probe()
+        probes, accounts = await self._client.fetch_probe_with_accounts()
         self._last_probes = probes
         snapshot = _SNAPSHOT_ADAPTER.validate_json(ProbeSnapshot.from_probes(probes).to_bytes())
         image_base64: str | None = None
@@ -130,6 +132,17 @@ class LegacySub2APIAdapter:
             report=format_status_report(probes, triggered_at=triggered_at),
             image_base64=image_base64,
             guardian_snapshot=self._build_guardian_snapshot(probes),
+            account_observations=tuple(
+                AccountObservation(
+                    account_id=account.account_id,
+                    group_ids=account.group_ids,
+                    status=AccountObservationStatus(account.status),
+                    schedulable=account.schedulable,
+                    expired=account.expired,
+                    temporary_unavailable=account.bucket == "temporary",
+                )
+                for account in sorted(accounts, key=lambda item: int(item.account_id))
+            ),
             captured_at=triggered_at,
         )
 

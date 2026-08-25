@@ -409,11 +409,40 @@ class VideoSubmission(StrictModel):
     queue_count: int = Field(ge=1)
 
 
+class AccountObservationStatus(StrEnum):
+    ACTIVE = "active"
+    ERROR = "error"
+    DISABLED = "disabled"
+    INACTIVE = "inactive"
+
+
+class AccountObservation(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    group_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    status: AccountObservationStatus
+    schedulable: bool
+    expired: bool = False
+    temporary_unavailable: bool = False
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("group IDs must be positive decimal identifiers")
+        if tuple(sorted(set(value), key=int)) != value:
+            raise ValueError("group IDs must be unique and numerically sorted")
+        return value
+
+
 class ProbeResult(StrictModel):
     snapshot: dict[str, Any]
     report: str = Field(min_length=1, max_length=50000)
     image_base64: str | None = Field(default=None, max_length=16 * 1024 * 1024)
     guardian_snapshot: dict[str, Any] | None = None
+    account_observations: tuple[AccountObservation, ...] = Field(
+        default=(),
+        max_length=10_000,
+    )
     captured_at: datetime | None = None
 
     @model_validator(mode="after")

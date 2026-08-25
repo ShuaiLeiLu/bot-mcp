@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ..contracts import AccountObservation, AccountObservationStatus
+
+GuardianAccountObservation = AccountObservation
+GuardianAccountStatus = AccountObservationStatus
 
 
 class StrictModel(BaseModel):
@@ -78,31 +82,6 @@ class AccountRecoveryRunStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     INTERRUPTED = "INTERRUPTED"
-
-
-class GuardianAccountStatus(StrEnum):
-    ACTIVE = "active"
-    ERROR = "error"
-    DISABLED = "disabled"
-    INACTIVE = "inactive"
-
-
-class GuardianAccountObservation(StrictModel):
-    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
-    group_ids: tuple[str, ...] = Field(default=(), max_length=100)
-    status: GuardianAccountStatus
-    schedulable: bool
-    expired: bool = False
-    temporary_unavailable: bool = False
-
-    @field_validator("group_ids")
-    @classmethod
-    def validate_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
-            raise ValueError("group IDs must be positive decimal identifiers")
-        if tuple(sorted(set(value), key=int)) != value:
-            raise ValueError("group IDs must be unique and numerically sorted")
-        return value
 
 
 class GuardianChannelErrorEpisode(StrictModel):

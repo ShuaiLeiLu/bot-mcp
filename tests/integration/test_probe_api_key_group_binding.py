@@ -96,9 +96,12 @@ def test_fetch_probe_binds_arbitrary_channel_name_through_api_key_usage_group() 
         },
     }
 
+    requested_paths: list[str] = []
+
     def opener(request: Request, timeout: int) -> FakeResponse:
         del timeout
         path = urlsplit(request.full_url).path
+        requested_paths.append(path)
         if path.endswith("/channel-monitors"):
             return FakeResponse(channel_payload)
         if path.endswith("/groups/all"):
@@ -111,8 +114,13 @@ def test_fetch_probe_binds_arbitrary_channel_name_through_api_key_usage_group() 
             return FakeResponse(usage_payload)
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    probes = Sub2APIClient("admin-value", opener=opener).fetch_probe_sync()
+    probes, accounts = Sub2APIClient(
+        "admin-value",
+        opener=opener,
+    ).fetch_probe_with_accounts_sync()
 
     assert probes[0].accounts is not None
     assert probes[0].accounts.group_id == "47"
     assert probes[0].accounts.available_count == 1
+    assert accounts[0].account_id == "9001"
+    assert requested_paths.count("/api/v1/admin/accounts") == 1
