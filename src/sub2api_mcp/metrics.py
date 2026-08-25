@@ -32,6 +32,8 @@ class Metrics:
     guardian_recovery_probe_requests: Counter
     guardian_recovery_probe_tokens: Counter
     guardian_field_ownership_changes: Counter
+    guardian_scheduling_writes: Counter
+    guardian_account_recovery_results: Counter
     outbox_backlog: Gauge
     outbox_oldest_age_seconds: Gauge
 
@@ -169,6 +171,18 @@ class Metrics:
                 "guardian_field_ownership_changes_total",
                 "Guardian field ownership transitions",
                 ("from_owner", "to_owner"),
+                registry=registry,
+            ),
+            guardian_scheduling_writes=Counter(
+                "guardian_scheduling_writes_total",
+                "Verified Guardian scheduling field outcomes",
+                ("field", "outcome"),
+                registry=registry,
+            ),
+            guardian_account_recovery_results=Counter(
+                "guardian_account_recovery_results_total",
+                "Guardian conditional account recovery outcomes",
+                ("result",),
                 registry=registry,
             ),
             outbox_backlog=Gauge(

@@ -44,6 +44,11 @@ def test_metrics_render_red_and_queue_signals() -> None:
         reason="SLOW_FIRST_TOKEN",
         result="SLOW",
     ).inc()
+    metrics.guardian_scheduling_writes.labels(
+        field="LOAD_FACTOR",
+        outcome="FAILED",
+    ).inc()
+    metrics.guardian_account_recovery_results.labels(result="INDETERMINATE").inc()
 
     output = metrics.render().decode()
 
@@ -59,6 +64,14 @@ def test_metrics_render_red_and_queue_signals() -> None:
     assert "guardian_recovery_probe_requests_total" in output
     assert "guardian_recovery_probe_tokens_total" in output
     assert "guardian_field_ownership_changes_total" in output
+    assert (
+        'guardian_scheduling_writes_total{field="LOAD_FACTOR",outcome="FAILED"} 1.0'
+        in output
+    )
+    assert (
+        'guardian_account_recovery_results_total{result="INDETERMINATE"} 1.0'
+        in output
+    )
     assert 'sub2api_account_quarantines{reason="SLOW_FIRST_TOKEN"} 1.0' in output
     assert (
         'sub2api_account_quarantine_probes_total{reason="SLOW_FIRST_TOKEN",result="SLOW"} 1.0'

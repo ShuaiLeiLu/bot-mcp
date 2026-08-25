@@ -264,6 +264,19 @@ async def test_notification_failure_does_not_replay_verified_mutation(
     assert operations.test_calls == ["1"]
     assert operations.enable_calls == ["1"]
     assert await reopened_notifications.outbox_backlog() == 1
+    delivery = await reopened_notifications.claim_next_delivery(
+        "notification-check",
+        lease_seconds=30,
+    )
+    assert delivery is not None
+    text = delivery.payload["notification"]["text"]
+    assert "触发时间：2026-08-25 " in text
+    assert "（北京时间）" in text
+    assert "触发：BAD_ACCOUNT_STATE" in text
+    assert "已测试：1｜启用：1｜禁用：0｜不确定：0｜跳过：0" in text
+    assert "渠道 快照｜分组 未分组" in text
+    assert "已启用并完成精确回读" in text
+    assert "success" not in text.casefold()
 
 
 @pytest.mark.asyncio

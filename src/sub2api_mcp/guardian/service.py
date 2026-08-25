@@ -18,6 +18,7 @@ from ..repository import SqliteRepository
 from .account_recovery import AccountRecoveryExecutor, AccountRecoveryOperations
 from .contracts import (
     AccountRecoveryOwner,
+    AccountRecoveryResult,
     AccountRecoveryRunStatus,
     AccountRecoveryRunTrigger,
     ChannelPolicyOverride,
@@ -28,6 +29,7 @@ from .contracts import (
     GuardianFieldOwner,
     GuardianFieldOwnership,
     GuardianPolicy,
+    GuardianWriteOutcome,
     ManualControl,
 )
 from .engine import GuardianEngine
@@ -64,6 +66,21 @@ def _format_trigger_time(value: object) -> str:
     return f"触发时间：{local:%Y-%m-%d %H:%M:%S}（北京时间）"
 
 
+_RECOVERY_REASON_LABELS = {
+    "verified": "已完成精确回读",
+    "verified_enabled": "已启用并完成精确回读",
+    "verified_disabled": "已禁用并完成精确回读",
+    "already_enabled": "原状态已启用",
+    "already_disabled": "原状态已禁用",
+    "manual_pause": "人工暂停，保持不变",
+    "expired": "账号已过期，保持不变",
+    "temporary_unavailable": "临时不可调度，保持不变",
+    "account_state_unavailable": "账号状态无法确认",
+    "account_test_failed": "账号测试结果不确定",
+    "run_stopped_after_unverified_mutation": "前项回读失败，本轮已安全停止",
+}
+
+
 class GuardianService:
     def __init__(
         self,
@@ -86,6 +103,7 @@ class GuardianService:
             else None
         )
         self._notified_account_recovery_run_ids: set[str] = set()
+        self._metered_account_recovery_run_ids: set[str] = set()
         self._last_retention_at: datetime | None = None
         self._recovery_metric_requests = 0
         self._recovery_metric_tokens = 0
@@ -376,6 +394,17 @@ class GuardianService:
         )
         records = await self.repository.list_account_recovery_results(run.run_id)
         if run.status is not AccountRecoveryRunStatus.RUNNING:
+            if (
+                self._metrics is not None
+                and run.run_id not in self._metered_account_recovery_run_ids
+            ):
+                allowed_results = {item.value for item in AccountRecoveryResult}
+                for record in records:
+                    if record.result.value in allowed_results:
+                        self._metrics.guardian_account_recovery_results.labels(
+                            result=record.result.value
+                        ).inc()
+                self._metered_account_recovery_run_ids.add(run.run_id)
             await self._notify_account_recovery(run, records)
         return run
 
@@ -579,7 +608,9 @@ class GuardianService:
             details = [
                 (
                     f"{index}. 账号 #{item.account_id}｜"
-                    f"{result_labels[item.result.value]}｜{item.reason or '—'}"
+                    f"渠道 {item.channel_id or '快照'}｜分组 {item.group_id or '未分组'}｜"
+                    f"{result_labels[item.result.value]}｜"
+                    f"{_RECOVERY_REASON_LABELS.get(item.reason, '已记录安全结果')}"
                 )
                 for index, item in enumerate(records[:30], start=1)
             ]
@@ -646,6 +677,31 @@ class GuardianService:
         reason = str(result.get("writeback_blocked_reason") or "")
         if reason:
             self._metrics.guardian_write_frozen.labels(reason=reason).inc()
+        raw_field_outcomes = result.get("writeback_field_outcomes")
+        field_outcomes = (
+            cast(dict[str, object], raw_field_outcomes)
+            if isinstance(raw_field_outcomes, dict)
+            else {}
+        )
+        for field_name in GuardianFieldName:
+            raw_outcomes = field_outcomes.get(field_name.value)
+            outcomes = (
+                cast(dict[str, object], raw_outcomes)
+                if isinstance(raw_outcomes, dict)
+                else {}
+            )
+            for outcome in (
+                GuardianWriteOutcome.APPLIED,
+                GuardianWriteOutcome.BLOCKED,
+                GuardianWriteOutcome.FAILED,
+                GuardianWriteOutcome.NO_CHANGE,
+            ):
+                count = outcomes.get(outcome.value)
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    self._metrics.guardian_scheduling_writes.labels(
+                        field=field_name.value,
+                        outcome=outcome.value,
+                    ).inc(count)
         duplicates = int(result.get("duplicate_observations") or 0)
         if duplicates:
             self._metrics.guardian_duplicate_observations.labels(

@@ -878,6 +878,7 @@ class GuardianEngine:
             "writes_blocked": writeback["blocked"],
             "writes_failed": writeback["failed"],
             "writeback_reasons": writeback["reasons"],
+            "writeback_field_outcomes": writeback["field_outcomes"],
             "strategy": policy.strategy.value,
             "weight_candidates": weights,
             "duplicate_observations": duplicate_observations,
@@ -913,6 +914,7 @@ class GuardianEngine:
             "failed": 0,
             "no_change": 0,
             "reasons": {},
+            "field_outcomes": {},
             "applied_by_channel": {},
             "global_reason": "",
         }
@@ -1052,6 +1054,14 @@ class GuardianEngine:
                     )
                     result["proposed"] = int(result["proposed"]) + 1
                     decision = await self._writeback.apply(proposal, policy=policy)
+                    field_outcomes = cast(
+                        dict[str, dict[str, int]],
+                        result["field_outcomes"],
+                    )
+                    outcomes = field_outcomes.setdefault(field_name.value, {})
+                    outcomes[decision.outcome.value] = (
+                        outcomes.get(decision.outcome.value, 0) + 1
+                    )
                     if decision.outcome is GuardianWriteOutcome.APPLIED:
                         result["applied"] = int(result["applied"]) + 1
                         applied = cast(dict[str, int], result["applied_by_channel"])
