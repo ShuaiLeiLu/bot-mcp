@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -519,12 +520,13 @@ class Sub2APIClient:
             headers["Content-Type"] = "application/json"
         request = urllib_request.Request(url, data=body, headers=headers, method=method)
         started = self._monotonic()
+        timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = started + timeout
         chunks: list[bytes] = []
         event_lines: list[bytes] = []
         first_event_ms: int | None = None
         total = 0
         try:
-            timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
             with self._opener(request, timeout=timeout) as response:
                 response_headers = getattr(response, "headers", None)
                 raw_content_type = (
@@ -536,11 +538,16 @@ class Sub2APIClient:
                 if content_type != "text/event-stream":
                     raise MonitorRequestError(
                         "Sub2API returned an unexpected content type"
-                    )
+                )
                 while True:
                     line = response.readline(self.MAX_RESPONSE_BYTES + 1)
                     if not line:
                         break
+                    observed_at = self._monotonic()
+                    if observed_at >= deadline:
+                        raise MonitorRequestError(
+                            "Sub2API SSE request exceeded its deadline"
+                        )
                     total += len(line)
                     if total > self.MAX_RESPONSE_BYTES:
                         raise MonitorRequestError("Sub2API response is too large")
@@ -552,7 +559,7 @@ class Sub2APIClient:
                         ):
                             first_event_ms = max(
                                 0,
-                                int((self._monotonic() - started) * 1000),
+                                math.ceil((observed_at - started) * 1000),
                             )
                         event_lines = []
                     else:
@@ -639,11 +646,31 @@ class Sub2APIClient:
     async def disable_account(self, account_id: str):
         return await self._maintenance_adapter.disable_account(account_id)
 
-    def restore_account_sync(self, account_id: str, *, now: datetime):
-        return self._maintenance_adapter.restore_account_sync(account_id, now=now)
+    def restore_account_sync(
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+        deadline: datetime | None = None,
+    ):
+        return self._maintenance_adapter.restore_account_sync(
+            account_id,
+            now=now,
+            deadline=deadline,
+        )
 
-    async def restore_account(self, account_id: str, *, now: datetime):
-        return await self._maintenance_adapter.restore_account(account_id, now=now)
+    async def restore_account(
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+        deadline: datetime | None = None,
+    ):
+        return await self._maintenance_adapter.restore_account(
+            account_id,
+            now=now,
+            deadline=deadline,
+        )
 
     def fetch_recent_usage_logs_sync(self, *, start: datetime, end: datetime):
         return self._maintenance_adapter.fetch_recent_usage_logs_sync(

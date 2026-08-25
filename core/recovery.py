@@ -317,7 +317,7 @@ def parse_recovery_account_page(
     return candidates, pages
 
 
-def account_test_succeeded(body: bytes) -> bool:
+def account_test_result(body: bytes) -> bool | None:
     if not isinstance(body, bytes) or not body:
         raise MonitorDataError("invalid account test response")
     try:
@@ -356,7 +356,11 @@ def account_test_succeeded(body: bytes) -> bool:
             if not isinstance(event.get("success"), bool) or completed is not None:
                 raise MonitorDataError("invalid account test completion")
             completed = event["success"]
-    return completed is True
+    return completed
+
+
+def account_test_succeeded(body: bytes) -> bool:
+    return account_test_result(body) is True
 
 
 def recovered_account_is_normal(

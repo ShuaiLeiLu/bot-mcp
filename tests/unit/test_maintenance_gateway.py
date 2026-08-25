@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from client_errors import MonitorRequestError
 from maintenance_gateway import MaintenanceApiAdapter, MaintenanceApiAdapterConfig
 from monitor import Sub2APIClient
 from probe import MonitorDataError
@@ -99,6 +100,28 @@ def test_account_test_records_first_valid_sse_data_event_latency() -> None:
     assert result.first_event_ms == 1_234
 
 
+def test_account_test_without_completion_is_indeterminate() -> None:
+    port = AccountMutationPort()
+    port._request_sse_body_with_first_event = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
+        b'data: {"type":"progress"}\n\n',
+        100,
+    )
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.test_account_availability_sync("42")
+
+    assert result.success is False
+    assert result.definitive_failure is False
+    assert result.reason == "test_incomplete"
+
+
 def test_quarantined_account_restore_requires_verified_active_dispatch() -> None:
     port = AccountMutationPort()
     adapter = MaintenanceApiAdapter(
@@ -131,8 +154,32 @@ def test_quarantined_account_restore_requires_verified_active_dispatch() -> None
     ]
 
 
+def test_quarantined_account_restore_stops_after_deadline() -> None:
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    port = AccountMutationPort()
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+        clock=lambda: now,
+    )
+
+    result = adapter.restore_account_sync(
+        "42",
+        now=now,
+        deadline=now,
+    )
+
+    assert result.success is False
+    assert result.reason == "restore_deadline_expired"
+    assert port.requests == []
+
+
 def test_sub2api_streaming_probe_measures_before_the_response_completes() -> None:
-    ticks = iter((10.0, 10.25))
+    ticks = iter((10.0, 10.1, 10.25, 10.3, 10.4))
     response = StreamingResponse(
         b'data: {"type":"progress"}\n\n'
         b'data: {"type":"test_complete","success":true}\n\n'
@@ -152,6 +199,49 @@ def test_sub2api_streaming_probe_measures_before_the_response_completes() -> Non
 
     assert first_event_ms == 250
     assert body.endswith(b'"success":true}\n\n')
+
+
+def test_sub2api_streaming_probe_uses_ceiling_at_threshold_boundary() -> None:
+    ticks = iter((10.0, 20.0, 40.0004))
+    response = StreamingResponse(
+        b'data: {"type":"test_complete","success":true}\n\n'
+    )
+    client = Sub2APIClient(
+        "admin-key",
+        opener=lambda *_args, **_kwargs: response,
+        monotonic_provider=lambda: next(ticks),
+    )
+
+    _, first_event_ms = client._request_sse_body_with_first_event(  # pyright: ignore[reportPrivateUsage]
+        "https://zhisuanapi.cn/api/v1/admin/accounts/42/test",
+        method="POST",
+        payload={},
+        timeout_seconds=31,
+    )
+
+    assert first_event_ms == 30_001
+
+
+def test_sub2api_streaming_probe_has_an_absolute_deadline() -> None:
+    ticks = iter((0.0, 0.2, 0.5, 0.8, 1.1))
+    response = StreamingResponse(
+        b': heartbeat\n\n'
+        b': heartbeat\n\n'
+        b'data: {"type":"test_complete","success":true}\n\n'
+    )
+    client = Sub2APIClient(
+        "admin-key",
+        opener=lambda *_args, **_kwargs: response,
+        monotonic_provider=lambda: next(ticks),
+    )
+
+    with pytest.raises(MonitorRequestError):
+        client._request_sse_body_with_first_event(  # pyright: ignore[reportPrivateUsage]
+            "https://zhisuanapi.cn/api/v1/admin/accounts/42/test",
+            method="POST",
+            payload={},
+            timeout_seconds=1,
+        )
 
 
 def _page(

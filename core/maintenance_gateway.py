@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -20,7 +21,7 @@ from probe import (
     MonitorDataError,
     parse_account_group_state_page,
 )
-from recovery import account_test_succeeded, recovered_account_is_normal
+from recovery import account_test_result, recovered_account_is_normal
 
 
 class MaintenanceRequestPort(Protocol):
@@ -194,9 +195,12 @@ class MaintenanceApiAdapter:
         self,
         request_port: MaintenanceRequestPort,
         config: MaintenanceApiAdapterConfig,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ):
         self._request_port = request_port
         self._config = config
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def _fetch_account_group_states_sync(
         self,
@@ -264,7 +268,7 @@ class MaintenanceApiAdapter:
                 payload={},
                 timeout_seconds=self._config.account_test_timeout_seconds,
             )
-            succeeded = account_test_succeeded(body)
+            completed = account_test_result(body)
         except (MonitorRequestError, MonitorDataError, UnicodeDecodeError):
             return AccountTestResult(
                 normalized_id,
@@ -274,9 +278,15 @@ class MaintenanceApiAdapter:
             )
         return AccountTestResult(
             normalized_id,
-            success=succeeded,
-            definitive_failure=not succeeded,
-            reason="" if succeeded else "test_failed",
+            success=completed is True,
+            definitive_failure=completed is False,
+            reason=(
+                ""
+                if completed is True
+                else "test_failed"
+                if completed is False
+                else "test_incomplete"
+            ),
             first_event_ms=first_event_ms,
         )
 
@@ -330,24 +340,47 @@ class MaintenanceApiAdapter:
         account_id: str,
         *,
         now: datetime,
+        deadline: datetime | None = None,
     ) -> AccountRestoreResult:
         normalized_id = _positive_id_text(account_id, "account id")
-        if now.tzinfo is None:
-            raise ValueError("account restore time must be timezone-aware")
+        if now.tzinfo is None or (deadline is not None and deadline.tzinfo is None):
+            raise ValueError("account restore times must be timezone-aware")
         account_url = f"{self._config.accounts_url}/{normalized_id}"
+
+        def deadline_active() -> bool:
+            return deadline is None or self._clock().astimezone(UTC) < deadline.astimezone(UTC)
+
         try:
+            if not deadline_active():
+                return AccountRestoreResult(
+                    normalized_id,
+                    success=False,
+                    reason="restore_deadline_expired",
+                )
             activated = self._request_port._request_json(
                 account_url,
                 method="PUT",
                 payload={"status": "active"},
             )
             _require_success_envelope(activated)
+            if not deadline_active():
+                return AccountRestoreResult(
+                    normalized_id,
+                    success=False,
+                    reason="restore_deadline_expired",
+                )
             scheduled = self._request_port._request_json(
                 f"{account_url}/schedulable",
                 method="POST",
                 payload={"schedulable": True},
             )
             _require_success_envelope(scheduled)
+            if not deadline_active():
+                return AccountRestoreResult(
+                    normalized_id,
+                    success=False,
+                    reason="restore_deadline_expired",
+                )
             verified = self._request_port._request_json(account_url)
             success = recovered_account_is_normal(
                 verified,
@@ -371,11 +404,13 @@ class MaintenanceApiAdapter:
         account_id: str,
         *,
         now: datetime,
+        deadline: datetime | None = None,
     ) -> AccountRestoreResult:
         return await asyncio.to_thread(
             self.restore_account_sync,
             account_id,
             now=now,
+            deadline=deadline,
         )
 
     def fetch_recent_usage_logs_sync(
