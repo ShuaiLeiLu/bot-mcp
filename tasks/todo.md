@@ -157,7 +157,7 @@ Status: Plan proposed for approval
 - [x] GR7: Execute and persist one Guardian-owned account recovery run.
 - [x] GR8: Transfer RECOVERY jobs and compatible MCP submission to Guardian.
 - [x] GR9: Prove the Sub2API channel mutation contract without production writes.
-- [ ] GR10: Implement verified load_factor, priority and schedulable writer operations.
+- [x] GR10: Implement verified load_factor, priority and schedulable writer operations.
 - [ ] GR11: Replace observe/rollout controls with direct scheduling start/stop.
 - [ ] GR12: Apply bounded scheduling proposals in Guardian.
 - [ ] GR13: Add direct scheduling/recovery REST and MCP controls.
