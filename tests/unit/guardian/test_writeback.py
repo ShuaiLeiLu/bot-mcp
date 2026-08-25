@@ -57,6 +57,14 @@ async def _repository(tmp_path: Path) -> GuardianRepository:
     return repository
 
 
+async def _set_enabled(repository: GuardianRepository, enabled: bool = True) -> None:
+    current = await repository.get_policy()
+    await repository.update_policy(
+        current.model_copy(update={"enabled": enabled}),
+        expected_revision=current.revision,
+    )
+
+
 def _proposal(
     *,
     current: Scalar = 100,
@@ -85,6 +93,7 @@ async def test_disabled_guardian_and_missing_adapter_never_write(tmp_path: Path)
         _proposal(),
         policy=GuardianPolicy(),
     )
+    await _set_enabled(repository)
     missing_adapter = await GuardianWritebackService(repository, None).apply(
         _proposal(key="write-2"),
         policy=GuardianPolicy(enabled=True),
@@ -104,7 +113,8 @@ async def test_human_change_claims_field_and_blocks_guardian(tmp_path: Path) -> 
     service = GuardianWritebackService(repository, writer)
     policy = GuardianPolicy(enabled=True)
 
-    await service.apply(_proposal(current=100, desired=80), policy=GuardianPolicy())
+    await _set_enabled(repository)
+    await service.apply(_proposal(current=100, desired=80), policy=policy)
     decision = await service.apply(
         _proposal(current=120, desired=80, key="write-human"),
         policy=policy,
@@ -119,7 +129,7 @@ async def test_human_change_claims_field_and_blocks_guardian(tmp_path: Path) -> 
     assert decision.reason == "human_field_takeover"
     assert ownership is not None
     assert ownership.owner is GuardianFieldOwner.HUMAN
-    assert writer.calls == []
+    assert writer.calls == [("42", GuardianFieldName.LOAD_FACTOR, 80)]
 
 
 @pytest.mark.asyncio
@@ -128,6 +138,7 @@ async def test_enabled_write_is_applied_once_and_is_idempotent(tmp_path: Path) -
     writer = FakeWriter()
     service = GuardianWritebackService(repository, writer)
     policy = GuardianPolicy(enabled=True)
+    await _set_enabled(repository)
     proposal = _proposal()
 
     first = await service.apply(proposal, policy=policy)
@@ -164,6 +175,7 @@ async def test_enabled_direct_mode_authorizes_every_verified_field(
     repository = await _repository(tmp_path)
     writer = FakeWriter()
     service = GuardianWritebackService(repository, writer)
+    await _set_enabled(repository)
 
     decision = await service.apply(
         _proposal(
@@ -187,6 +199,7 @@ async def test_writer_verification_mismatch_fails_without_claiming_ownership(
     writer = MismatchedWriter()
     service = GuardianWritebackService(repository, writer)
     policy = GuardianPolicy(enabled=True)
+    await _set_enabled(repository)
 
     decision = await service.apply(_proposal(), policy=policy)
     ownership = await repository.get_field_ownership(
