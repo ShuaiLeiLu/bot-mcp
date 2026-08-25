@@ -781,14 +781,26 @@ class SqliteRepository:
             connection.close()
         return removed.rowcount == 1
 
-    async def account_quarantine_count(self) -> int:
-        return await asyncio.to_thread(self._account_quarantine_count_sync)
+    async def account_quarantine_count(
+        self,
+        reason: AccountQuarantineReason | None = None,
+    ) -> int:
+        return await asyncio.to_thread(self._account_quarantine_count_sync, reason)
 
-    def _account_quarantine_count_sync(self) -> int:
+    def _account_quarantine_count_sync(
+        self,
+        reason: AccountQuarantineReason | None,
+    ) -> int:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count FROM account_quarantines"
-            ).fetchone()
+            if reason is None:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS count FROM account_quarantines"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS count FROM account_quarantines WHERE reason = ?",
+                    (reason.value,),
+                ).fetchone()
         return int(row["count"] if row is not None else 0)
 
     async def bind_actor(self, actor_key: str, user_id: str, masked_email: str) -> AccountBinding:

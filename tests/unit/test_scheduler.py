@@ -514,10 +514,11 @@ async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
             ),
         },
     )
+    metrics = Metrics.create()
     service = SchedulerService(
         repository,
         adapter,
-        Metrics.create(),
+        metrics,
         SchedulerPolicy(enabled=True, maintenance_enabled=False),
         clock=lambda: now,
     )
@@ -534,6 +535,20 @@ async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
     assert delivery is not None
     assert "恢复回池" in delivery.payload["notification"]["text"]
     assert "继续隔离" in delivery.payload["notification"]["text"]
+    rendered_metrics = metrics.render().decode()
+    assert (
+        'sub2api_account_quarantine_probes_total{reason="SLOW_FIRST_TOKEN",result="SUCCESS"} 1.0'
+        in rendered_metrics
+    )
+    assert (
+        "sub2api_account_quarantine_transitions_total"
+        '{action="recovered",reason="SLOW_FIRST_TOKEN"} 1.0'
+        in rendered_metrics
+    )
+    assert (
+        'sub2api_account_quarantines{reason="SLOW_FIRST_TOKEN"} 5.0'
+        in rendered_metrics
+    )
 
 
 @pytest.mark.asyncio

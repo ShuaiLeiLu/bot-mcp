@@ -236,6 +236,10 @@ class SchedulerService:
                 quarantined_at=self._clock(),
             )
             await self._repository.upsert_account_quarantine(marker)
+            self._metrics.account_quarantine_transitions.labels(
+                reason=outcome.reason.value,
+                action="quarantined",
+            ).inc()
             adjustments.append(outcome.model_dump(mode="json", exclude_none=True))
         quarantine_probes: list[dict[str, Any]] = []
         quarantine_notifications: list[dict[str, Any]] = []
@@ -261,10 +265,18 @@ class SchedulerService:
                 latency_ms=attempt.latency_ms,
                 result=attempt.result,
             )
+            self._metrics.account_quarantine_probes.labels(
+                reason=marker.reason.value,
+                result=attempt.result.value,
+            ).inc()
             if attempt.recovered:
                 await self._repository.remove_verified_account_quarantine(
                     marker.account_id
                 )
+                self._metrics.account_quarantine_transitions.labels(
+                    reason=marker.reason.value,
+                    action="recovered",
+                ).inc()
             probe_result = {
                 **attempt.model_dump(mode="json", exclude_none=True),
                 "reason": marker.reason.value,
@@ -301,6 +313,7 @@ class SchedulerService:
                 },
                 targets,
             )
+        await self._refresh_quarantine_metrics()
         return {
             "adjustments": adjustments,
             "outcomes": [
@@ -309,6 +322,11 @@ class SchedulerService:
             ],
             "probes": quarantine_probes,
         }
+
+    async def _refresh_quarantine_metrics(self) -> None:
+        for reason in AccountQuarantineReason:
+            count = await self._repository.account_quarantine_count(reason)
+            self._metrics.account_quarantines.labels(reason=reason.value).set(count)
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
         purpose_by_type = {
