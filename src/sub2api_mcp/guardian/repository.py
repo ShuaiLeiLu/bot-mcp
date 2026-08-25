@@ -1039,6 +1039,31 @@ class GuardianRepository:
             ).fetchone()
         return self._channel_error_episode_from_row(row) if row is not None else None
 
+    async def list_open_channel_error_episodes(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[GuardianChannelErrorEpisode]:
+        return await asyncio.to_thread(
+            self._list_open_channel_error_episodes_sync,
+            limit,
+        )
+
+    def _list_open_channel_error_episodes_sync(
+        self,
+        limit: int,
+    ) -> list[GuardianChannelErrorEpisode]:
+        if not 1 <= limit <= 100:
+            raise ValueError("open episode limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE status = 'OPEN' "
+                "ORDER BY opened_at DESC, episode_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._channel_error_episode_from_row(row) for row in rows]
+
     def _get_open_channel_error_episode_sync(
         self,
         channel_id: str,
@@ -1250,6 +1275,27 @@ class GuardianRepository:
                 (run_id,),
             ).fetchone()
         return self._account_recovery_run_from_row(row) if row is not None else None
+
+    async def list_account_recovery_runs(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[GuardianAccountRecoveryRun]:
+        return await asyncio.to_thread(self._list_account_recovery_runs_sync, limit)
+
+    def _list_account_recovery_runs_sync(
+        self,
+        limit: int,
+    ) -> list[GuardianAccountRecoveryRun]:
+        if not 1 <= limit <= 100:
+            raise ValueError("account recovery run limit must be between 1 and 100")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs "
+                "ORDER BY started_at DESC, run_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._account_recovery_run_from_row(row) for row in rows]
 
     async def record_account_recovery_result(
         self,

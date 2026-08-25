@@ -173,6 +173,149 @@ class GuardianService:
             "writeback_adapter": "verified_account_fields",
         }
 
+    async def set_scheduling_enabled(
+        self,
+        *,
+        enabled: bool,
+        confirm: bool,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if not confirm:
+            raise ServiceError(
+                "CONFIRMATION_REQUIRED",
+                "Scheduling start or stop requires confirm=true",
+            )
+        if not 1 <= len(idempotency_key) <= 128:
+            raise ServiceError(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "A bounded idempotency key is required",
+            )
+        subject = "enabled" if enabled else "disabled"
+        saved = await self.repository.get_idempotent_result(
+            idempotency_key,
+            "guardian_set_scheduling",
+            subject,
+        )
+        if saved is not None:
+            return saved
+        current = await self.repository.get_policy()
+        updated = current.model_copy(update={"enabled": enabled})
+        policy = await self.repository.update_policy(
+            updated,
+            expected_revision=expected_revision,
+        )
+        result = {
+            "enabled": policy.enabled,
+            "scheduling_mode": policy.scheduling_mode.value,
+            "policy_revision": policy.revision,
+        }
+        await self.repository.add_event(
+            event_type="SCHEDULING_STARTED" if enabled else "SCHEDULING_STOPPED",
+            severity="WARNING",
+            message=(
+                "Guardian direct scheduling started"
+                if enabled
+                else "Guardian direct scheduling stopped"
+            ),
+            details={"enabled": enabled, "revision": policy.revision},
+        )
+        await self.repository.save_idempotent_result(
+            idempotency_key,
+            "guardian_set_scheduling",
+            subject,
+            result,
+        )
+        await self._notify_control_event(
+            "Guardian 直接调度已启动" if enabled else "Guardian 直接调度已停止",
+            [
+                f"状态：{'启用' if enabled else '停止'}",
+                f"策略版本：{policy.revision}",
+                "写入模式：逐账号单字段写入并精确回读",
+                "原因：管理员显式确认",
+            ],
+            coalesce_key="guardian:scheduling",
+        )
+        return result
+
+    async def recovery_status(self, *, limit: int = 20) -> dict[str, Any]:
+        if not 1 <= limit <= 100:
+            raise ServiceError("VALIDATION_ERROR", "limit must be between 1 and 100")
+        policy = await self.repository.get_policy()
+        episodes = await self.repository.list_open_channel_error_episodes(limit=limit)
+        runs = await self.repository.list_account_recovery_runs(limit=limit)
+        return {
+            "enabled": policy.enabled,
+            "owner": policy.account_recovery.owner.value,
+            "trigger": policy.account_recovery.trigger.value,
+            "latest_abnormal_snapshot": (
+                await self.repository.latest_abnormal_account_snapshot()
+            ),
+            "open_episodes": [
+                {
+                    "episode_id": item.episode_id,
+                    "channel_id": item.channel_id,
+                    "group_id": item.group_id,
+                    "opened_snapshot_id": item.opened_snapshot_id,
+                    "opened_at": item.opened_at.isoformat(),
+                }
+                for item in episodes
+            ],
+            "recent_runs": [item.model_dump(mode="json") for item in runs],
+        }
+
+    async def submit_pending_recovery(
+        self,
+        *,
+        confirm: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if not confirm:
+            raise ServiceError(
+                "CONFIRMATION_REQUIRED",
+                "Manual account recovery requires confirm=true",
+            )
+        if not 1 <= len(idempotency_key) <= 128:
+            raise ServiceError(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "A bounded idempotency key is required",
+            )
+        saved = await self.repository.get_idempotent_result(
+            idempotency_key,
+            "guardian_submit_recovery",
+            "pending",
+        )
+        if saved is not None:
+            return saved
+        if self._notification_repository is None:
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_ADAPTER_UNAVAILABLE",
+                "Durable recovery jobs are unavailable",
+            )
+        payload = await self.prepare_recovery_job()
+        created = await self._notification_repository.create_job_with_capacity(
+            JobType.RECOVERY,
+            payload,
+            max_active=1,
+        )
+        if created is None:
+            raise ServiceError(
+                "JOB_ALREADY_ACTIVE",
+                "A recovery job is already active",
+            )
+        job, queue_count = created
+        result = {
+            "job": job.model_dump(mode="json"),
+            "queue_count": queue_count,
+        }
+        await self.repository.save_idempotent_result(
+            idempotency_key,
+            "guardian_submit_recovery",
+            "pending",
+            result,
+        )
+        return result
+
     async def run_once(
         self, *, dry_run: bool, idempotency_key: str | None = None
     ) -> dict[str, Any]:
