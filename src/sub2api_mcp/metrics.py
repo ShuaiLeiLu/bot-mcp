@@ -17,6 +17,9 @@ class Metrics:
     job_transitions: Counter
     job_queue_depth: Gauge
     scheduler_runs: Counter
+    account_quarantines: Gauge
+    account_quarantine_probes: Counter
+    account_quarantine_transitions: Counter
     guardian_runs: Counter
     guardian_duration: Histogram
     guardian_shared_snapshots: Counter
@@ -89,6 +92,24 @@ class Metrics:
                 "sub2api_guardian_run_duration_seconds",
                 "Guardian evaluation duration",
                 ("mode",),
+                registry=registry,
+            ),
+            account_quarantines=Gauge(
+                "sub2api_account_quarantines",
+                "System-owned account quarantines",
+                ("reason",),
+                registry=registry,
+            ),
+            account_quarantine_probes=Counter(
+                "sub2api_account_quarantine_probes_total",
+                "Account quarantine probes by reason and result",
+                ("reason", "result"),
+                registry=registry,
+            ),
+            account_quarantine_transitions=Counter(
+                "sub2api_account_quarantine_transitions_total",
+                "Account quarantine lifecycle transitions",
+                ("reason", "action"),
                 registry=registry,
             ),
             guardian_shared_snapshots=Counter(

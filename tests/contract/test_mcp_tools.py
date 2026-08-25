@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from mcp.types import TextContent
 
 from sub2api_mcp.auth import Principal, bind_principal
 from sub2api_mcp.contracts import (
+    AccountQuarantineReason,
     AccountQuarantineRecord,
     DeliveryPurpose,
     DeliveryTargetCreate,
@@ -121,6 +123,7 @@ async def test_tool_inventory_is_curated_and_deterministic(tmp_path: Path) -> No
         "sub2api_get_bound_account",
         "sub2api_list_delivery_bots",
         "sub2api_list_delivery_targets",
+        "sub2api_list_account_quarantines",
         "sub2api_set_scheduler_enabled",
         "sub2api_submit_recovery",
         "sub2api_submit_maintenance",
@@ -176,6 +179,46 @@ async def test_read_tool_returns_stable_json_envelope(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["requestId"] == "request-1"
     assert result["data"]["version"] == "0.1.0"
+    assert result["data"]["account_quarantine_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_quarantine_listing_is_bounded_typed_and_secret_free(tmp_path: Path) -> None:
+    server = await _server(tmp_path)
+    await server.service.repository.upsert_account_quarantine(
+        AccountQuarantineRecord(
+            account_id="997",
+            reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+            group_ids=("7",),
+            threshold_ms=30_000,
+            observed_count=3,
+            quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+        )
+    )
+    principal = Principal("reader", frozenset({"sub2api:read"}))
+
+    with bind_principal(principal, "request-quarantine"):
+        result = await _call_json(
+            server,
+            "sub2api_list_account_quarantines",
+            {"limit": 20, "reason": "SLOW_FIRST_TOKEN"},
+        )
+
+    assert result["ok"] is True
+    assert result["data"]["items"] == [
+        {
+            "account_id": "997",
+            "reason": "SLOW_FIRST_TOKEN",
+            "group_ids": ["7"],
+            "threshold_ms": 30_000,
+            "observed_count": 3,
+            "quarantined_at": "2026-08-25T02:00:00Z",
+            "last_probe_at": None,
+            "last_probe_latency_ms": None,
+            "last_probe_result": "NEVER",
+        }
+    ]
+    assert "key" not in json.dumps(result, ensure_ascii=False).casefold()
 
 
 @pytest.mark.asyncio

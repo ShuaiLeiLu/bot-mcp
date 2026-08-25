@@ -39,6 +39,11 @@ def test_metrics_render_red_and_queue_signals() -> None:
     metrics = Metrics.create()
     metrics.mcp_calls.labels(tool="sub2api_get_status", status="ok").inc()
     metrics.job_queue_depth.labels(job_type="VIDEO").set(2)
+    metrics.account_quarantines.labels(reason="SLOW_FIRST_TOKEN").set(1)
+    metrics.account_quarantine_probes.labels(
+        reason="SLOW_FIRST_TOKEN",
+        result="SLOW",
+    ).inc()
 
     output = metrics.render().decode()
 
@@ -54,4 +59,9 @@ def test_metrics_render_red_and_queue_signals() -> None:
     assert "guardian_recovery_probe_requests_total" in output
     assert "guardian_recovery_probe_tokens_total" in output
     assert "guardian_field_ownership_changes_total" in output
+    assert 'sub2api_account_quarantines{reason="SLOW_FIRST_TOKEN"} 1.0' in output
+    assert (
+        'sub2api_account_quarantine_probes_total{reason="SLOW_FIRST_TOKEN",result="SLOW"} 1.0'
+        in output
+    )
 

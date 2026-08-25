@@ -10,6 +10,7 @@ from . import __version__
 from .actor_bridge import ActorAccount
 from .adapters.langbot import LangBotClient
 from .contracts import (
+    AccountQuarantineReason,
     DeliveryTargetCreate,
     DeliveryTargetRecord,
     JobStatus,
@@ -64,6 +65,7 @@ class Sub2APIService:
             "active_jobs": job_counts,
             "outbox_backlog": await self.repository.outbox_backlog(),
             "delivery_targets": len(await self.repository.list_delivery_targets()),
+            "account_quarantine_count": await self.repository.account_quarantine_count(),
             "langbot_configured": self._langbot is not None,
         }
 
@@ -116,6 +118,28 @@ class Sub2APIService:
         for item in page.items:
             targets.append(self._redact_delivery_target(item))
         return {"items": targets, "next_cursor": page.next_cursor}
+
+    async def list_account_quarantines(
+        self,
+        limit: int = 20,
+        cursor: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            parsed_reason = (
+                AccountQuarantineReason(reason) if reason is not None else None
+            )
+        except ValueError as exc:
+            raise ServiceError(
+                "VALIDATION_ERROR",
+                "The account quarantine reason is invalid",
+            ) from exc
+        page = await self.repository.list_account_quarantines(
+            limit=limit,
+            cursor=cursor,
+            reason=parsed_reason,
+        )
+        return page.model_dump(mode="json")
 
     async def set_scheduler_enabled(self, enabled: bool) -> dict[str, bool]:
         await self._scheduler.set_enabled(enabled)

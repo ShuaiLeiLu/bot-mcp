@@ -193,6 +193,27 @@ class Sub2APIMCPServer:
                 lambda: self.service.list_delivery_targets(limit, cursor),
             )
 
+        @mcp.tool(
+            description=(
+                "List system-owned account quarantines with bounded pagination; "
+                "this is distinct from upstream errors and human pauses."
+            )
+        )
+        async def sub2api_list_account_quarantines(
+            limit: int = 20,
+            cursor: str | None = None,
+            reason: str | None = None,
+        ) -> str:
+            return await self._execute(
+                "sub2api_list_account_quarantines",
+                "sub2api:read",
+                lambda: self.service.list_account_quarantines(
+                    limit,
+                    cursor,
+                    reason,
+                ),
+            )
+
         @mcp.tool(description="Persistently enable or disable periodic scheduling.")
         async def sub2api_set_scheduler_enabled(enabled: bool) -> str:
             return await self._execute(
