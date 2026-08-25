@@ -1770,6 +1770,113 @@ class SqliteRepository:
                 (str(uuid.uuid4()), principal, action, subject, outcome, _iso(self._clock())),
             )
 
+    async def cleanup_retention(
+        self,
+        *,
+        now: datetime | None = None,
+        batch_size: int = 20_000,
+    ) -> dict[str, int]:
+        """Delete bounded terminal history while preserving queued and failed delivery work."""
+        reference = now or self._clock()
+        if reference.tzinfo is None:
+            raise ValueError("retention time must be timezone-aware")
+        if not 1 <= batch_size <= 100_000:
+            raise ValueError("batch_size must be between 1 and 100000")
+        return await asyncio.to_thread(
+            self._cleanup_retention_sync,
+            reference,
+            batch_size,
+        )
+
+    def _cleanup_retention_sync(
+        self,
+        now: datetime,
+        batch_size: int,
+    ) -> dict[str, int]:
+        cutoffs = {
+            "jobs": _iso(now - timedelta(days=30)),
+            "deliveries": _iso(now - timedelta(days=30)),
+            "audits": _iso(now - timedelta(days=365)),
+            "now": _iso(now),
+        }
+        counts = {
+            "expired_nonces": 0,
+            "jobs": 0,
+            "succeeded_deliveries": 0,
+            "outbox_events": 0,
+            "audit_events": 0,
+        }
+        remaining = batch_size
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+
+            def execute_bounded(key: str, sql: str, params: tuple[object, ...]) -> None:
+                nonlocal remaining
+                if remaining <= 0:
+                    return
+                cursor = connection.execute(sql, (*params, remaining))
+                changed = max(0, cursor.rowcount)
+                counts[key] += changed
+                remaining -= changed
+
+            execute_bounded(
+                "expired_nonces",
+                "DELETE FROM actor_nonces WHERE rowid IN "
+                "(SELECT rowid FROM actor_nonces WHERE expires_at <= ? "
+                "ORDER BY expires_at LIMIT ?)",
+                (cutoffs["now"],),
+            )
+            execute_bounded(
+                "jobs",
+                "DELETE FROM jobs WHERE rowid IN "
+                "(SELECT rowid FROM jobs WHERE status IN (?, ?, ?, ?) "
+                "AND finished_at IS NOT NULL AND finished_at < ? "
+                "ORDER BY finished_at LIMIT ?)",
+                (
+                    JobStatus.SUCCEEDED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                    JobStatus.INTERRUPTED.value,
+                    cutoffs["jobs"],
+                ),
+            )
+            execute_bounded(
+                "succeeded_deliveries",
+                "DELETE FROM notification_deliveries WHERE rowid IN "
+                "(SELECT rowid FROM notification_deliveries WHERE status = ? "
+                "AND delivered_at IS NOT NULL AND delivered_at < ? "
+                "ORDER BY delivered_at LIMIT ?)",
+                (DeliveryStatus.SUCCEEDED.value, cutoffs["deliveries"]),
+            )
+            execute_bounded(
+                "outbox_events",
+                "DELETE FROM notification_outbox WHERE rowid IN "
+                "(SELECT rowid FROM notification_outbox o WHERE o.created_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM notification_deliveries d "
+                "WHERE d.event_id = o.event_id) ORDER BY o.created_at LIMIT ?)",
+                (cutoffs["deliveries"],),
+            )
+            execute_bounded(
+                "audit_events",
+                "DELETE FROM audit_events WHERE rowid IN "
+                "(SELECT rowid FROM audit_events WHERE created_at < ? "
+                "ORDER BY created_at LIMIT ?)",
+                (cutoffs["audits"],),
+            )
+            connection.execute("COMMIT")
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            connection.execute("PRAGMA optimize")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        counts["deleted_total"] = sum(counts.values())
+        counts["processed_total"] = batch_size - remaining
+        return counts
+
     @staticmethod
     def _job_from_row(row: sqlite3.Row) -> JobRecord:
         created_at = _datetime(row["created_at"])

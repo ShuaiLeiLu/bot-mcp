@@ -38,7 +38,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 5
+GUARDIAN_SCHEMA_VERSION = 6
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -226,6 +226,8 @@ CREATE TABLE IF NOT EXISTS guardian_account_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_latest
     ON guardian_account_observations(account_id, observed_at DESC, snapshot_id DESC);
+CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_retention
+    ON guardian_account_observations(observed_at, snapshot_id, account_id);
 CREATE TABLE IF NOT EXISTS guardian_channel_error_episodes (
     episode_id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
@@ -282,6 +284,22 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_run
     ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id);
+CREATE INDEX IF NOT EXISTS idx_guardian_samples_retention
+    ON guardian_samples(occurred_at, sample_id);
+CREATE INDEX IF NOT EXISTS idx_guardian_runs_retention
+    ON guardian_runs(updated_at, run_id) WHERE status <> 'RUNNING';
+CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_retention
+    ON guardian_input_snapshots(captured_at, snapshot_id) WHERE consumed_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_guardian_closed_episodes_retention
+    ON guardian_channel_error_episodes(updated_at, episode_id) WHERE status = 'CLOSED';
+CREATE INDEX IF NOT EXISTS idx_guardian_recovery_runs_retention
+    ON guardian_account_recovery_runs(updated_at, run_id) WHERE status <> 'RUNNING';
+CREATE INDEX IF NOT EXISTS idx_guardian_write_audits_created
+    ON guardian_write_audits(created_at, audit_id);
+CREATE INDEX IF NOT EXISTS idx_guardian_probe_ledger_occurred
+    ON guardian_probe_ledger(occurred_at, ledger_id);
+CREATE INDEX IF NOT EXISTS idx_guardian_idempotency_created
+    ON guardian_idempotency(created_at, idempotency_key, action, subject);
 """
 
 
@@ -379,6 +397,8 @@ class GuardianRepository:
                 self._migrate_v3_to_v4_sync(connection)
             if current_version < 5:
                 self._migrate_v4_to_v5_sync(connection)
+            if current_version < 6:
+                self._migrate_v5_to_v6_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -550,6 +570,48 @@ class GuardianRepository:
             "FROM guardian_field_ownership_v4"
         )
         connection.execute("DROP TABLE guardian_field_ownership_v4")
+
+    @staticmethod
+    def _migrate_v5_to_v6_sync(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_samples_retention "
+            "ON guardian_samples(occurred_at, sample_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_runs_retention "
+            "ON guardian_runs(updated_at, run_id) WHERE status <> 'RUNNING'"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_retention "
+            "ON guardian_input_snapshots(captured_at, snapshot_id) "
+            "WHERE consumed_at IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_closed_episodes_retention "
+            "ON guardian_channel_error_episodes(updated_at, episode_id) "
+            "WHERE status = 'CLOSED'"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_recovery_runs_retention "
+            "ON guardian_account_recovery_runs(updated_at, run_id) "
+            "WHERE status <> 'RUNNING'"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_retention "
+            "ON guardian_account_observations(observed_at, snapshot_id, account_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_write_audits_created "
+            "ON guardian_write_audits(created_at, audit_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_probe_ledger_occurred "
+            "ON guardian_probe_ledger(occurred_at, ledger_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_idempotency_created "
+            "ON guardian_idempotency(created_at, idempotency_key, action, subject)"
+        )
 
     @staticmethod
     def _ensure_column_sync(
@@ -2544,8 +2606,8 @@ class GuardianRepository:
         reference = now or self._clock()
         if reference.tzinfo is None:
             raise ValueError("retention time must be timezone-aware")
-        if not 1 <= batch_size <= 10_000:
-            raise ValueError("batch_size must be between 1 and 10000")
+        if not 1 <= batch_size <= 100_000:
+            raise ValueError("batch_size must be between 1 and 100000")
         return await asyncio.to_thread(
             self._cleanup_retention_sync,
             reference,
@@ -2559,11 +2621,25 @@ class GuardianRepository:
     ) -> dict[str, int]:
         cutoffs = {
             "dedup": _iso(now - timedelta(days=7)),
+            "account_observations": _iso(now - timedelta(days=2)),
+            "runs": _iso(now - timedelta(days=7)),
             "traffic": _iso(now - timedelta(days=30)),
+            "events": _iso(now - timedelta(days=90)),
+            "probes": _iso(now - timedelta(days=90)),
+            "recovery": _iso(now - timedelta(days=90)),
             "samples": _iso(now - timedelta(days=90)),
             "snapshots": _iso(now - timedelta(days=90)),
+            "audits": _iso(now - timedelta(days=365)),
         }
         counts = {
+            "account_observations": 0,
+            "runs": 0,
+            "events": 0,
+            "write_audits": 0,
+            "probe_ledger": 0,
+            "closed_episodes": 0,
+            "recovery_runs": 0,
+            "idempotency": 0,
             "samples": 0,
             "traffic_buckets": 0,
             "snapshots": 0,
@@ -2574,6 +2650,16 @@ class GuardianRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            jobs_available = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+            ).fetchone()
+            queued_recovery_guard = (
+                "AND NOT EXISTS (SELECT 1 FROM jobs j "
+                "WHERE j.job_type = 'RECOVERY' AND j.status IN ('QUEUED', 'RUNNING') "
+                "AND json_extract(j.payload_json, '$.snapshot_id') = o.snapshot_id) "
+                if jobs_available is not None
+                else ""
+            )
 
             def execute_bounded(key: str, sql: str, params: tuple[object, ...]) -> None:
                 nonlocal remaining
@@ -2584,6 +2670,71 @@ class GuardianRepository:
                 counts[key] += changed
                 remaining -= changed
 
+            execute_bounded(
+                "account_observations",
+                "DELETE FROM guardian_account_observations WHERE rowid IN "
+                "(SELECT rowid FROM guardian_account_observations o "
+                "WHERE o.observed_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM guardian_channel_error_episodes e "
+                "WHERE e.status = 'OPEN' AND e.opened_snapshot_id = o.snapshot_id) "
+                "AND NOT EXISTS (SELECT 1 FROM guardian_account_recovery_runs r "
+                "WHERE r.status = 'RUNNING' AND r.snapshot_id = o.snapshot_id) "
+                f"{queued_recovery_guard}"
+                "ORDER BY o.observed_at LIMIT ?)",
+                (cutoffs["account_observations"],),
+            )
+            execute_bounded(
+                "runs",
+                "DELETE FROM guardian_runs WHERE rowid IN "
+                "(SELECT rowid FROM guardian_runs WHERE status <> 'RUNNING' "
+                "AND COALESCE(finished_at, updated_at) < ? "
+                "ORDER BY updated_at LIMIT ?)",
+                (cutoffs["runs"],),
+            )
+            execute_bounded(
+                "events",
+                "DELETE FROM guardian_events WHERE rowid IN "
+                "(SELECT rowid FROM guardian_events WHERE created_at < ? "
+                "ORDER BY created_at LIMIT ?)",
+                (cutoffs["events"],),
+            )
+            execute_bounded(
+                "write_audits",
+                "DELETE FROM guardian_write_audits WHERE rowid IN "
+                "(SELECT rowid FROM guardian_write_audits WHERE created_at < ? "
+                "ORDER BY created_at LIMIT ?)",
+                (cutoffs["audits"],),
+            )
+            execute_bounded(
+                "probe_ledger",
+                "DELETE FROM guardian_probe_ledger WHERE rowid IN "
+                "(SELECT rowid FROM guardian_probe_ledger WHERE occurred_at < ? "
+                "ORDER BY occurred_at LIMIT ?)",
+                (cutoffs["probes"],),
+            )
+            execute_bounded(
+                "closed_episodes",
+                "DELETE FROM guardian_channel_error_episodes WHERE rowid IN "
+                "(SELECT rowid FROM guardian_channel_error_episodes "
+                "WHERE status = 'CLOSED' AND COALESCE(closed_at, updated_at) < ? "
+                "ORDER BY updated_at LIMIT ?)",
+                (cutoffs["recovery"],),
+            )
+            execute_bounded(
+                "recovery_runs",
+                "DELETE FROM guardian_account_recovery_runs WHERE rowid IN "
+                "(SELECT rowid FROM guardian_account_recovery_runs "
+                "WHERE status <> 'RUNNING' AND COALESCE(finished_at, updated_at) < ? "
+                "ORDER BY updated_at LIMIT ?)",
+                (cutoffs["recovery"],),
+            )
+            execute_bounded(
+                "idempotency",
+                "DELETE FROM guardian_idempotency WHERE rowid IN "
+                "(SELECT rowid FROM guardian_idempotency WHERE created_at < ? "
+                "ORDER BY created_at LIMIT ?)",
+                (cutoffs["dedup"],),
+            )
             execute_bounded(
                 "samples",
                 "DELETE FROM guardian_samples WHERE rowid IN "
@@ -2623,13 +2774,29 @@ class GuardianRepository:
                 (cutoffs["dedup"],),
             )
             connection.execute("COMMIT")
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            connection.execute("PRAGMA optimize")
         except Exception:
-            connection.execute("ROLLBACK")
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
             raise
         finally:
             connection.close()
-        counts["deleted_total"] = (
-            counts["samples"] + counts["traffic_buckets"] + counts["snapshots"]
+        counts["deleted_total"] = sum(
+            counts[key]
+            for key in (
+                "account_observations",
+                "runs",
+                "events",
+                "write_audits",
+                "probe_ledger",
+                "closed_episodes",
+                "recovery_runs",
+                "idempotency",
+                "samples",
+                "traffic_buckets",
+                "snapshots",
+            )
         )
         counts["processed_total"] = batch_size - remaining
         return counts

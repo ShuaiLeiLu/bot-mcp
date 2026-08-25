@@ -1,6 +1,6 @@
 """SQLite schema for the Sub2API MCP service."""
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 ACCOUNT_QUARANTINE_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS account_quarantines (
@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_claim
     ON jobs(status, job_type, created_at, job_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_retention
+    ON jobs(finished_at, status, job_id);
 CREATE TABLE IF NOT EXISTS delivery_targets (
     delivery_target_id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -130,6 +132,10 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_claim
     ON notification_deliveries(status, next_attempt_at, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_deliveries_retention
+    ON notification_deliveries(delivered_at, status, delivery_id);
+CREATE INDEX IF NOT EXISTS idx_outbox_created
+    ON notification_outbox(created_at, event_id);
 CREATE TABLE IF NOT EXISTS account_bindings (
     actor_key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
@@ -142,6 +148,8 @@ CREATE TABLE IF NOT EXISTS actor_nonces (
     nonce TEXT PRIMARY KEY,
     expires_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_actor_nonces_expires
+    ON actor_nonces(expires_at, nonce);
 CREATE TABLE IF NOT EXISTS probe_snapshots (
     snapshot_key TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL,
@@ -155,4 +163,6 @@ CREATE TABLE IF NOT EXISTS audit_events (
     outcome TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_audit_events_created
+    ON audit_events(created_at, audit_id);
 """
