@@ -112,6 +112,7 @@ async def test_human_change_claims_field_and_blocks_guardian(tmp_path: Path) -> 
     ownership = await repository.get_field_ownership(
         "channel-1",
         GuardianFieldName.LOAD_FACTOR,
+        account_id="42",
     )
 
     assert decision.outcome is GuardianWriteOutcome.BLOCKED
@@ -134,6 +135,7 @@ async def test_enabled_write_is_applied_once_and_is_idempotent(tmp_path: Path) -
     ownership = await repository.get_field_ownership(
         "channel-1",
         GuardianFieldName.LOAD_FACTOR,
+        account_id="42",
     )
 
     assert first.outcome is GuardianWriteOutcome.APPLIED
@@ -190,6 +192,7 @@ async def test_writer_verification_mismatch_fails_without_claiming_ownership(
     ownership = await repository.get_field_ownership(
         "channel-1",
         GuardianFieldName.LOAD_FACTOR,
+        account_id="42",
     )
 
     assert decision.outcome is GuardianWriteOutcome.FAILED

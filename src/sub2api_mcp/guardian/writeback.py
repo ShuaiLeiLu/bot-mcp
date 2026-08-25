@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -31,9 +32,12 @@ class GuardianWritebackService:
         self,
         repository: GuardianRepository,
         writer: GuardianFieldWriter | None,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self._writer = writer
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def apply(
         self,
@@ -56,9 +60,11 @@ class GuardianWritebackService:
             await self.repository.get_field_ownership(
                 proposal.channel_id,
                 proposal.field_name,
+                account_id=proposal.account_id,
             ),
             current_value=proposal.current_value,
             channel_id=proposal.channel_id,
+            account_id=proposal.account_id,
             field_name=proposal.field_name,
         )
         await self.repository.save_field_ownership(ownership)
@@ -79,6 +85,22 @@ class GuardianWritebackService:
                 proposal,
                 GuardianWriteOutcome.BLOCKED,
                 "guardian_disabled",
+            )
+        cooldown_seconds = {
+            GuardianFieldName.LOAD_FACTOR: policy.writes.load_cooldown_seconds,
+            GuardianFieldName.PRIORITY: policy.writes.priority_cooldown_seconds,
+            GuardianFieldName.SCHEDULABLE: policy.writes.priority_cooldown_seconds,
+        }[proposal.field_name]
+        if (
+            ownership.owner is GuardianFieldOwner.GUARDIAN
+            and ownership.last_write_at is not None
+            and (self._clock() - ownership.last_write_at).total_seconds()
+            < cooldown_seconds
+        ):
+            return await self._finish(
+                proposal,
+                GuardianWriteOutcome.BLOCKED,
+                "write_cooldown",
             )
         if self._writer is None:
             return await self._finish(
@@ -109,7 +131,7 @@ class GuardianWritebackService:
                 update={
                     "owner": GuardianFieldOwner.GUARDIAN,
                     "last_guardian_value": proposal.desired_value,
-                    "last_write_at": datetime.now(UTC),
+                    "last_write_at": self._clock().astimezone(UTC),
                 }
             )
         )

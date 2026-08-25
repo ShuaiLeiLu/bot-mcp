@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections import defaultdict
 from collections.abc import Callable
@@ -16,14 +17,18 @@ from .contracts import (
     ChannelDecisionInput,
     ChannelPolicyOverride,
     GroupPolicyOverride,
+    GuardianAccountSchedulingState,
     GuardianEventType,
     GuardianEvidence,
+    GuardianFieldName,
     GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
     GuardianSample,
     GuardianSampleSource,
     GuardianStrategy,
+    GuardianWriteOutcome,
+    GuardianWriteProposal,
     ManualControl,
     RecoveryPolicy,
     SamplingMode,
@@ -36,11 +41,19 @@ from .repository import GuardianRepository
 from .sampling import fuse_evidence_buckets
 from .scoring import calculate_health_score, calculate_health_score_v2
 from .state_machine import decide_channel_state
-from .weights import allocate_weights_v2, recommend_priority
+from .weights import allocate_weights_v2, bounded_load_factor, recommend_priority
+from .writeback import GuardianFieldWriter, GuardianWritebackService
 
 
 class GuardianOperations(Protocol):
     async def probe(self) -> ProbeResult: ...
+
+
+class GuardianSchedulingOperations(GuardianFieldWriter, Protocol):
+    async def read_account_scheduling_state(
+        self,
+        account_id: str,
+    ) -> GuardianAccountSchedulingState: ...
 
 
 @runtime_checkable
@@ -143,10 +156,17 @@ class GuardianEngine:
         operations: GuardianOperations,
         *,
         clock: Callable[[], datetime] | None = None,
+        scheduling_operations: GuardianSchedulingOperations | None = None,
     ) -> None:
         self.repository = repository
         self._operations = operations
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._scheduling_operations = scheduling_operations
+        self._writeback = GuardianWritebackService(
+            repository,
+            scheduling_operations,
+            clock=self._clock,
+        )
 
     async def run_once(
         self,
@@ -291,6 +311,7 @@ class GuardianEngine:
                 ChannelPolicyOverride | None,
                 float,
                 GuardianFreshness,
+                bool,
             ]
         ] = []
         group_overrides = await self.repository.list_group_overrides()
@@ -758,6 +779,7 @@ class GuardianEngine:
                     channel_override,
                     confidence_value,
                     freshness_value,
+                    decision.should_schedule,
                 )
             )
 
@@ -769,6 +791,7 @@ class GuardianEngine:
             channel_override,
             confidence_value,
             _freshness_value,
+            _should_schedule,
         ) in evaluated:
             if health not in {
                 GuardianHealth.FUSED,
@@ -829,6 +852,19 @@ class GuardianEngine:
                         ),
                     },
                 )
+        writeback = await self._apply_direct_writes(
+            snapshot,
+            policy,
+            run_id=run_id,
+            requested_dry_run=requested_dry_run,
+            evaluated=evaluated,
+            weights=weights,
+        )
+        for transition in transition_summaries:
+            transition["writes_applied"] = writeback["applied_by_channel"].get(
+                str(transition["channel_id"]),
+                0,
+            )
         return {
             "_cancelled": False,
             "scheduling_mode": policy.scheduling_mode.value,
@@ -837,16 +873,208 @@ class GuardianEngine:
             "state_transitions": transitions,
             "transitions": transition_summaries,
             "expected_changes": expected_changes,
-            "writes_applied": 0,
+            "writes_proposed": writeback["proposed"],
+            "writes_applied": writeback["applied"],
+            "writes_blocked": writeback["blocked"],
+            "writes_failed": writeback["failed"],
+            "writeback_reasons": writeback["reasons"],
             "strategy": policy.strategy.value,
             "weight_candidates": weights,
             "duplicate_observations": duplicate_observations,
             "traffic_buckets_processed": traffic_buckets_processed,
             "account_recovery_triggers": account_recovery_triggers,
-            "writeback_blocked_reason": (
-                "guardian_disabled" if not policy.enabled else "writeback_not_applied"
-            ),
+            "writeback_blocked_reason": writeback["global_reason"],
         }
+
+    async def _apply_direct_writes(
+        self,
+        snapshot: UpstreamProbeSnapshot,
+        policy: GuardianPolicy,
+        *,
+        run_id: str,
+        requested_dry_run: bool,
+        evaluated: list[
+            tuple[
+                UpstreamProbeEntry,
+                float,
+                GuardianHealth,
+                ChannelPolicyOverride | None,
+                float,
+                GuardianFreshness,
+                bool,
+            ]
+        ],
+        weights: dict[str, dict[str, float]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "proposed": 0,
+            "applied": 0,
+            "blocked": 0,
+            "failed": 0,
+            "no_change": 0,
+            "reasons": {},
+            "applied_by_channel": {},
+            "global_reason": "",
+        }
+
+        def count(reason: str, bucket: str = "blocked") -> None:
+            result[bucket] = int(result[bucket]) + 1
+            reasons = cast(dict[str, int], result["reasons"])
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+        if not policy.enabled:
+            result["global_reason"] = "guardian_disabled"
+            return result
+        if requested_dry_run:
+            result["global_reason"] = "requested_dry_run"
+            return result
+        if self._scheduling_operations is None:
+            result["global_reason"] = "writeback_adapter_unavailable"
+            return result
+
+        by_group: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
+        for item in evaluated:
+            group_id = item[0].group_id
+            if group_id is not None:
+                by_group[group_id].append(item)
+        account_budget = policy.writes.max_channels_per_run
+        accounts_started = 0
+        stop = False
+        for group_id in sorted(by_group, key=int):
+            group_entries = by_group[group_id]
+            if len(group_entries) != 1:
+                count("ambiguous_monitor_group")
+                continue
+            (
+                entry,
+                score,
+                health,
+                _override,
+                confidence,
+                freshness,
+                should_schedule,
+            ) = group_entries[0]
+            if health in {
+                GuardianHealth.EXCLUDED,
+                GuardianHealth.MANUALLY_PAUSED,
+                GuardianHealth.STALE,
+                GuardianHealth.WARMING_UP,
+            }:
+                count("channel_not_write_eligible")
+                continue
+            if confidence < policy.confidence.weight_min:
+                count("low_confidence")
+                continue
+            if freshness is not GuardianFreshness.FRESH:
+                count("stale_evidence")
+                continue
+            desired_weight = int(
+                weights.get(group_id, {}).get(entry.monitor_id, 0)
+            )
+            if desired_weight <= 0:
+                count("no_positive_weight")
+                continue
+            accounts = sorted(
+                (
+                    account
+                    for account in snapshot.accounts
+                    if account.group_ids == (group_id,)
+                    and not account.expired
+                    and not account.temporary_unavailable
+                    and account.status.value == "active"
+                    and account.schedulable
+                ),
+                key=lambda account: int(account.account_id),
+            )
+            for account in accounts:
+                if accounts_started >= account_budget:
+                    count("per_run_account_cap")
+                    break
+                accounts_started += 1
+                state = await self._scheduling_operations.read_account_scheduling_state(
+                    account.account_id
+                )
+                if not state.success:
+                    count("account_state_unavailable")
+                    continue
+                if (
+                    state.status is None
+                    or state.status.value != "active"
+                    or state.schedulable is not True
+                    or state.expired
+                    or state.temporary_unavailable
+                    or state.priority is None
+                    or state.effective_load_factor is None
+                ):
+                    count("account_not_write_eligible")
+                    continue
+                targets = (
+                    (
+                        GuardianFieldName.LOAD_FACTOR,
+                        state.load_factor
+                        if state.load_factor is not None
+                        else state.effective_load_factor,
+                        bounded_load_factor(
+                            state.effective_load_factor,
+                            desired_weight,
+                            policy=policy.writes,
+                        ),
+                        "bounded_group_weight",
+                    ),
+                    (
+                        GuardianFieldName.PRIORITY,
+                        state.priority,
+                        recommend_priority(
+                            baseline=state.priority,
+                            score=score,
+                            confidence=confidence,
+                            freshness=freshness,
+                            forced_keep=health is GuardianHealth.FORCED_KEEP,
+                        ),
+                        "baseline_relative_health",
+                    ),
+                )
+                for field_name, current, desired, reason in targets:
+                    if current == desired:
+                        continue
+                    digest = hashlib.sha256(
+                        f"{run_id}:{entry.monitor_id}:{account.account_id}:"
+                        f"{field_name.value}".encode()
+                    ).hexdigest()[:32]
+                    proposal = GuardianWriteProposal(
+                        channel_id=entry.monitor_id,
+                        account_id=account.account_id,
+                        field_name=field_name,
+                        current_value=current,
+                        desired_value=desired,
+                        reason=reason,
+                        idempotency_key=f"guardian:{digest}",
+                    )
+                    result["proposed"] = int(result["proposed"]) + 1
+                    decision = await self._writeback.apply(proposal, policy=policy)
+                    if decision.outcome is GuardianWriteOutcome.APPLIED:
+                        result["applied"] = int(result["applied"]) + 1
+                        applied = cast(dict[str, int], result["applied_by_channel"])
+                        applied[entry.monitor_id] = applied.get(entry.monitor_id, 0) + 1
+                    elif decision.outcome is GuardianWriteOutcome.NO_CHANGE:
+                        result["no_change"] = int(result["no_change"]) + 1
+                    elif decision.outcome is GuardianWriteOutcome.FAILED:
+                        count(decision.reason, "failed")
+                        stop = True
+                        break
+                    else:
+                        count(decision.reason)
+                if state.schedulable != should_schedule:
+                    count("schedulable_owned_by_verified_recovery")
+                if stop:
+                    break
+            if stop:
+                break
+        if stop:
+            result["global_reason"] = "verification_failed"
+        elif int(result["applied"]) == 0 and int(result["blocked"]) > 0:
+            result["global_reason"] = "all_writes_blocked"
+        return result
 
     @staticmethod
     def _desired_load_factor(
