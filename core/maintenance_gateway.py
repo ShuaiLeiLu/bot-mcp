@@ -13,6 +13,7 @@ from maintenance import (
     AccountDisableResult,
     AccountDispatchState,
     AccountRestoreResult,
+    AccountSchedulingState,
     AccountTestResult,
     RequestLogRecord,
     UsageLogRecord,
@@ -442,6 +443,82 @@ class MaintenanceApiAdapter:
     ) -> AccountDispatchState:
         return await asyncio.to_thread(
             self.fetch_account_dispatch_state_sync,
+            account_id,
+        )
+
+    def fetch_account_scheduling_state_sync(
+        self,
+        account_id: str,
+    ) -> AccountSchedulingState:
+        """Read the official account-level scheduling fields without mutation.
+
+        Source: https://github.com/Wei-Shaw/sub2api/blob/
+        aa2c4e8d136b13553ac7bae3d76c25715333a554/backend/internal/handler/admin/
+        account_handler.go#L133-L153
+        """
+        normalized_id = _positive_id_text(account_id, "account id")
+        try:
+            payload = self._request_port._request_json(
+                f"{self._config.accounts_url}/{normalized_id}"
+            )
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise MonitorDataError("account scheduling state readback failed")
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise MonitorDataError("account scheduling state data is invalid")
+            if _positive_id_text(data.get("id"), "account id") != normalized_id:
+                raise MonitorDataError("account scheduling state identity mismatch")
+            status = data.get("status")
+            schedulable = data.get("schedulable")
+            priority = data.get("priority")
+            load_factor = data.get("load_factor")
+            concurrency = data.get("concurrency")
+            if status not in {"active", "error", "inactive", "disabled"}:
+                raise MonitorDataError("account scheduling status is invalid")
+            if not isinstance(schedulable, bool):
+                raise MonitorDataError("account scheduling flag is invalid")
+            if (
+                isinstance(priority, bool)
+                or not isinstance(priority, int)
+                or not 0 <= priority <= 1_000_000
+            ):
+                raise MonitorDataError("account priority is invalid")
+            if load_factor is not None and (
+                isinstance(load_factor, bool)
+                or not isinstance(load_factor, int)
+                or not 0 <= load_factor <= 10_000
+            ):
+                raise MonitorDataError("account load factor is invalid")
+            if (
+                isinstance(concurrency, bool)
+                or not isinstance(concurrency, int)
+                or not 0 <= concurrency <= 1_000_000
+            ):
+                raise MonitorDataError("account concurrency is invalid")
+            effective_load_factor = (
+                load_factor
+                if load_factor is not None and load_factor > 0
+                else max(1, concurrency)
+            )
+        except (MonitorRequestError, MonitorDataError):
+            return AccountSchedulingState(normalized_id, success=False)
+        return AccountSchedulingState(
+            normalized_id,
+            success=True,
+            status=status,
+            schedulable=schedulable,
+            priority=priority,
+            load_factor=load_factor,
+            concurrency=concurrency,
+            effective_load_factor=effective_load_factor,
+        )
+
+    async def fetch_account_scheduling_state(
+        self,
+        account_id: str,
+    ) -> AccountSchedulingState:
+        return await asyncio.to_thread(
+            self.fetch_account_scheduling_state_sync,
             account_id,
         )
 

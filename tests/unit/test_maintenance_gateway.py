@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime, timedelta
+from email.message import Message
+from urllib import error as urllib_error
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -263,6 +265,124 @@ def test_dispatch_state_exposes_expiry_and_temporary_protection(
     assert state.success is True
     assert state.expired is expired
     assert state.temporary_unavailable is temporary_unavailable
+
+
+@pytest.mark.parametrize(
+    "account_data",
+    [
+        {
+            "id": 43,
+            "status": "active",
+            "schedulable": True,
+            "priority": 50,
+            "load_factor": 9,
+            "concurrency": 3,
+        },
+        {
+            "id": 42,
+            "status": "active",
+            "schedulable": True,
+            "load_factor": 9,
+            "concurrency": 3,
+        },
+        {
+            "id": 42,
+            "status": "active",
+            "schedulable": True,
+            "priority": True,
+            "load_factor": 9,
+            "concurrency": 3,
+        },
+        {
+            "id": 42,
+            "status": "active",
+            "schedulable": True,
+            "priority": 50,
+            "load_factor": 10_001,
+            "concurrency": 3,
+        },
+    ],
+)
+def test_scheduling_state_wrong_identity_or_malformed_fields_fail_closed(
+    account_data: dict[str, object],
+) -> None:
+    port = AccountMutationPort()
+    port._request_json = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+        "code": 0,
+        "data": account_data,
+    }
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    state = adapter.fetch_account_scheduling_state_sync("42")
+
+    assert state.success is False
+
+
+def test_scheduling_state_uses_official_account_route_and_effective_load_fallback() -> None:
+    port = AccountMutationPort()
+    port._request_json = lambda url, **kwargs: (  # type: ignore[method-assign]
+        port.requests.append((url, str(kwargs.get("method", "GET")), kwargs.get("payload")))
+        or {
+            "code": 0,
+            "data": {
+                "id": 42,
+                "status": "active",
+                "schedulable": True,
+                "priority": 50,
+                "load_factor": None,
+                "concurrency": 4,
+            },
+        }
+    )
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    state = adapter.fetch_account_scheduling_state_sync("42")
+
+    assert state.success is True
+    assert state.account_id == "42"
+    assert state.priority == 50
+    assert state.load_factor is None
+    assert state.concurrency == 4
+    assert state.effective_load_factor == 4
+    assert port.requests == [
+        (
+            "https://sub2api.example/api/v1/admin/accounts/42",
+            "GET",
+            None,
+        )
+    ]
+
+
+def test_sub2api_redirect_response_is_rejected_before_json_parsing() -> None:
+    def redirecting_opener(*_args: object, **_kwargs: object) -> object:
+        raise urllib_error.HTTPError(
+            "https://zhisuanapi.cn/api/v1/admin/accounts/42",
+            302,
+            "Found",
+            Message(),
+            None,
+        )
+
+    client = Sub2APIClient("admin-key", opener=redirecting_opener)
+
+    with pytest.raises(MonitorRequestError):
+        client._request_json(  # pyright: ignore[reportPrivateUsage]
+            "https://zhisuanapi.cn/api/v1/admin/accounts/42"
+        )
 
 
 def test_quarantined_account_restore_requires_verified_active_dispatch() -> None:

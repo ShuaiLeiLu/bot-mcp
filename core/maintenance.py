@@ -45,6 +45,18 @@ class AccountDispatchState:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountSchedulingState:
+    account_id: str
+    success: bool
+    status: str = ""
+    schedulable: bool | None = None
+    priority: int | None = None
+    load_factor: int | None = None
+    concurrency: int | None = None
+    effective_load_factor: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class UsageLogRecord:
     account_id: str
     created_at: datetime
