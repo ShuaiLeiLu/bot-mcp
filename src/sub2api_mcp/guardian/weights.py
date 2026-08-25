@@ -200,13 +200,13 @@ def recommend_priority(
     forced_keep: bool = False,
 ) -> int:
     if forced_keep:
-        return 5
+        return min(1_000_000, max(1, baseline) + 4)
     if confidence < 0.75 or freshness is not GuardianFreshness.FRESH:
-        return max(1, min(5, baseline))
+        return max(1, min(1_000_000, baseline))
     if score >= 75:
         offset = 0
     elif score >= 60:
         offset = 1
     else:
         offset = 2
-    return max(1, min(5, baseline + offset))
+    return max(1, min(1_000_000, baseline + offset))

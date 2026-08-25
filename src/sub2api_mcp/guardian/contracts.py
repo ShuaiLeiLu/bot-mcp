@@ -763,7 +763,7 @@ class GroupPolicyOverride(StrictModel):
 
 
 class ChannelPolicyOverride(StrictModel):
-    priority: int | None = Field(default=None, ge=1, le=5)
+    priority: int | None = Field(default=None, ge=1, le=1_000_000)
     load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
     concurrency: int | None = Field(default=None, ge=1, le=10_000)
     schedule_multiplier: float | None = Field(default=None, ge=0, le=10_000)

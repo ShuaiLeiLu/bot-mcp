@@ -679,7 +679,7 @@ class GuardianEngine:
             baseline_priority = (
                 channel_override.priority
                 if channel_override is not None and channel_override.priority is not None
-                else int(existing_details.get("baseline_priority") or 1)
+                else int(existing_details.get("baseline_priority") or 50)
             )
             desired_priority = (
                 1

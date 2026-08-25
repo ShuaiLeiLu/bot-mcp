@@ -144,4 +144,17 @@ def test_load_factor_step_and_priority_tiers_are_stable() -> None:
         confidence=1,
         freshness=GuardianFreshness.FRESH,
         forced_keep=True,
-    ) == 5
+    ) == 6
+    assert recommend_priority(
+        baseline=50,
+        score=55,
+        confidence=0.8,
+        freshness=GuardianFreshness.FRESH,
+    ) == 52
+    assert recommend_priority(
+        baseline=50,
+        score=100,
+        confidence=1,
+        freshness=GuardianFreshness.FRESH,
+        forced_keep=True,
+    ) == 54
