@@ -133,6 +133,18 @@ ln -sfn -- "${release_dir}" "${temporary_link}"
 mv -Tf -- "${temporary_link}" "${base_dir}/current"
 printf '%s\n' "${release_sha}" > "${base_dir}/deployed-sha"
 
+guardian_state=$(compose exec -T sub2api-mcp \
+    /opt/sub2api-mcp/venv/bin/python -c \
+    'import json,sqlite3; db=sqlite3.connect("/data/sub2api-mcp.db"); policy=db.execute("SELECT policy_json,revision FROM guardian_policy WHERE singleton=1").fetchone(); schema=db.execute("SELECT value FROM guardian_metadata WHERE key=\"schema_version\"").fetchone(); data=json.loads(policy[0]); print("guardian_enabled={} policy_revision={} schema_version={}".format(str(bool(data.get("enabled"))).lower(),policy[1],schema[0]))')
+echo "${guardian_state}"
+if [[ ${backup_created} == true ]]; then
+    compose exec -T sub2api-mcp \
+        /opt/sub2api-mcp/venv/bin/python -c \
+        'import os,sys; path=sys.argv[1]; assert os.path.isfile(path) and os.path.getsize(path)>0, path' \
+        "${backup_file}"
+    echo "database_backup=${backup_file}"
+fi
+
 trap - ERR
 rm -f -- "${archive_path}"
 echo "deployed ${release_sha}"
