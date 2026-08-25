@@ -58,7 +58,8 @@ def test_metrics_render_red_and_queue_signals() -> None:
     assert "guardian_snapshot_age_seconds" in output
     assert "guardian_duplicate_observations_total" in output
     assert "guardian_traffic_buckets_total" in output
-    assert "guardian_channel_confidence" in output
+    assert "guardian_channel_confidence_min" in output
+    assert "guardian_channel_confidence_average" in output
     assert "guardian_channels_by_freshness" in output
     assert "guardian_write_frozen_total" in output
     assert "guardian_recovery_probe_requests_total" in output

@@ -26,7 +26,8 @@ class Metrics:
     guardian_snapshot_age_seconds: Gauge
     guardian_duplicate_observations: Counter
     guardian_traffic_buckets: Counter
-    guardian_channel_confidence: Gauge
+    guardian_channel_confidence_min: Gauge
+    guardian_channel_confidence_average: Gauge
     guardian_channels_by_freshness: Gauge
     guardian_write_frozen: Counter
     guardian_recovery_probe_requests: Counter
@@ -137,10 +138,14 @@ class Metrics:
                 ("status",),
                 registry=registry,
             ),
-            guardian_channel_confidence=Gauge(
-                "guardian_channel_confidence",
-                "Latest evidence confidence for a Guardian channel",
-                ("channel",),
+            guardian_channel_confidence_min=Gauge(
+                "guardian_channel_confidence_min",
+                "Minimum evidence confidence across Guardian channels",
+                registry=registry,
+            ),
+            guardian_channel_confidence_average=Gauge(
+                "guardian_channel_confidence_average",
+                "Average evidence confidence across Guardian channels",
                 registry=registry,
             ),
             guardian_channels_by_freshness=Gauge(

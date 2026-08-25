@@ -670,12 +670,13 @@ class GuardianService:
         if self._metrics is None:
             return
         result = cast(dict[str, Any], run.get("result") or {})
-        if result.get("snapshot_id"):
+        replayed = bool(run.get("idempotent_replay"))
+        if result.get("snapshot_id") and not replayed:
             self._metrics.guardian_shared_snapshots.labels(status="consumed").inc()
-        elif result.get("no_new_evidence"):
+        elif result.get("no_new_evidence") and not replayed:
             self._metrics.guardian_shared_snapshots.labels(status="empty").inc()
         reason = str(result.get("writeback_blocked_reason") or "")
-        if reason:
+        if reason and not replayed:
             self._metrics.guardian_write_frozen.labels(reason=reason).inc()
         raw_field_outcomes = result.get("writeback_field_outcomes")
         field_outcomes = (
@@ -697,18 +698,23 @@ class GuardianService:
                 GuardianWriteOutcome.NO_CHANGE,
             ):
                 count = outcomes.get(outcome.value)
-                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                if (
+                    not replayed
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                    and count > 0
+                ):
                     self._metrics.guardian_scheduling_writes.labels(
                         field=field_name.value,
                         outcome=outcome.value,
                     ).inc(count)
         duplicates = int(result.get("duplicate_observations") or 0)
-        if duplicates:
+        if duplicates and not replayed:
             self._metrics.guardian_duplicate_observations.labels(
                 source="SHARED_MONITOR"
             ).inc(duplicates)
         traffic_processed = int(result.get("traffic_buckets_processed") or 0)
-        if traffic_processed:
+        if traffic_processed and not replayed:
             self._metrics.guardian_traffic_buckets.labels(status="fused").inc(
                 traffic_processed
             )
@@ -726,10 +732,18 @@ class GuardianService:
         ).items():
             self._metrics.guardian_channels_by_freshness.labels(state=state).set(count)
         channels = await self.repository.list_channels(limit=200)
-        for channel in cast(list[dict[str, Any]], channels.get("items") or []):
-            self._metrics.guardian_channel_confidence.labels(
-                channel=str(channel["channel_id"])
-            ).set(float(channel.get("confidence") or 0))
+        confidence_values = [
+            float(channel.get("confidence") or 0)
+            for channel in cast(list[dict[str, Any]], channels.get("items") or [])
+        ]
+        self._metrics.guardian_channel_confidence_min.set(
+            min(confidence_values, default=0)
+        )
+        self._metrics.guardian_channel_confidence_average.set(
+            sum(confidence_values) / len(confidence_values)
+            if confidence_values
+            else 0
+        )
         budget = await self.probe_budget()
         requests = int(budget["request_count"])
         tokens = int(budget["total_tokens"])
