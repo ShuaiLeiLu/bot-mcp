@@ -8,12 +8,15 @@ import pytest
 
 from sub2api_mcp.contracts import (
     AccountQuarantineReason,
+    AccountQuarantineRecord,
     DeliveryPurpose,
     DeliveryTargetCreate,
     JobType,
     MediaPolicy,
     OutboxEventType,
     ProbeResult,
+    QuarantineProbeAttempt,
+    QuarantineProbeResult,
     TargetType,
 )
 from sub2api_mcp.errors import ServiceError
@@ -28,14 +31,22 @@ def _empty_results() -> list[dict[str, object]]:
     return []
 
 
+def _empty_quarantine_results() -> dict[str, QuarantineProbeAttempt]:
+    return {}
+
+
 @dataclass
 class FakeSub2APIAdapter:
     results: list[ProbeResult]
     calls: int = 0
     recovery_results: list[dict[str, object]] = field(default_factory=_empty_results)
     maintenance_results: list[dict[str, object]] = field(default_factory=_empty_results)
+    quarantine_results: dict[str, QuarantineProbeAttempt] = field(
+        default_factory=_empty_quarantine_results
+    )
     recovery_calls: int = 0
     maintenance_calls: int = 0
+    quarantine_calls: list[str] = field(default_factory=lambda: list[str]())
 
     async def probe(self) -> ProbeResult:
         result = self.results[min(self.calls, len(self.results) - 1)]
@@ -49,6 +60,13 @@ class FakeSub2APIAdapter:
     async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]:
         self.maintenance_calls += 1
         return self.maintenance_results
+
+    async def probe_quarantined(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> QuarantineProbeAttempt:
+        self.quarantine_calls.append(marker.account_id)
+        return self.quarantine_results[marker.account_id]
 
 
 async def _repository(tmp_path: Path) -> SqliteRepository:
@@ -436,6 +454,181 @@ async def test_invalid_maintenance_result_fails_closed_before_persistence(
 
     assert invalid_result.value.code == "MAINTENANCE_RESULT_INVALID"
     assert await repository.account_quarantine_count() == 0
+    assert await repository.outbox_backlog() == 0
+
+
+@pytest.mark.asyncio
+async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    for account_id in ("101", "102", "103", "104", "105", "106"):
+        await repository.upsert_account_quarantine(
+            AccountQuarantineRecord(
+                account_id=account_id,
+                reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+                group_ids=("7",),
+                threshold_ms=30_000,
+                observed_count=3,
+                quarantined_at=now,
+            )
+        )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        quarantine_results={
+            "101": QuarantineProbeAttempt(
+                account_id="101",
+                result=QuarantineProbeResult.SLOW,
+                latency_ms=45_000,
+            ),
+            "102": QuarantineProbeAttempt(
+                account_id="102",
+                result=QuarantineProbeResult.INVALID,
+            ),
+            "103": QuarantineProbeAttempt(
+                account_id="103",
+                result=QuarantineProbeResult.FAILED,
+            ),
+            "104": QuarantineProbeAttempt(
+                account_id="104",
+                result=QuarantineProbeResult.SUCCESS,
+                latency_ms=2_000,
+                recovered=True,
+            ),
+            "105": QuarantineProbeAttempt(
+                account_id="105",
+                result=QuarantineProbeResult.SLOW,
+                latency_ms=50_000,
+            ),
+        },
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=False),
+        clock=lambda: now,
+    )
+
+    job = await repository.create_job(JobType.MAINTENANCE, {})
+    result = await service.handle_maintenance(job)
+    delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
+
+    assert adapter.quarantine_calls == ["101", "102", "103", "104", "105"]
+    assert len(result["probes"]) == 5
+    assert await repository.get_account_quarantine("104") is None
+    assert await repository.get_account_quarantine("106") is not None
+    assert await repository.account_quarantine_count() == 5
+    assert delivery is not None
+    assert "恢复回池" in delivery.payload["notification"]["text"]
+    assert "继续隔离" in delivery.payload["notification"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_existing_quarantine_queues_probes_when_detection_guards_are_off(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    await repository.upsert_account_quarantine(
+        AccountQuarantineRecord(
+            account_id="101",
+            reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+            group_ids=("7",),
+            threshold_ms=30_000,
+            observed_count=1,
+            quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+        )
+    )
+    service = SchedulerService(
+        repository,
+        FakeSub2APIAdapter([_probe(1.0)]),
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=False),
+    )
+    job = await repository.create_job(JobType.PROBE, {})
+
+    await service.handle_probe(job)
+
+    assert await repository.active_job_count(JobType.MAINTENANCE) == 1
+
+
+@pytest.mark.asyncio
+async def test_unchanged_quarantine_probe_does_not_flood_notifications(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    await repository.upsert_account_quarantine(
+        AccountQuarantineRecord(
+            account_id="101",
+            reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+            group_ids=("7",),
+            threshold_ms=30_000,
+            observed_count=3,
+            quarantined_at=now,
+        )
+    )
+    await repository.update_account_quarantine_probe(
+        "101",
+        probed_at=now,
+        latency_ms=45_000,
+        result=QuarantineProbeResult.SLOW,
+    )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        quarantine_results={
+            "101": QuarantineProbeAttempt(
+                account_id="101",
+                result=QuarantineProbeResult.SLOW,
+                latency_ms=44_000,
+            )
+        },
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=False),
+        clock=lambda: now,
+    )
+
+    job = await repository.create_job(JobType.MAINTENANCE, {})
+    await service.handle_maintenance(job)
+
     assert await repository.outbox_backlog() == 0
 
 

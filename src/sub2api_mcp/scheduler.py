@@ -25,6 +25,8 @@ from .contracts import (
     NotificationPayload,
     OutboxEventType,
     ProbeResult,
+    QuarantineProbeAttempt,
+    QuarantineProbeResult,
 )
 from .errors import ServiceError
 from .metrics import Metrics
@@ -54,6 +56,11 @@ class Sub2APIOperations(Protocol):
     async def recover(self) -> list[dict[str, object]]: ...
 
     async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]: ...
+
+    async def probe_quarantined(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> QuarantineProbeAttempt: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,9 +174,11 @@ class SchedulerService:
             DeliveryPurpose.RECOVERY_ADMIN
         ):
             await self._repository.create_job_with_capacity(JobType.RECOVERY, {}, max_active=1)
-        if self._policy.maintenance_enabled and await self._targets_for(
-            DeliveryPurpose.MAINTENANCE_ADMIN
-        ):
+        maintenance_required = (
+            self._policy.maintenance_enabled
+            or await self._repository.account_quarantine_count() > 0
+        )
+        if maintenance_required and await self._targets_for(DeliveryPurpose.MAINTENANCE_ADMIN):
             await self._repository.create_job_with_capacity(JobType.MAINTENANCE, {}, max_active=1)
         return {"changed": changed, "snapshot": result.snapshot}
 
@@ -195,6 +204,9 @@ class SchedulerService:
     async def handle_maintenance(self, job: JobRecord) -> dict[str, Any]:
         del job
         targets = await self.require_control_target(JobType.MAINTENANCE)
+        selected_markers = await self._repository.list_account_quarantines_for_probe(
+            limit=5
+        )
         probe = self._latest_probe or await self._adapter.probe()
         raw_outcomes = await self._adapter.maintain(probe)
         try:
@@ -225,15 +237,66 @@ class SchedulerService:
             )
             await self._repository.upsert_account_quarantine(marker)
             adjustments.append(outcome.model_dump(mode="json", exclude_none=True))
-        if outcomes:
+        quarantine_probes: list[dict[str, Any]] = []
+        quarantine_notifications: list[dict[str, Any]] = []
+        for marker in selected_markers:
+            try:
+                attempt = await self._adapter.probe_quarantined(marker)
+            except Exception:
+                _LOGGER.exception("account_quarantine_probe_failed")
+                attempt = QuarantineProbeAttempt(
+                    account_id=marker.account_id,
+                    result=QuarantineProbeResult.INVALID,
+                )
+            if attempt.account_id != marker.account_id:
+                _LOGGER.warning("account_quarantine_probe_identity_mismatch")
+                attempt = QuarantineProbeAttempt(
+                    account_id=marker.account_id,
+                    result=QuarantineProbeResult.INVALID,
+                )
+            probed_at = self._clock()
+            await self._repository.update_account_quarantine_probe(
+                marker.account_id,
+                probed_at=probed_at,
+                latency_ms=attempt.latency_ms,
+                result=attempt.result,
+            )
+            if attempt.recovered:
+                await self._repository.remove_verified_account_quarantine(
+                    marker.account_id
+                )
+            probe_result = {
+                **attempt.model_dump(mode="json", exclude_none=True),
+                "reason": marker.reason.value,
+            }
+            quarantine_probes.append(probe_result)
+            if (
+                attempt.recovered
+                or marker.last_probe_at is None
+                or marker.last_probe_result is not attempt.result
+            ):
+                quarantine_notifications.append(probe_result)
+        if outcomes or quarantine_notifications:
+            notification_sections: list[str] = []
+            if outcomes:
+                notification_sections.append(
+                    self._format_maintenance_results(
+                        outcomes,
+                        triggered_at=self._clock(),
+                    )
+                )
+            if quarantine_notifications:
+                notification_sections.append(
+                    self._format_quarantine_probe_results(
+                        quarantine_notifications,
+                        triggered_at=self._clock(),
+                    )
+                )
             await self._repository.enqueue_outbox(
                 OutboxEventType.MAINTENANCE_RESULT,
                 {
                     "notification": {
-                        "text": self._format_maintenance_results(
-                            outcomes,
-                            triggered_at=self._clock(),
-                        )
+                        "text": "\n\n".join(notification_sections)
                     },
                 },
                 targets,
@@ -244,6 +307,7 @@ class SchedulerService:
                 outcome.model_dump(mode="json", exclude_none=True)
                 for outcome in outcomes
             ],
+            "probes": quarantine_probes,
         }
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
@@ -363,6 +427,48 @@ class SchedulerService:
                 f"{index}. {account_name}（账号 #{account_id}）\n"
                 f"原状态：{bucket}\n"
                 f"结果：{result}"
+            )
+        return "\n\n".join(blocks)
+
+    @classmethod
+    def _format_quarantine_probe_results(
+        cls,
+        values: list[dict[str, Any]],
+        *,
+        triggered_at: datetime,
+    ) -> str:
+        blocks = [
+            f"隔离复测结果｜{len(values)} 个账号\n"
+            f"{cls._format_trigger_time(triggered_at)}"
+        ]
+        for index, value in enumerate(values, start=1):
+            account_id = cls._display_text(value.get("account_id"), "--")
+            result = str(value.get("result") or "")
+            reason = str(value.get("reason") or "")
+            reason_label = (
+                "首字延迟隔离"
+                if reason == AccountQuarantineReason.SLOW_FIRST_TOKEN.value
+                else "渠道失败隔离"
+            )
+            latency_value = value.get("latency_ms")
+            latency = (
+                f"{int(latency_value)} ms"
+                if isinstance(latency_value, int) and not isinstance(latency_value, bool)
+                else "未取得有效延迟"
+            )
+            if result == QuarantineProbeResult.SUCCESS.value:
+                result_label = "恢复回池：测试及账号状态读回均成功"
+            elif result == QuarantineProbeResult.SLOW.value:
+                result_label = "继续隔离：首字延迟仍高于阈值"
+            elif result == QuarantineProbeResult.FAILED.value:
+                result_label = "继续隔离：测试或恢复验证失败"
+            else:
+                result_label = "继续隔离：探测结果无效，已安全停止"
+            blocks.append(
+                f"{index}. 账号 #{account_id}\n"
+                f"类型：{reason_label}\n"
+                f"首事件延迟：{latency}\n"
+                f"结果：{result_label}"
             )
         return "\n\n".join(blocks)
 
