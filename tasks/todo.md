@@ -149,7 +149,7 @@ Status: Plan proposed for approval
 - [x] GR0C: Review quarantine runtime orchestration.
 - [x] GR0D: Pass the full gate and consolidate the prerequisite on clean main.
 - [x] GR1: Add direct-scheduling and conditional-recovery contracts.
-- [ ] GR2: Add account observation, error-episode, run and ledger persistence.
+- [x] GR2: Add account observation, error-episode, run and ledger persistence.
 - [ ] GR3: Expose sanitized account inventory from the existing probe with zero extra list calls.
 - [ ] GR4: Publish/consume account observations exactly once.
 - [ ] GR5: Select bad-state accounts and channel-error groups with manual-pause protection.

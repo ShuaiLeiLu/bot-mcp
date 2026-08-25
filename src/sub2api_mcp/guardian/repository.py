@@ -13,9 +13,19 @@ from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
+
 from ..errors import ServiceError
 from .contracts import (
+    AccountRecoveryClassification,
+    AccountRecoveryResult,
+    AccountRecoveryRunStatus,
+    AccountRecoveryRunTrigger,
     ChannelPolicyOverride,
+    GuardianAccountObservation,
+    GuardianAccountRecoveryRecord,
+    GuardianAccountRecoveryRun,
+    GuardianChannelErrorEpisode,
     GuardianEvidence,
     GuardianEvidenceBucket,
     GuardianFieldName,
@@ -28,7 +38,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 3
+GUARDIAN_SCHEMA_VERSION = 4
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -201,6 +211,78 @@ CREATE TABLE IF NOT EXISTS guardian_field_ownership (
 );
 """
 
+GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS guardian_account_observations (
+    snapshot_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    group_ids_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'error', 'disabled', 'inactive')),
+    schedulable INTEGER NOT NULL CHECK (schedulable IN (0, 1)),
+    expired INTEGER NOT NULL CHECK (expired IN (0, 1)),
+    temporary_unavailable INTEGER NOT NULL CHECK (temporary_unavailable IN (0, 1)),
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(snapshot_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_latest
+    ON guardian_account_observations(account_id, observed_at DESC, snapshot_id DESC);
+CREATE TABLE IF NOT EXISTS guardian_channel_error_episodes (
+    episode_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    group_id TEXT,
+    opened_snapshot_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_guardian_channel_error_episode_open
+    ON guardian_channel_error_episodes(channel_id) WHERE status = 'OPEN';
+CREATE INDEX IF NOT EXISTS idx_guardian_channel_error_episode_recent
+    ON guardian_channel_error_episodes(opened_at DESC, episode_id DESC);
+CREATE TABLE IF NOT EXISTS guardian_account_recovery_runs (
+    run_id TEXT PRIMARY KEY,
+    dedup_key TEXT NOT NULL UNIQUE,
+    trigger TEXT NOT NULL CHECK (
+        trigger IN ('BAD_ACCOUNT_STATE', 'CHANNEL_ERROR', 'MANUAL')
+    ),
+    snapshot_id TEXT,
+    episode_id TEXT,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    status TEXT NOT NULL CHECK (
+        status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'INTERRUPTED')
+    ),
+    result_json TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_runs_recent
+    ON guardian_account_recovery_runs(started_at DESC, run_id DESC);
+CREATE TABLE IF NOT EXISTS guardian_account_recovery_ledger (
+    ledger_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL
+        REFERENCES guardian_account_recovery_runs(run_id) ON DELETE CASCADE,
+    dedup_key TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL,
+    channel_id TEXT,
+    group_id TEXT,
+    classification TEXT NOT NULL CHECK (
+        classification IN (
+            'AVAILABLE', 'MANUAL_PAUSE', 'UPSTREAM_ERROR',
+            'DISABLED', 'SYSTEM_QUARANTINE', 'EXCLUDED'
+        )
+    ),
+    result TEXT NOT NULL CHECK (
+        result IN ('ENABLED', 'DISABLED', 'INDETERMINATE', 'SKIPPED')
+    ),
+    reason TEXT NOT NULL,
+    tested INTEGER NOT NULL CHECK (tested IN (0, 1)),
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_run
+    ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id);
+"""
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -220,6 +302,16 @@ def _dt(value: str | None) -> datetime | None:
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _snapshot_id(value: str) -> str:
+    normalized = value.strip().lower()
+    invalid_character = any(
+        character not in "0123456789abcdef" for character in normalized
+    )
+    if len(normalized) != 64 or invalid_character:
+        raise ValueError("snapshot ID must be a SHA-256 hex digest")
+    return normalized
 
 
 def _cursor(created_at: str, item_id: str) -> str:
@@ -282,6 +374,8 @@ class GuardianRepository:
                 self._migrate_v1_to_v2_sync(connection)
             if current_version < 3:
                 self._migrate_v2_to_v3_sync(connection)
+            if current_version < 4:
+                self._migrate_v3_to_v4_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -296,6 +390,11 @@ class GuardianRepository:
                 "UPDATE guardian_runs SET status = 'INTERRUPTED', "
                 "error_code = 'SERVICE_RESTARTED', "
                 "error_message = 'The service restarted during this Guardian run', "
+                "finished_at = ?, updated_at = ? WHERE status = 'RUNNING'",
+                (now, now),
+            )
+            connection.execute(
+                "UPDATE guardian_account_recovery_runs SET status = 'INTERRUPTED', "
                 "finished_at = ?, updated_at = ? WHERE status = 'RUNNING'",
                 (now, now),
             )
@@ -411,6 +510,12 @@ class GuardianRepository:
             "ON guardian_input_snapshots"
             "(consumed_at, claim_expires_at, captured_at, snapshot_id)"
         )
+
+    @staticmethod
+    def _migrate_v3_to_v4_sync(connection: sqlite3.Connection) -> None:
+        for statement in GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL.split(";"):
+            if statement.strip():
+                connection.execute(statement)
 
     @staticmethod
     def _ensure_column_sync(
@@ -667,6 +772,532 @@ class GuardianRepository:
                 "WHERE snapshot_id = ? AND claim_owner = ? AND consumed_at IS NULL",
                 (snapshot_id, owner),
             )
+
+    async def upsert_account_observations(
+        self,
+        *,
+        snapshot_id: str,
+        observed_at: datetime,
+        observations: list[GuardianAccountObservation],
+    ) -> int:
+        return await asyncio.to_thread(
+            self._upsert_account_observations_sync,
+            snapshot_id,
+            observed_at,
+            observations,
+        )
+
+    def _upsert_account_observations_sync(
+        self,
+        snapshot_id: str,
+        observed_at: datetime,
+        observations: list[GuardianAccountObservation],
+    ) -> int:
+        normalized_snapshot_id = _snapshot_id(snapshot_id)
+        if observed_at.tzinfo is None:
+            raise ValueError("account observation time must be timezone-aware")
+        if len(observations) > 10_000:
+            raise ValueError("account observation count exceeds the safe limit")
+        account_ids = [item.account_id for item in observations]
+        if len(account_ids) != len(set(account_ids)):
+            raise ValueError("account observations contain duplicate account IDs")
+        inserted = 0
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for observation in observations:
+                existing = connection.execute(
+                    "SELECT * FROM guardian_account_observations "
+                    "WHERE snapshot_id = ? AND account_id = ?",
+                    (normalized_snapshot_id, observation.account_id),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        self._account_observation_from_row(existing) != observation
+                        or existing["observed_at"] != _iso(observed_at)
+                    ):
+                        raise ServiceError(
+                            "ACCOUNT_OBSERVATION_CONFLICT",
+                            "The account observation changed for the same snapshot",
+                        )
+                    continue
+                connection.execute(
+                    "INSERT INTO guardian_account_observations("
+                    "snapshot_id, account_id, group_ids_json, status, schedulable, "
+                    "expired, temporary_unavailable, observed_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        normalized_snapshot_id,
+                        observation.account_id,
+                        _json(list(observation.group_ids)),
+                        observation.status.value,
+                        int(observation.schedulable),
+                        int(observation.expired),
+                        int(observation.temporary_unavailable),
+                        _iso(observed_at),
+                    ),
+                )
+                inserted += 1
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return inserted
+
+    async def list_account_observations(
+        self,
+        snapshot_id: str,
+    ) -> list[GuardianAccountObservation]:
+        return await asyncio.to_thread(
+            self._list_account_observations_sync,
+            snapshot_id,
+        )
+
+    def _list_account_observations_sync(
+        self,
+        snapshot_id: str,
+    ) -> list[GuardianAccountObservation]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_account_observations WHERE snapshot_id = ? "
+                "ORDER BY CAST(account_id AS INTEGER)",
+                (_snapshot_id(snapshot_id),),
+            ).fetchall()
+        return [self._account_observation_from_row(row) for row in rows]
+
+    async def open_channel_error_episode(
+        self,
+        *,
+        channel_id: str,
+        group_id: str | None,
+        snapshot_id: str,
+        opened_at: datetime,
+    ) -> GuardianChannelErrorEpisode:
+        return await asyncio.to_thread(
+            self._open_channel_error_episode_sync,
+            channel_id,
+            group_id,
+            snapshot_id,
+            opened_at,
+        )
+
+    def _open_channel_error_episode_sync(
+        self,
+        channel_id: str,
+        group_id: str | None,
+        snapshot_id: str,
+        opened_at: datetime,
+    ) -> GuardianChannelErrorEpisode:
+        if not 1 <= len(channel_id) <= 128:
+            raise ValueError("channel ID is outside the safe range")
+        if group_id is not None and (
+            not group_id.isdigit() or int(group_id) <= 0 or len(group_id) > 20
+        ):
+            raise ValueError("group ID must be a positive decimal identifier")
+        if opened_at.tzinfo is None:
+            raise ValueError("episode opened_at must be timezone-aware")
+        normalized_snapshot_id = _snapshot_id(snapshot_id)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE channel_id = ? AND status = 'OPEN'",
+                (channel_id,),
+            ).fetchone()
+            if existing is not None:
+                episode = self._channel_error_episode_from_row(existing)
+                if episode.group_id != group_id:
+                    raise ServiceError(
+                        "CHANNEL_ERROR_EPISODE_CONFLICT",
+                        "The open channel error episode has a different group mapping",
+                    )
+                connection.execute("COMMIT")
+                return episode
+            episode_id = str(uuid.uuid4())
+            now = _iso(self._clock())
+            connection.execute(
+                "INSERT INTO guardian_channel_error_episodes("
+                "episode_id, channel_id, group_id, opened_snapshot_id, status, "
+                "opened_at, closed_at, updated_at"
+                ") VALUES(?, ?, ?, ?, 'OPEN', ?, NULL, ?)",
+                (
+                    episode_id,
+                    channel_id,
+                    group_id,
+                    normalized_snapshot_id,
+                    _iso(opened_at),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM guardian_channel_error_episodes WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._channel_error_episode_from_row(row)
+
+    async def get_open_channel_error_episode(
+        self,
+        channel_id: str,
+    ) -> GuardianChannelErrorEpisode | None:
+        return await asyncio.to_thread(
+            self._get_open_channel_error_episode_sync,
+            channel_id,
+        )
+
+    def _get_open_channel_error_episode_sync(
+        self,
+        channel_id: str,
+    ) -> GuardianChannelErrorEpisode | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE channel_id = ? AND status = 'OPEN'",
+                (channel_id,),
+            ).fetchone()
+        return self._channel_error_episode_from_row(row) if row is not None else None
+
+    async def close_channel_error_episode(
+        self,
+        channel_id: str,
+        *,
+        closed_at: datetime,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._close_channel_error_episode_sync,
+            channel_id,
+            closed_at,
+        )
+
+    def _close_channel_error_episode_sync(
+        self,
+        channel_id: str,
+        closed_at: datetime,
+    ) -> bool:
+        if closed_at.tzinfo is None:
+            raise ValueError("episode closed_at must be timezone-aware")
+        with self._connect() as connection:
+            result = connection.execute(
+                "UPDATE guardian_channel_error_episodes SET status = 'CLOSED', "
+                "closed_at = ?, updated_at = ? "
+                "WHERE channel_id = ? AND status = 'OPEN'",
+                (_iso(closed_at), _iso(self._clock()), channel_id),
+            )
+        return result.rowcount == 1
+
+    async def create_account_recovery_run(
+        self,
+        *,
+        dedup_key: str,
+        trigger: AccountRecoveryRunTrigger,
+        snapshot_id: str | None,
+        episode_id: str | None,
+        policy_revision: int,
+        started_at: datetime,
+    ) -> GuardianAccountRecoveryRun:
+        return await asyncio.to_thread(
+            self._create_account_recovery_run_sync,
+            dedup_key,
+            trigger,
+            snapshot_id,
+            episode_id,
+            policy_revision,
+            started_at,
+        )
+
+    def _create_account_recovery_run_sync(
+        self,
+        dedup_key: str,
+        trigger: AccountRecoveryRunTrigger,
+        snapshot_id: str | None,
+        episode_id: str | None,
+        policy_revision: int,
+        started_at: datetime,
+    ) -> GuardianAccountRecoveryRun:
+        if not 1 <= len(dedup_key) <= 512:
+            raise ValueError("account recovery dedup key is outside the safe range")
+        normalized_snapshot_id = (
+            _snapshot_id(snapshot_id) if snapshot_id is not None else None
+        )
+        if episode_id is not None and not 1 <= len(episode_id) <= 128:
+            raise ValueError("episode ID is outside the safe range")
+        if policy_revision < 1:
+            raise ValueError("policy revision must be positive")
+        if started_at.tzinfo is None:
+            raise ValueError("account recovery start time must be timezone-aware")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+            if existing is not None:
+                connection.execute("COMMIT")
+                return self._account_recovery_run_from_row(existing)
+            run_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT INTO guardian_account_recovery_runs("
+                "run_id, dedup_key, trigger, snapshot_id, episode_id, policy_revision, "
+                "status, result_json, started_at, finished_at, updated_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, 'RUNNING', NULL, ?, NULL, ?)",
+                (
+                    run_id,
+                    dedup_key,
+                    trigger.value,
+                    normalized_snapshot_id,
+                    episode_id,
+                    policy_revision,
+                    _iso(started_at),
+                    _iso(self._clock()),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._account_recovery_run_from_row(row)
+
+    async def finish_account_recovery_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        result: dict[str, int],
+        finished_at: datetime,
+    ) -> GuardianAccountRecoveryRun:
+        return await asyncio.to_thread(
+            self._finish_account_recovery_run_sync,
+            run_id,
+            status,
+            result,
+            finished_at,
+        )
+
+    def _finish_account_recovery_run_sync(
+        self,
+        run_id: str,
+        status: str,
+        result: dict[str, int],
+        finished_at: datetime,
+    ) -> GuardianAccountRecoveryRun:
+        parsed_status = AccountRecoveryRunStatus(status)
+        if parsed_status is AccountRecoveryRunStatus.RUNNING:
+            raise ValueError("a finished account recovery run cannot remain running")
+        if finished_at.tzinfo is None:
+            raise ValueError("account recovery finish time must be timezone-aware")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if existing is None:
+                raise ServiceError(
+                    "ACCOUNT_RECOVERY_RUN_NOT_FOUND",
+                    "The account recovery run does not exist",
+                )
+            current = self._account_recovery_run_from_row(existing)
+            if current.status is not AccountRecoveryRunStatus.RUNNING:
+                if current.status is parsed_status and current.result == result:
+                    connection.execute("COMMIT")
+                    return current
+                raise ServiceError(
+                    "ACCOUNT_RECOVERY_RUN_CONFLICT",
+                    "The account recovery run is already complete",
+                )
+            connection.execute(
+                "UPDATE guardian_account_recovery_runs SET status = ?, result_json = ?, "
+                "finished_at = ?, updated_at = ? WHERE run_id = ?",
+                (
+                    parsed_status.value,
+                    _json(result),
+                    _iso(finished_at),
+                    _iso(self._clock()),
+                    run_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._account_recovery_run_from_row(row)
+
+    async def get_account_recovery_run(
+        self,
+        run_id: str,
+    ) -> GuardianAccountRecoveryRun | None:
+        return await asyncio.to_thread(self._get_account_recovery_run_sync, run_id)
+
+    def _get_account_recovery_run_sync(
+        self,
+        run_id: str,
+    ) -> GuardianAccountRecoveryRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return self._account_recovery_run_from_row(row) if row is not None else None
+
+    async def record_account_recovery_result(
+        self,
+        *,
+        run_id: str,
+        dedup_key: str,
+        account_id: str,
+        channel_id: str | None,
+        group_id: str | None,
+        classification: AccountRecoveryClassification,
+        result: AccountRecoveryResult,
+        reason: str,
+        tested: bool,
+        occurred_at: datetime,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._record_account_recovery_result_sync,
+            run_id,
+            dedup_key,
+            account_id,
+            channel_id,
+            group_id,
+            classification,
+            result,
+            reason,
+            tested,
+            occurred_at,
+        )
+
+    def _record_account_recovery_result_sync(
+        self,
+        run_id: str,
+        dedup_key: str,
+        account_id: str,
+        channel_id: str | None,
+        group_id: str | None,
+        classification: AccountRecoveryClassification,
+        result: AccountRecoveryResult,
+        reason: str,
+        tested: bool,
+        occurred_at: datetime,
+    ) -> bool:
+        record = GuardianAccountRecoveryRecord(
+            ledger_id=str(uuid.uuid4()),
+            run_id=run_id,
+            dedup_key=dedup_key,
+            account_id=account_id,
+            channel_id=channel_id,
+            group_id=group_id,
+            classification=classification,
+            result=result,
+            reason=reason,
+            tested=tested,
+            occurred_at=occurred_at,
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM guardian_account_recovery_ledger WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+            if existing is not None:
+                stored = self._account_recovery_record_from_row(existing)
+                if (
+                    stored.model_dump(exclude={"ledger_id"})
+                    != record.model_dump(exclude={"ledger_id"})
+                ):
+                    raise ServiceError(
+                        "ACCOUNT_RECOVERY_RESULT_CONFLICT",
+                        "The account recovery result changed for the same operation",
+                    )
+                connection.execute("COMMIT")
+                return False
+            run = connection.execute(
+                "SELECT 1 FROM guardian_account_recovery_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise ServiceError(
+                    "ACCOUNT_RECOVERY_RUN_NOT_FOUND",
+                    "The account recovery run does not exist",
+                )
+            connection.execute(
+                "INSERT INTO guardian_account_recovery_ledger("
+                "ledger_id, run_id, dedup_key, account_id, channel_id, group_id, "
+                "classification, result, reason, tested, occurred_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.ledger_id,
+                    record.run_id,
+                    record.dedup_key,
+                    record.account_id,
+                    record.channel_id,
+                    record.group_id,
+                    record.classification.value,
+                    record.result.value,
+                    record.reason,
+                    int(record.tested),
+                    _iso(record.occurred_at),
+                ),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return True
+
+    async def list_account_recovery_results(
+        self,
+        run_id: str,
+    ) -> list[GuardianAccountRecoveryRecord]:
+        return await asyncio.to_thread(
+            self._list_account_recovery_results_sync,
+            run_id,
+        )
+
+    def _list_account_recovery_results_sync(
+        self,
+        run_id: str,
+    ) -> list[GuardianAccountRecoveryRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guardian_account_recovery_ledger WHERE run_id = ? "
+                "ORDER BY occurred_at, ledger_id",
+                (run_id,),
+            ).fetchall()
+        return [self._account_recovery_record_from_row(row) for row in rows]
 
     async def update_policy(
         self, policy: GuardianPolicy, *, expected_revision: int
@@ -1955,6 +2586,104 @@ class GuardianRepository:
                 "(SELECT rowid FROM guardian_idempotency "
                 "ORDER BY created_at DESC LIMIT 10000)"
             )
+
+    @staticmethod
+    def _account_observation_from_row(
+        row: sqlite3.Row,
+    ) -> GuardianAccountObservation:
+        try:
+            return GuardianAccountObservation.model_validate(
+                {
+                    "account_id": row["account_id"],
+                    "group_ids": json.loads(row["group_ids_json"]),
+                    "status": row["status"],
+                    "schedulable": bool(row["schedulable"]),
+                    "expired": bool(row["expired"]),
+                    "temporary_unavailable": bool(row["temporary_unavailable"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ServiceError(
+                "ACCOUNT_OBSERVATION_DATA_INVALID",
+                "Persisted Guardian account observation data is invalid",
+            ) from exc
+
+    @staticmethod
+    def _channel_error_episode_from_row(
+        row: sqlite3.Row,
+    ) -> GuardianChannelErrorEpisode:
+        try:
+            return GuardianChannelErrorEpisode.model_validate(
+                {
+                    "episode_id": row["episode_id"],
+                    "channel_id": row["channel_id"],
+                    "group_id": row["group_id"],
+                    "opened_snapshot_id": row["opened_snapshot_id"],
+                    "status": row["status"],
+                    "opened_at": _dt(row["opened_at"]),
+                    "closed_at": _dt(row["closed_at"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise ServiceError(
+                "CHANNEL_ERROR_EPISODE_DATA_INVALID",
+                "Persisted Guardian channel error episode data is invalid",
+            ) from exc
+
+    @staticmethod
+    def _account_recovery_run_from_row(
+        row: sqlite3.Row,
+    ) -> GuardianAccountRecoveryRun:
+        try:
+            return GuardianAccountRecoveryRun.model_validate(
+                {
+                    "run_id": row["run_id"],
+                    "dedup_key": row["dedup_key"],
+                    "trigger": row["trigger"],
+                    "snapshot_id": row["snapshot_id"],
+                    "episode_id": row["episode_id"],
+                    "policy_revision": row["policy_revision"],
+                    "status": row["status"],
+                    "result": (
+                        json.loads(row["result_json"])
+                        if row["result_json"] is not None
+                        else None
+                    ),
+                    "started_at": _dt(row["started_at"]),
+                    "finished_at": _dt(row["finished_at"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_RUN_DATA_INVALID",
+                "Persisted Guardian account recovery run data is invalid",
+            ) from exc
+
+    @staticmethod
+    def _account_recovery_record_from_row(
+        row: sqlite3.Row,
+    ) -> GuardianAccountRecoveryRecord:
+        try:
+            return GuardianAccountRecoveryRecord.model_validate(
+                {
+                    "ledger_id": row["ledger_id"],
+                    "run_id": row["run_id"],
+                    "dedup_key": row["dedup_key"],
+                    "account_id": row["account_id"],
+                    "channel_id": row["channel_id"],
+                    "group_id": row["group_id"],
+                    "classification": row["classification"],
+                    "result": row["result"],
+                    "reason": row["reason"],
+                    "tested": bool(row["tested"]),
+                    "occurred_at": _dt(row["occurred_at"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_RESULT_DATA_INVALID",
+                "Persisted Guardian account recovery result data is invalid",
+            ) from exc
 
     @staticmethod
     def _channel(row: sqlite3.Row) -> dict[str, Any]:

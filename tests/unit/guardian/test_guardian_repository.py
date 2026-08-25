@@ -9,7 +9,12 @@ import pytest
 
 from sub2api_mcp.errors import ServiceError
 from sub2api_mcp.guardian.contracts import (
+    AccountRecoveryClassification,
+    AccountRecoveryResult,
+    AccountRecoveryRunTrigger,
     ChannelPolicyOverride,
+    GuardianAccountObservation,
+    GuardianAccountStatus,
     GuardianEventType,
     GuardianHealth,
     GuardianPolicy,
@@ -17,7 +22,7 @@ from sub2api_mcp.guardian.contracts import (
     GuardianSampleSource,
     ManualControl,
 )
-from sub2api_mcp.guardian.repository import GuardianRepository
+from sub2api_mcp.guardian.repository import GUARDIAN_SCHEMA_SQL, GuardianRepository
 
 
 def _create_minimal_v1_database(path: Path) -> None:
@@ -342,3 +347,196 @@ async def test_channel_override_is_durable_and_attached_to_channel(tmp_path: Pat
     assert channel is not None
     assert channel["override"]["priority"] == 2
     assert channel["override"]["schedule_multiplier"] == 1.25
+
+
+@pytest.mark.asyncio
+async def test_account_recovery_state_is_idempotent_and_restart_durable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    now = datetime(2026, 8, 25, 3, tzinfo=UTC)
+    repository = GuardianRepository(path, clock=lambda: now)
+    await repository.initialize()
+    observations = [
+        GuardianAccountObservation(
+            account_id="997",
+            group_ids=("36",),
+            status=GuardianAccountStatus.ERROR,
+            schedulable=False,
+        ),
+        GuardianAccountObservation(
+            account_id="998",
+            group_ids=("36",),
+            status=GuardianAccountStatus.ACTIVE,
+            schedulable=False,
+        ),
+    ]
+
+    inserted = await repository.upsert_account_observations(
+        snapshot_id="a" * 64,
+        observed_at=now,
+        observations=observations,
+    )
+    repeated = await repository.upsert_account_observations(
+        snapshot_id="a" * 64,
+        observed_at=now,
+        observations=observations,
+    )
+    episode = await repository.open_channel_error_episode(
+        channel_id="19",
+        group_id="36",
+        snapshot_id="a" * 64,
+        opened_at=now,
+    )
+    same_episode = await repository.open_channel_error_episode(
+        channel_id="19",
+        group_id="36",
+        snapshot_id="a" * 64,
+        opened_at=now,
+    )
+    run = await repository.create_account_recovery_run(
+        dedup_key="snapshot:" + "a" * 64,
+        trigger=AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE,
+        snapshot_id="a" * 64,
+        episode_id=None,
+        policy_revision=4,
+        started_at=now,
+    )
+    recorded = await repository.record_account_recovery_result(
+        run_id=run.run_id,
+        dedup_key=f"snapshot:{'a' * 64}:account:997",
+        account_id="997",
+        channel_id="19",
+        group_id="36",
+        classification=AccountRecoveryClassification.UPSTREAM_ERROR,
+        result=AccountRecoveryResult.INDETERMINATE,
+        reason="test_request_unavailable",
+        tested=True,
+        occurred_at=now,
+    )
+    duplicate = await repository.record_account_recovery_result(
+        run_id=run.run_id,
+        dedup_key=f"snapshot:{'a' * 64}:account:997",
+        account_id="997",
+        channel_id="19",
+        group_id="36",
+        classification=AccountRecoveryClassification.UPSTREAM_ERROR,
+        result=AccountRecoveryResult.INDETERMINATE,
+        reason="test_request_unavailable",
+        tested=True,
+        occurred_at=now,
+    )
+    await repository.finish_account_recovery_run(
+        run.run_id,
+        status="SUCCEEDED",
+        result={
+            "candidate_count": 1,
+            "tested_count": 1,
+            "enabled_count": 0,
+            "disabled_count": 0,
+            "indeterminate_count": 1,
+        },
+        finished_at=now,
+    )
+
+    reopened = GuardianRepository(path, clock=lambda: now)
+    await reopened.initialize()
+    stored_observations = await reopened.list_account_observations("a" * 64)
+    stored_episode = await reopened.get_open_channel_error_episode("19")
+    stored_run = await reopened.get_account_recovery_run(run.run_id)
+    stored_results = await reopened.list_account_recovery_results(run.run_id)
+
+    assert inserted == 2
+    assert repeated == 0
+    assert stored_observations == observations
+    assert same_episode.episode_id == episode.episode_id
+    assert stored_episode == episode
+    assert recorded is True
+    assert duplicate is False
+    assert stored_run is not None
+    assert stored_run.status == "SUCCEEDED"
+    assert stored_results[0].account_id == "997"
+    assert stored_results[0].tested is True
+
+    with pytest.raises(ServiceError) as conflict:
+        await reopened.upsert_account_observations(
+            snapshot_id="a" * 64,
+            observed_at=now,
+            observations=[
+                observations[0].model_copy(update={"schedulable": True}),
+                observations[1],
+            ],
+        )
+    assert conflict.value.code == "ACCOUNT_OBSERVATION_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_v3_database_migrates_account_recovery_tables_transactionally(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(GUARDIAN_SCHEMA_SQL)
+        connection.execute(
+            "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', '3')"
+        )
+
+    repository = GuardianRepository(path)
+    await repository.initialize()
+
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM guardian_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+    assert version == str(repository.SCHEMA_VERSION)
+    assert {
+        "guardian_account_observations",
+        "guardian_channel_error_episodes",
+        "guardian_account_recovery_runs",
+        "guardian_account_recovery_ledger",
+    } <= tables
+
+
+@pytest.mark.asyncio
+async def test_failed_v4_migration_rolls_back_and_keeps_v3_version(
+    tmp_path: Path,
+) -> None:
+    class FailingV4MigrationRepository(GuardianRepository):
+        @staticmethod
+        def _migrate_v3_to_v4_sync(connection: sqlite3.Connection) -> None:
+            connection.execute("CREATE TABLE v4_migration_should_rollback(value TEXT)")
+            raise RuntimeError("v4 migration failed")
+
+    path = tmp_path / "state.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(GUARDIAN_SCHEMA_SQL)
+        connection.execute(
+            "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', '3')"
+        )
+
+    with pytest.raises(RuntimeError, match="v4 migration failed"):
+        await FailingV4MigrationRepository(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM guardian_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+        rolled_back = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='v4_migration_should_rollback'"
+        ).fetchone()
+        recovery_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='guardian_account_observations'"
+        ).fetchone()
+
+    assert version == "3"
+    assert rolled_back is None
+    assert recovery_table is None
