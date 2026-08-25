@@ -66,7 +66,7 @@ def _account(
 
 
 @pytest.mark.asyncio
-async def test_channel_sweep_tests_only_schedulable_error_accounts() -> None:
+async def test_operational_channel_does_not_trigger_an_account_sweep() -> None:
     gateway = Gateway(
         accounts=[
             _account("1", bucket="available", status="active", schedulable=True),
@@ -97,6 +97,6 @@ async def test_channel_sweep_tests_only_schedulable_error_accounts() -> None:
 
     report = await coordinator.run([probe], now=datetime(2026, 8, 23, 10, tzinfo=UTC))
 
-    assert gateway.tested == ["2"]
-    assert gateway.disabled == ["2"]
-    assert [item.account_id for item in report.adjustments] == ["2"]
+    assert gateway.tested == []
+    assert gateway.disabled == []
+    assert report.adjustments == ()

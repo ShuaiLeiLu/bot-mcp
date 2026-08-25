@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Protocol, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from probe import AccountGroupState, ChannelProbe
 
@@ -68,11 +69,61 @@ class MaintenanceAdjustment:
     account_id: str
     account_name: str
     reason: str
+    group_ids: tuple[str, ...] = ()
+    threshold_ms: int = 30_000
+    observed_count: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceNotice:
+    code: str
+    group_id: str = ""
+    group_name: str = ""
+    account_id: str = ""
+    account_name: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceReport:
     adjustments: tuple[MaintenanceAdjustment, ...] = ()
+    notices: tuple[MaintenanceNotice, ...] = ()
+
+
+class _MinimumUsablePool:
+    def __init__(self, accounts: Sequence[AccountGroupState]) -> None:
+        self._counts: dict[str, int] = {}
+        for account in accounts:
+            for group_id in account.group_ids:
+                self._counts.setdefault(group_id, 0)
+                if self._is_usable(account):
+                    self._counts[group_id] += 1
+
+    @staticmethod
+    def _is_usable(account: AccountGroupState) -> bool:
+        return (
+            account.bucket == "available"
+            and account.status == "active"
+            and account.schedulable
+            and not account.expired
+        )
+
+    def can_disable(self, account: AccountGroupState) -> bool:
+        if not account.group_ids or any(
+            group_id not in self._counts for group_id in account.group_ids
+        ):
+            return False
+        decrement = 1 if self._is_usable(account) else 0
+        return all(
+            self._counts[group_id] - decrement >= 1
+            for group_id in account.group_ids
+        )
+
+    def record_disable(self, account: AccountGroupState) -> None:
+        if not self._is_usable(account):
+            return
+        for group_id in account.group_ids:
+            self._counts[group_id] -= 1
 
 
 class MaintenanceGateway(Protocol):
@@ -115,51 +166,105 @@ class _ChannelAccountSweepService:
         accounts: Sequence[AccountGroupState],
         *,
         already_adjusted: set[str],
-    ) -> list[MaintenanceAdjustment]:
+        pool: _MinimumUsablePool,
+    ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.channel_account_sweep_enabled:
-            return []
+            return [], []
 
         adjustments: list[MaintenanceAdjustment] = []
-        tested_ids: set[str] = set()
+        notices: list[MaintenanceNotice] = []
+        test_results: dict[str, AccountTestResult] = {}
+        processed_groups: set[str] = set()
         for probe in probes:
-            group = probe.accounts
-            if group is None or group.error_count <= 0:
+            if probe.channel.status not in {"failed", "error"}:
                 continue
+            group = probe.accounts
+            if group is None:
+                notices.append(
+                    MaintenanceNotice(
+                        code="AMBIGUOUS_GROUP_MAPPING",
+                        group_name=probe.channel.name,
+                    )
+                )
+                continue
+            if group.group_id in processed_groups:
+                continue
+            processed_groups.add(group.group_id)
             candidates = [
                 account
                 for account in accounts
                 if group.group_id in account.group_ids
-                and account.bucket == "error"
-                and account.status == "error"
-                and account.schedulable
                 and not account.expired
-                and account.account_id not in tested_ids
                 and account.account_id not in already_adjusted
+                and account.status not in {"inactive", "disabled"}
+                and not (account.status == "active" and not account.schedulable)
             ]
-            if len(tested_ids) + len(candidates) > self._policy.channel_account_sweep_max_accounts:
-                candidates = candidates[
-                    : self._policy.channel_account_sweep_max_accounts - len(tested_ids)
-                ]
+            candidates.sort(key=lambda item: int(item.account_id))
+            untested = [
+                account
+                for account in candidates
+                if account.account_id not in test_results
+            ]
+            remaining_budget = (
+                self._policy.channel_account_sweep_max_accounts - len(test_results)
+            )
+            if len(untested) > remaining_budget:
+                notices.append(
+                    MaintenanceNotice(
+                        code="SWEEP_LIMIT_REACHED",
+                        group_id=group.group_id,
+                        group_name=group.name,
+                    )
+                )
+                continue
+            for account in untested:
+                test_results[account.account_id] = (
+                    await self._gateway.test_account_availability(account.account_id)
+                )
+            group_results = [test_results[account.account_id] for account in candidates]
+            if not any(result.success for result in group_results):
+                notices.append(
+                    MaintenanceNotice(
+                        code="NO_HEALTHY_ACCOUNT",
+                        group_id=group.group_id,
+                        group_name=group.name,
+                    )
+                )
+                continue
             for account in candidates:
-                tested_ids.add(account.account_id)
-                result = await self._gateway.test_account_availability(account.account_id)
+                result = test_results[account.account_id]
                 if (
                     result.success
                     or not result.definitive_failure
                     or account.account_id in already_adjusted
                 ):
                     continue
+                if not pool.can_disable(account):
+                    notices.append(
+                        MaintenanceNotice(
+                            code="MINIMUM_POOL_PROTECTED",
+                            group_id=group.group_id,
+                            group_name=group.name,
+                            account_id=account.account_id,
+                            account_name=account.name or account.account_id,
+                            reason="channel_test_failed",
+                        )
+                    )
+                    continue
                 disabled = await self._gateway.disable_account(account.account_id)
                 if disabled.success:
+                    pool.record_disable(account)
                     already_adjusted.add(account.account_id)
                     adjustments.append(
                         MaintenanceAdjustment(
                             account_id=account.account_id,
                             account_name=account.name or account.account_id,
                             reason="channel_test_failed",
+                            group_ids=account.group_ids,
+                            threshold_ms=self._policy.slow_first_token_ms,
                         )
                     )
-        return adjustments
+        return adjustments, notices
 
 
 class _AccountLogGuardService:
@@ -173,12 +278,13 @@ class _AccountLogGuardService:
         *,
         now: datetime,
         already_adjusted: set[str],
-    ) -> list[MaintenanceAdjustment]:
+        pool: _MinimumUsablePool,
+    ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.log_account_guard_enabled:
-            return []
+            return [], []
         if now.tzinfo is None:
             raise ValueError("maintenance time must be timezone-aware")
-        end = now.astimezone(timezone.utc)
+        end = now.astimezone(UTC)
         start = end - timedelta(minutes=self._policy.log_window_minutes)
         usage_logs, request_logs = await asyncio.gather(
             self._gateway.fetch_recent_usage_logs(start=start, end=end),
@@ -199,13 +305,14 @@ class _AccountLogGuardService:
         for record in usage_logs:
             if (
                 record.account_id in account_by_id
-                and start <= record.created_at.astimezone(timezone.utc) < end
+                and start <= record.created_at.astimezone(UTC) < end
                 and record.first_token_ms is not None
                 and record.first_token_ms > self._policy.slow_first_token_ms
             ):
                 slow_counts[record.account_id] = slow_counts.get(record.account_id, 0) + 1
 
         adjustments: list[MaintenanceAdjustment] = []
+        notices: list[MaintenanceNotice] = []
         for account_id in sorted(set(error_counts) | set(slow_counts), key=int):
             reason: str | None = None
             if error_counts.get(account_id, 0) >= self._policy.log_error_threshold:
@@ -217,18 +324,36 @@ class _AccountLogGuardService:
                 reason = "slow_first_token"
             if reason is None or account_id in already_adjusted:
                 continue
-            disabled = await self._gateway.disable_account(account_id)
-            if disabled.success:
-                already_adjusted.add(account_id)
-                account = account_by_id[account_id]
-                adjustments.append(
-                    MaintenanceAdjustment(
+            account = account_by_id[account_id]
+            if not pool.can_disable(account):
+                notices.append(
+                    MaintenanceNotice(
+                        code="MINIMUM_POOL_PROTECTED",
                         account_id=account_id,
                         account_name=account.name or account_id,
                         reason=reason,
                     )
                 )
-        return adjustments
+                continue
+            disabled = await self._gateway.disable_account(account_id)
+            if disabled.success:
+                pool.record_disable(account)
+                already_adjusted.add(account_id)
+                adjustments.append(
+                    MaintenanceAdjustment(
+                        account_id=account_id,
+                        account_name=account.name or account_id,
+                        reason=reason,
+                        group_ids=account.group_ids,
+                        threshold_ms=self._policy.slow_first_token_ms,
+                        observed_count=(
+                            error_counts.get(account_id, 0)
+                            if reason == "repeated_errors"
+                            else slow_counts.get(account_id, 0)
+                        ),
+                    )
+                )
+        return adjustments, notices
 
     @staticmethod
     def _is_account_error(
@@ -240,7 +365,7 @@ class _AccountLogGuardService:
         if (
             record.kind != "error"
             or record.account_id is None
-            or not start <= record.created_at.astimezone(timezone.utc) < end
+            or not start <= record.created_at.astimezone(UTC) < end
         ):
             return False
         status_code = record.status_code or 0
@@ -275,7 +400,7 @@ class MaintenanceCoordinator:
             or self._policy.log_account_guard_enabled
         ):
             return MaintenanceReport()
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("maintenance time must be timezone-aware")
         async with self._lock:
@@ -287,20 +412,23 @@ class MaintenanceCoordinator:
             }
             self._disabled_ids.intersection_update(current_closed_ids)
             adjusted_ids = set(self._disabled_ids)
-            adjustments = await self._channel_sweep.run(
+            pool = _MinimumUsablePool(accounts)
+            adjustments, notices = await self._channel_sweep.run(
                 probes,
                 accounts,
                 already_adjusted=adjusted_ids,
+                pool=pool,
             )
-            adjustments.extend(
-                await self._log_guard.run(
-                    accounts,
-                    now=current,
-                    already_adjusted=adjusted_ids,
-                )
+            log_adjustments, log_notices = await self._log_guard.run(
+                accounts,
+                now=current,
+                already_adjusted=adjusted_ids,
+                pool=pool,
             )
+            adjustments.extend(log_adjustments)
+            notices.extend(log_notices)
             self._disabled_ids.update(adjusted_ids)
-            return MaintenanceReport(tuple(adjustments))
+            return MaintenanceReport(tuple(adjustments), tuple(notices))
 
 
 class MaintenanceServiceFactory:
