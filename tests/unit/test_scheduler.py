@@ -311,8 +311,6 @@ async def test_latency_only_changes_do_not_enqueue_duplicate_notifications(tmp_p
 
     assert adapter.calls == 2
     assert await repository.outbox_backlog() == 1
-
-
 @pytest.mark.asyncio
 async def test_account_count_change_enqueues_a_new_notification(tmp_path: Path) -> None:
     repository = await _repository(tmp_path)
@@ -394,7 +392,7 @@ async def test_quiet_hours_defer_notifications_but_keep_probe_work(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_recovery_and_maintenance_fail_closed_without_admin_target(
+async def test_maintenance_fails_closed_without_admin_target(
     tmp_path: Path,
 ) -> None:
     repository = await _repository(tmp_path)
@@ -403,67 +401,47 @@ async def test_recovery_and_maintenance_fail_closed_without_admin_target(
         repository,
         adapter,
         Metrics.create(),
-        SchedulerPolicy(enabled=True, recovery_enabled=True, maintenance_enabled=True),
+        SchedulerPolicy(enabled=True, maintenance_enabled=True),
     )
-    recovery_job = await repository.create_job(JobType.RECOVERY, {})
     maintenance_job = await repository.create_job(JobType.MAINTENANCE, {})
 
-    with pytest.raises(ServiceError) as recovery_error:
-        await service.handle_recovery(recovery_job)
     with pytest.raises(ServiceError) as maintenance_error:
         await service.handle_maintenance(maintenance_job)
 
-    assert recovery_error.value.code == "RECOVERY_ADMIN_TARGET_REQUIRED"
     assert maintenance_error.value.code == "MAINTENANCE_ADMIN_TARGET_REQUIRED"
-    assert adapter.recovery_calls == 0
     assert adapter.maintenance_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_recovery_and_maintenance_control_paths_are_serialized(
+async def test_scheduler_never_queues_or_executes_recovery(
     tmp_path: Path,
 ) -> None:
     repository = await _repository(tmp_path)
-    for name, purpose in (
-        ("maintenance", DeliveryPurpose.MAINTENANCE_ADMIN),
-        ("recovery", DeliveryPurpose.RECOVERY_ADMIN),
-    ):
-        await repository.upsert_delivery_target(
-            DeliveryTargetCreate(
-                name=name,
-                bot_uuid="bot",
-                target_type=TargetType.PERSON,
-                target_id=name,
-                purposes=frozenset({purpose}),
-                media_policy=MediaPolicy.TEXT_ONLY,
-                required=True,
-            )
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="recovery",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
         )
-    started = asyncio.Event()
-    release = asyncio.Event()
-    adapter = FakeSub2APIAdapter(
-        [_probe(1.0)],
-        maintenance_started=started,
-        maintenance_release=release,
     )
+    adapter = FakeSub2APIAdapter([_probe(1.0)])
     service = SchedulerService(
         repository,
         adapter,
         Metrics.create(),
-        SchedulerPolicy(enabled=True, recovery_enabled=True, maintenance_enabled=True),
+        SchedulerPolicy(enabled=True, recovery_enabled=True),
     )
-    maintenance_job = await repository.create_job(JobType.MAINTENANCE, {})
-    recovery_job = await repository.create_job(JobType.RECOVERY, {})
+    probe_job = await repository.create_job(JobType.PROBE, {})
 
-    maintenance_task = asyncio.create_task(service.handle_maintenance(maintenance_job))
-    await started.wait()
-    recovery_task = asyncio.create_task(service.handle_recovery(recovery_job))
-    await asyncio.sleep(0)
+    await service.handle_probe(probe_job)
+
+    assert await repository.active_job_count(JobType.RECOVERY) == 0
     assert adapter.recovery_calls == 0
-    release.set()
-    await asyncio.gather(maintenance_task, recovery_task)
-
-    assert adapter.recovery_calls == 1
+    assert not hasattr(service, "handle_recovery")
 
 
 @pytest.mark.asyncio
@@ -1071,46 +1049,6 @@ async def test_uncertain_restore_keeps_intent_and_marker_for_reconciliation(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_recovery_excludes_durable_quarantine_markers(
-    tmp_path: Path,
-) -> None:
-    repository = await _repository(tmp_path)
-    await repository.upsert_delivery_target(
-        DeliveryTargetCreate(
-            name="recovery-admin",
-            bot_uuid="bot",
-            target_type=TargetType.PERSON,
-            target_id="admin",
-            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
-            media_policy=MediaPolicy.TEXT_ONLY,
-            required=True,
-        )
-    )
-    await repository.upsert_account_quarantine(
-        AccountQuarantineRecord(
-            account_id="101",
-            reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
-            group_ids=("7",),
-            threshold_ms=30_000,
-            observed_count=1,
-            quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
-        )
-    )
-    adapter = FakeSub2APIAdapter([_probe(1.0)])
-    service = SchedulerService(
-        repository,
-        adapter,
-        Metrics.create(),
-        SchedulerPolicy(enabled=True, recovery_enabled=True),
-    )
-
-    job = await repository.create_job(JobType.RECOVERY, {})
-    await service.handle_recovery(job)
-
-    assert adapter.recovery_excluded_ids == frozenset({"101"})
-
-
-@pytest.mark.asyncio
 async def test_unchanged_quarantine_probe_does_not_flood_notifications(
     tmp_path: Path,
 ) -> None:
@@ -1206,51 +1144,3 @@ async def test_unchanged_maintenance_notice_is_durably_deduplicated(
     await service.handle_maintenance(second)
 
     assert await repository.outbox_backlog() == 1
-
-
-@pytest.mark.asyncio
-async def test_recovery_notification_uses_readable_chinese_layout(tmp_path: Path) -> None:
-    repository = await _repository(tmp_path)
-    await repository.upsert_delivery_target(
-        DeliveryTargetCreate(
-            name="recovery-admin",
-            bot_uuid="bot",
-            target_type=TargetType.PERSON,
-            target_id="admin",
-            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
-            media_policy=MediaPolicy.TEXT_ONLY,
-            required=True,
-        )
-    )
-    adapter = FakeSub2APIAdapter(
-        [_probe(1.0)],
-        recovery_results=[
-            {
-                "account_id": "42",
-                "name": "Claude 主账号",
-                "bucket": "error",
-                "result": "recovered",
-            }
-        ],
-    )
-    service = SchedulerService(
-        repository,
-        adapter,
-        Metrics.create(),
-        SchedulerPolicy(enabled=True, recovery_enabled=True),
-        clock=lambda: datetime(2026, 8, 24, 2, 16, 0, tzinfo=UTC),
-    )
-
-    job = await repository.create_job(JobType.RECOVERY, {})
-    await service.handle_recovery(job)
-    delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
-
-    assert delivery is not None
-    assert delivery.event_type is OutboxEventType.RECOVERY_RESULT
-    assert delivery.payload["notification"]["text"] == (
-        "账号恢复结果｜1 个账号\n"
-        "触发时间：2026-08-24 10:16:00（北京时间）\n\n"
-        "1. Claude 主账号（账号 #42）\n"
-        "原状态：错误\n"
-        "结果：已恢复正常"
-    )

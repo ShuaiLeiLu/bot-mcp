@@ -38,27 +38,11 @@ _MAINTENANCE_REASON_LABELS = {
     AccountQuarantineReason.CHANNEL_TEST_FAILED: "渠道异常且可用性测试失败",
     AccountQuarantineReason.SLOW_FIRST_TOKEN: "首字响应延迟连续超过 30 秒",
 }
-_RECOVERY_BUCKET_LABELS = {
-    "error": "错误",
-    "temporary": "临时不可调度",
-    "closed": "关闭",
-}
-_RECOVERY_RESULT_LABELS = {
-    "recovered": "已恢复正常",
-    "test_failed": "测试失败，未调整",
-    "recovery_failed": "测试成功，但恢复失败",
-}
 _LOGGER = logging.getLogger("sub2api_mcp.scheduler")
 
 
 class Sub2APIOperations(Protocol):
     async def probe(self) -> ProbeResult: ...
-
-    async def recover(
-        self,
-        *,
-        excluded_account_ids: frozenset[str] = frozenset(),
-    ) -> list[dict[str, object]]: ...
 
     async def maintain(
         self,
@@ -203,10 +187,6 @@ class SchedulerService:
                 )
                 await self._repository.set_snapshot("pending", result.snapshot)
 
-        if self._policy.recovery_enabled and await self._targets_for(
-            DeliveryPurpose.RECOVERY_ADMIN
-        ):
-            await self._repository.create_job_with_capacity(JobType.RECOVERY, {}, max_active=1)
         quarantine_count = await self._repository.account_quarantine_count()
         quarantine_intent_count = (
             await self._repository.account_quarantine_intent_count()
@@ -218,35 +198,6 @@ class SchedulerService:
         if maintenance_required:
             await self._repository.create_job_with_capacity(JobType.MAINTENANCE, {}, max_active=1)
         return {"changed": changed, "snapshot": result.snapshot}
-
-    async def handle_recovery(self, job: JobRecord) -> dict[str, Any]:
-        async with self._control_lock:
-            return await self._run_with_control_lease(
-                job,
-                lambda: self._handle_recovery_locked(job),
-            )
-
-    async def _handle_recovery_locked(self, job: JobRecord) -> dict[str, Any]:
-        del job
-        targets = await self.require_control_target(JobType.RECOVERY)
-        excluded_account_ids = await self._quarantined_account_ids()
-        outcomes = await self._adapter.recover(
-            excluded_account_ids=excluded_account_ids
-        )
-        if outcomes:
-            await self._repository.enqueue_outbox(
-                OutboxEventType.RECOVERY_RESULT,
-                {
-                    "notification": {
-                        "text": self._format_recovery_results(
-                            outcomes,
-                            triggered_at=self._clock(),
-                        )
-                    }
-                },
-                targets,
-            )
-        return {"outcomes": outcomes}
 
     async def handle_maintenance(self, job: JobRecord) -> dict[str, Any]:
         async with self._control_lock:
@@ -664,22 +615,12 @@ class SchedulerService:
         return frozenset(account_ids)
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
-        purpose_by_type = {
-            JobType.RECOVERY: DeliveryPurpose.RECOVERY_ADMIN,
-            JobType.MAINTENANCE: DeliveryPurpose.MAINTENANCE_ADMIN,
-        }
-        purpose = purpose_by_type.get(job_type)
-        if purpose is None:
+        if job_type is not JobType.MAINTENANCE:
             raise ValueError("unsupported control job type")
-        targets = await self._targets_for(purpose)
+        targets = await self._targets_for(DeliveryPurpose.MAINTENANCE_ADMIN)
         if not targets:
-            code = (
-                "RECOVERY_ADMIN_TARGET_REQUIRED"
-                if job_type is JobType.RECOVERY
-                else "MAINTENANCE_ADMIN_TARGET_REQUIRED"
-            )
             raise ServiceError(
-                code,
+                "MAINTENANCE_ADMIN_TARGET_REQUIRED",
                 "A personal administrator delivery target is required",
             )
         return targets
@@ -769,35 +710,6 @@ class SchedulerService:
         if len(values) > len(displayed):
             blocks.append(
                 f"其余 {len(values) - len(displayed)} 项已省略，请使用 MCP 隔离列表查询"
-            )
-        return "\n\n".join(blocks)
-
-    @classmethod
-    def _format_recovery_results(
-        cls,
-        values: list[dict[str, object]],
-        *,
-        triggered_at: datetime,
-    ) -> str:
-        blocks = [
-            f"账号恢复结果｜{len(values)} 个账号\n"
-            f"{cls._format_trigger_time(triggered_at)}"
-        ]
-        for index, value in enumerate(values, start=1):
-            account_name = cls._display_text(value.get("name"), "未知账号")
-            account_id = cls._display_text(value.get("account_id"), "--")
-            bucket = _RECOVERY_BUCKET_LABELS.get(
-                str(value.get("bucket") or ""),
-                "未知",
-            )
-            result = _RECOVERY_RESULT_LABELS.get(
-                str(value.get("result") or ""),
-                "处理完成",
-            )
-            blocks.append(
-                f"{index}. {account_name}（账号 #{account_id}）\n"
-                f"原状态：{bucket}\n"
-                f"结果：{result}"
             )
         return "\n\n".join(blocks)
 
