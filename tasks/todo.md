@@ -159,7 +159,7 @@ Status: Plan proposed for approval
 - [x] GR9: Prove the Sub2API channel mutation contract without production writes.
 - [x] GR10: Implement verified load_factor, priority and schedulable writer operations.
 - [x] GR11: Replace observe/rollout controls with direct scheduling start/stop.
-- [ ] GR12: Apply bounded scheduling proposals in Guardian.
+- [x] GR12: Apply bounded scheduling proposals in Guardian.
 - [ ] GR13: Add direct scheduling/recovery REST and MCP controls.
 - [ ] GR14: Update the light Guardian UI for direct mode.
 - [ ] GR15: Remove legacy Scheduler recovery orchestration and periodic window/rotation.
