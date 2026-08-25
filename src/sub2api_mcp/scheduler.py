@@ -6,21 +6,23 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from .contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
     DeliveryPurpose,
     JobRecord,
     JobType,
     MaintenanceOutcome,
+    MaintenanceOutcomeBatch,
     MaintenanceOutcomeCode,
     NotificationPayload,
     OutboxEventType,
@@ -36,7 +38,6 @@ _MAINTENANCE_REASON_LABELS = {
     AccountQuarantineReason.CHANNEL_TEST_FAILED: "渠道异常且可用性测试失败",
     AccountQuarantineReason.SLOW_FIRST_TOKEN: "首字响应延迟连续超过 30 秒",
 }
-_MAINTENANCE_OUTCOME_ADAPTER = TypeAdapter(list[MaintenanceOutcome])
 _RECOVERY_BUCKET_LABELS = {
     "error": "错误",
     "temporary": "临时不可调度",
@@ -64,12 +65,27 @@ class Sub2APIOperations(Protocol):
         probe: ProbeResult,
         *,
         excluded_account_ids: frozenset[str] = frozenset(),
+        before_quarantine: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+        after_quarantine: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> list[dict[str, object]]: ...
 
     async def probe_quarantined(
         self,
         marker: AccountQuarantineRecord,
+        *,
+        before_restore: Callable[[str], Awaitable[None]] | None = None,
+        after_restore: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> QuarantineProbeAttempt: ...
+
+    async def reconcile_quarantine_intent(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> str: ...
+
+    async def reconcile_quarantine_restore(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +135,7 @@ class SchedulerService:
         self._owner_id = owner_id or f"scheduler-{uuid.uuid4()}"
         self._clock = clock
         self._stop = asyncio.Event()
+        self._control_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._latest_probe: ProbeResult | None = None
 
@@ -183,15 +200,26 @@ class SchedulerService:
             DeliveryPurpose.RECOVERY_ADMIN
         ):
             await self._repository.create_job_with_capacity(JobType.RECOVERY, {}, max_active=1)
-        maintenance_required = (
-            self._policy.maintenance_enabled
-            or await self._repository.account_quarantine_count() > 0
+        quarantine_count = await self._repository.account_quarantine_count()
+        quarantine_intent_count = (
+            await self._repository.account_quarantine_intent_count()
         )
-        if maintenance_required and await self._targets_for(DeliveryPurpose.MAINTENANCE_ADMIN):
+        maintenance_targets = await self._targets_for(DeliveryPurpose.MAINTENANCE_ADMIN)
+        maintenance_required = quarantine_count > 0 or quarantine_intent_count > 0 or (
+            self._policy.maintenance_enabled and bool(maintenance_targets)
+        )
+        if maintenance_required:
             await self._repository.create_job_with_capacity(JobType.MAINTENANCE, {}, max_active=1)
         return {"changed": changed, "snapshot": result.snapshot}
 
     async def handle_recovery(self, job: JobRecord) -> dict[str, Any]:
+        async with self._control_lock:
+            return await self._run_with_control_lease(
+                job,
+                lambda: self._handle_recovery_locked(job),
+            )
+
+    async def _handle_recovery_locked(self, job: JobRecord) -> dict[str, Any]:
         del job
         targets = await self.require_control_target(JobType.RECOVERY)
         excluded_account_ids = await self._quarantined_account_ids()
@@ -214,24 +242,183 @@ class SchedulerService:
         return {"outcomes": outcomes}
 
     async def handle_maintenance(self, job: JobRecord) -> dict[str, Any]:
+        async with self._control_lock:
+            return await self._run_with_control_lease(
+                job,
+                lambda: self._handle_maintenance_locked(job),
+            )
+
+    async def _run_with_control_lease(
+        self,
+        job: JobRecord,
+        action: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        owner = f"{self._owner_id}:{job.job_id}"
+        acquired = await self._repository.acquire_account_control_lease(
+            owner,
+            lease_seconds=self._policy.lease_seconds,
+        )
+        if not acquired:
+            raise ServiceError(
+                "ACCOUNT_CONTROL_BUSY",
+                "Another account control operation is already running",
+                retryable=True,
+            )
+        stop_heartbeat = asyncio.Event()
+        async def run_operation() -> dict[str, Any]:
+            return await action()
+
+        operation: asyncio.Task[dict[str, Any]] = asyncio.create_task(
+            run_operation(),
+            name=f"account-control-operation-{job.job_id}",
+        )
+        heartbeat = asyncio.create_task(
+            self._control_lease_heartbeat(owner, stop_heartbeat),
+            name=f"account-control-lease-{job.job_id}",
+        )
+        try:
+            completed, _ = await asyncio.wait(
+                (operation, heartbeat),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in completed:
+                if not operation.done():
+                    operation.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await operation
+                await heartbeat
+                raise ServiceError(
+                    "ACCOUNT_CONTROL_LEASE_LOST",
+                    "The account control lease ended unexpectedly",
+                    retryable=True,
+                )
+            return await operation
+        finally:
+            stop_heartbeat.set()
+            if not heartbeat.done():
+                await heartbeat
+            await self._repository.release_account_control_lease(owner)
+
+    async def _control_lease_heartbeat(
+        self,
+        owner: str,
+        stop: asyncio.Event,
+    ) -> None:
+        interval = max(1.0, self._policy.lease_seconds / 3)
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                renewed = await self._repository.acquire_account_control_lease(
+                    owner,
+                    lease_seconds=self._policy.lease_seconds,
+                )
+                if not renewed:
+                    _LOGGER.error("account_control_lease_lost")
+                    raise ServiceError(
+                        "ACCOUNT_CONTROL_LEASE_LOST",
+                        "The account control lease could not be renewed",
+                        retryable=True,
+                    ) from None
+
+    async def _handle_maintenance_locked(self, job: JobRecord) -> dict[str, Any]:
         del job
-        targets = await self.require_control_target(JobType.MAINTENANCE)
+        intents = await self._repository.list_account_quarantine_intents(limit=5)
+        reconciled_intents: list[dict[str, str]] = []
+        for intent in intents:
+            action = await self._adapter.reconcile_quarantine_intent(intent)
+            if action == "PROMOTE":
+                marker = await self._repository.promote_account_quarantine_intent(
+                    intent.account_id
+                )
+                if marker is not None:
+                    self._metrics.account_quarantine_transitions.labels(
+                        reason=marker.reason.value,
+                        action="reconciled",
+                    ).inc()
+            elif action == "CLEAR":
+                await self._repository.remove_account_quarantine_intent(
+                    intent.account_id
+                )
+            elif action != "KEEP":
+                raise ServiceError(
+                    "QUARANTINE_RECONCILIATION_INVALID",
+                    "The quarantine reconciliation result is invalid",
+                )
+            reconciled_intents.append(
+                {"account_id": intent.account_id, "action": action}
+            )
+        restore_intents = (
+            await self._repository.list_account_quarantine_restore_intents(
+                limit=5
+            )
+        )
+        reconciled_restores: list[dict[str, str]] = []
+        for restore_intent in restore_intents:
+            restore_marker = await self._repository.get_account_quarantine(
+                restore_intent.account_id
+            )
+            if restore_marker is None:
+                await self._repository.cancel_account_quarantine_restore(
+                    restore_intent.account_id
+                )
+                continue
+            action = await self._adapter.reconcile_quarantine_restore(restore_marker)
+            if action == "RECOVERED":
+                marker = await self._repository.complete_account_quarantine_restore(
+                    restore_intent.account_id
+                )
+                if marker is not None:
+                    self._metrics.account_quarantine_transitions.labels(
+                        reason=marker.reason.value,
+                        action="recovered",
+                    ).inc()
+            elif action == "CANCEL":
+                await self._repository.cancel_account_quarantine_restore(
+                    restore_intent.account_id
+                )
+            elif action != "KEEP":
+                raise ServiceError(
+                    "QUARANTINE_RECONCILIATION_INVALID",
+                    "The quarantine restore reconciliation result is invalid",
+                )
+            reconciled_restores.append(
+                {"account_id": restore_intent.account_id, "action": action}
+            )
         selected_markers = await self._repository.list_account_quarantines_for_probe(
             limit=5
         )
+        targets = await self._targets_for(DeliveryPurpose.MAINTENANCE_ADMIN)
+        if not targets and not selected_markers and not intents and not restore_intents:
+            raise ServiceError(
+                "MAINTENANCE_ADMIN_TARGET_REQUIRED",
+                "A personal administrator delivery target is required",
+            )
         excluded_account_ids = await self._quarantined_account_ids()
-        probe = self._latest_probe or await self._adapter.probe()
-        raw_outcomes = await self._adapter.maintain(
-            probe,
-            excluded_account_ids=excluded_account_ids,
-        )
+        if targets:
+            probe = self._latest_probe or await self._adapter.probe()
+            raw_outcomes = await self._adapter.maintain(
+                probe,
+                excluded_account_ids=excluded_account_ids,
+                before_quarantine=self._record_quarantine_intent,
+                after_quarantine=self._record_quarantine_disable_result,
+            )
+        else:
+            raw_outcomes = []
         try:
-            outcomes = _MAINTENANCE_OUTCOME_ADAPTER.validate_python(raw_outcomes)
+            outcomes = MaintenanceOutcomeBatch.model_validate(
+                {"items": raw_outcomes}
+            ).items
         except ValidationError as exc:
             raise ServiceError(
                 "MAINTENANCE_RESULT_INVALID",
                 "The account maintenance result is invalid",
             ) from exc
+        notification_outcomes, maintenance_notice_signatures = (
+            await self._new_maintenance_notification_outcomes(outcomes)
+            if targets
+            else ([], [])
+        )
         adjustments: list[dict[str, Any]] = []
         for outcome in outcomes:
             if outcome.outcome is not MaintenanceOutcomeCode.QUARANTINED:
@@ -243,25 +430,24 @@ class SchedulerService:
                 and outcome.threshold_ms is not None
                 and outcome.observed_count is not None
             )
-            marker = AccountQuarantineRecord(
-                account_id=outcome.account_id,
-                reason=outcome.reason,
-                group_ids=outcome.group_ids,
-                threshold_ms=outcome.threshold_ms,
-                observed_count=outcome.observed_count,
-                quarantined_at=self._clock(),
+            persisted = await self._repository.get_account_quarantine(
+                outcome.account_id
             )
-            await self._repository.upsert_account_quarantine(marker)
-            self._metrics.account_quarantine_transitions.labels(
-                reason=outcome.reason.value,
-                action="quarantined",
-            ).inc()
+            if persisted is None:
+                raise ServiceError(
+                    "QUARANTINE_MARKER_MISSING",
+                    "Verified account quarantine marker is missing",
+                )
             adjustments.append(outcome.model_dump(mode="json", exclude_none=True))
         quarantine_probes: list[dict[str, Any]] = []
         quarantine_notifications: list[dict[str, Any]] = []
         for marker in selected_markers:
             try:
-                attempt = await self._adapter.probe_quarantined(marker)
+                attempt = await self._adapter.probe_quarantined(
+                    marker,
+                    before_restore=self._begin_quarantine_restore,
+                    after_restore=self._finish_quarantine_restore,
+                )
             except Exception:
                 _LOGGER.exception("account_quarantine_probe_failed")
                 attempt = QuarantineProbeAttempt(
@@ -275,24 +461,17 @@ class SchedulerService:
                     result=QuarantineProbeResult.INVALID,
                 )
             probed_at = self._clock()
-            await self._repository.update_account_quarantine_probe(
-                marker.account_id,
-                probed_at=probed_at,
-                latency_ms=attempt.latency_ms,
-                result=attempt.result,
-            )
+            if not attempt.recovered:
+                await self._repository.update_account_quarantine_probe(
+                    marker.account_id,
+                    probed_at=probed_at,
+                    latency_ms=attempt.latency_ms,
+                    result=attempt.result,
+                )
             self._metrics.account_quarantine_probes.labels(
                 reason=marker.reason.value,
                 result=attempt.result.value,
             ).inc()
-            if attempt.recovered:
-                await self._repository.remove_verified_account_quarantine(
-                    marker.account_id
-                )
-                self._metrics.account_quarantine_transitions.labels(
-                    reason=marker.reason.value,
-                    action="recovered",
-                ).inc()
             probe_result = {
                 **attempt.model_dump(mode="json", exclude_none=True),
                 "reason": marker.reason.value,
@@ -304,12 +483,12 @@ class SchedulerService:
                 or marker.last_probe_result is not attempt.result
             ):
                 quarantine_notifications.append(probe_result)
-        if outcomes or quarantine_notifications:
+        if targets and (notification_outcomes or quarantine_notifications):
             notification_sections: list[str] = []
-            if outcomes:
+            if notification_outcomes:
                 notification_sections.append(
                     self._format_maintenance_results(
-                        outcomes,
+                        notification_outcomes,
                         triggered_at=self._clock(),
                     )
                 )
@@ -323,11 +502,16 @@ class SchedulerService:
             await self._repository.enqueue_outbox(
                 OutboxEventType.MAINTENANCE_RESULT,
                 {
-                    "notification": {
-                        "text": "\n\n".join(notification_sections)
-                    },
+                    "notification": NotificationPayload(
+                        text="\n\n".join(notification_sections)
+                    ).model_dump(mode="json", exclude_none=True),
                 },
                 targets,
+            )
+        if targets:
+            await self._repository.set_scheduler_value(
+                "maintenance_notice_signatures",
+                maintenance_notice_signatures,
             )
         await self._refresh_quarantine_metrics()
         return {
@@ -337,12 +521,114 @@ class SchedulerService:
                 for outcome in outcomes
             ],
             "probes": quarantine_probes,
+            "reconciled_intents": reconciled_intents,
+            "reconciled_restores": reconciled_restores,
         }
+
+    async def _begin_quarantine_restore(self, account_id: str) -> None:
+        await self._repository.begin_account_quarantine_restore(account_id)
+
+    async def _finish_quarantine_restore(
+        self,
+        account_id: str,
+        success: bool,
+        state_uncertain: bool,
+    ) -> None:
+        if success:
+            marker = await self._repository.complete_account_quarantine_restore(
+                account_id
+            )
+            if marker is None:
+                raise ServiceError(
+                    "QUARANTINE_RESTORE_INTENT_MISSING",
+                    "The account quarantine restore intent is missing",
+                )
+            self._metrics.account_quarantine_transitions.labels(
+                reason=marker.reason.value,
+                action="recovered",
+            ).inc()
+        elif not state_uncertain:
+            await self._repository.cancel_account_quarantine_restore(account_id)
+
+    async def _record_quarantine_intent(
+        self,
+        payload: dict[str, object],
+    ) -> None:
+        intent = AccountQuarantineIntent.model_validate(
+            {**payload, "created_at": self._clock()}
+        )
+        await self._repository.upsert_account_quarantine_intent(intent)
+
+    async def _record_quarantine_disable_result(
+        self,
+        account_id: str,
+        success: bool,
+        state_uncertain: bool,
+    ) -> None:
+        if success:
+            marker = await self._repository.promote_account_quarantine_intent(account_id)
+            if marker is None:
+                raise ServiceError(
+                    "QUARANTINE_INTENT_MISSING",
+                    "The account quarantine intent is missing",
+                )
+            self._metrics.account_quarantine_transitions.labels(
+                reason=marker.reason.value,
+                action="quarantined",
+            ).inc()
+        elif not state_uncertain:
+            await self._repository.remove_account_quarantine_intent(account_id)
 
     async def _refresh_quarantine_metrics(self) -> None:
         for reason in AccountQuarantineReason:
             count = await self._repository.account_quarantine_count(reason)
             self._metrics.account_quarantines.labels(reason=reason.value).set(count)
+
+    async def _new_maintenance_notification_outcomes(
+        self,
+        outcomes: list[MaintenanceOutcome],
+    ) -> tuple[list[MaintenanceOutcome], list[str]]:
+        previous_raw = await self._repository.get_scheduler_value(
+            "maintenance_notice_signatures"
+        )
+        previous: set[str] = set()
+        if isinstance(previous_raw, list):
+            previous.update(
+                item
+                for item in cast(list[object], previous_raw)
+                if isinstance(item, str)
+            )
+        notices = [
+            outcome
+            for outcome in outcomes
+            if outcome.outcome is not MaintenanceOutcomeCode.QUARANTINED
+        ]
+        current = {
+            outcome.model_dump_json(exclude_none=True, exclude_defaults=True)
+            for outcome in notices
+        }
+        quarantined = [
+            outcome
+            for outcome in outcomes
+            if outcome.outcome is MaintenanceOutcomeCode.QUARANTINED
+        ]
+        unseen_notices = [
+            outcome
+            for outcome in notices
+            if outcome.model_dump_json(exclude_none=True, exclude_defaults=True)
+            not in previous
+        ]
+        selected = [*quarantined, *unseen_notices][:25]
+        selected_notice_signatures = {
+            outcome.model_dump_json(exclude_none=True, exclude_defaults=True)
+            for outcome in selected
+            if outcome.outcome is not MaintenanceOutcomeCode.QUARANTINED
+        }
+        next_signatures = (previous & current) | selected_notice_signatures
+        return (
+            selected,
+            sorted(next_signatures),
+        )
 
     async def _quarantined_account_ids(self) -> frozenset[str]:
         account_ids: set[str] = set()
@@ -354,12 +640,21 @@ class SchedulerService:
             )
             account_ids.update(item.account_id for item in page.items)
             if page.next_cursor is None:
-                return frozenset(account_ids)
+                break
             cursor = page.next_cursor
-        raise ServiceError(
-            "QUARANTINE_SCAN_LIMIT_REACHED",
-            "The quarantine registry exceeds the safe scan limit",
-        )
+        else:
+            raise ServiceError(
+                "QUARANTINE_SCAN_LIMIT_REACHED",
+                "The quarantine registry exceeds the safe scan limit",
+            )
+        intent_ids = {
+            intent.account_id
+            for intent in await self._repository.list_account_quarantine_intents(
+                limit=10000
+            )
+        }
+        account_ids.update(intent_ids)
+        return frozenset(account_ids)
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
         purpose_by_type = {
@@ -401,7 +696,8 @@ class SchedulerService:
             f"账号维护结果｜{len(values)} 个账号\n"
             f"{cls._format_trigger_time(triggered_at)}"
         ]
-        for index, value in enumerate(values, start=1):
+        displayed = values[:25]
+        for index, value in enumerate(displayed, start=1):
             account_name = cls._display_text(value.account_name, "未知账号")
             account_id = cls._display_text(value.account_id, "--")
             group_name = cls._display_text(value.group_name, "未知渠道")
@@ -432,10 +728,17 @@ class SchedulerService:
                     "类型：渠道无健康账号\n"
                     "结果：未自动禁用任何账号，请人工补充或检查可用账号"
                 )
-            elif value.outcome is MaintenanceOutcomeCode.MINIMUM_POOL_PROTECTED:
+            elif value.outcome is MaintenanceOutcomeCode.MIN_POOL_PROTECTED:
+                visible_groups = value.protected_group_ids[:5]
+                protected_groups = "、".join(visible_groups) or "未解析"
+                if len(value.protected_group_ids) > len(visible_groups):
+                    protected_groups += (
+                        f" 等 {len(value.protected_group_ids)} 个分组"
+                    )
                 blocks.append(
                     f"{index}. {account_name}（账号 #{account_id}）\n"
                     "类型：最小池保护\n"
+                    f"保护分组：{protected_groups}\n"
                     "结果：为保证渠道至少保留 1 个可用账号，本次未禁用"
                 )
             elif value.outcome is MaintenanceOutcomeCode.AMBIGUOUS_GROUP_MAPPING:
@@ -444,12 +747,22 @@ class SchedulerService:
                     "类型：渠道分组映射不明确\n"
                     "结果：安全停止，未测试或禁用账号"
                 )
-            else:
+            elif value.outcome is MaintenanceOutcomeCode.SWEEP_LIMIT_REACHED:
                 blocks.append(
                     f"{index}. {group_name}\n"
                     "类型：探测数量超过安全上限\n"
                     "结果：安全停止，未禁用账号"
                 )
+            else:
+                blocks.append(
+                    f"{index}. {account_name}（账号 #{account_id}）\n"
+                    "类型：账号状态无法确认\n"
+                    "结果：已停止本轮后续禁用，请人工检查"
+                )
+        if len(values) > len(displayed):
+            blocks.append(
+                f"其余 {len(values) - len(displayed)} 项已省略，请使用 MCP 隔离列表查询"
+            )
         return "\n\n".join(blocks)
 
     @classmethod
@@ -538,6 +851,7 @@ class SchedulerService:
     async def start(self) -> None:
         if self._task is not None:
             return
+        await self._refresh_quarantine_metrics()
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="sub2api-scheduler")
 

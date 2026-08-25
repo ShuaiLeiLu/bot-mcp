@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from starlette.testclient import TestClient
 from sub2api_mcp.app import build_runtime, create_app
 from sub2api_mcp.config import AccessTokenConfig, Scope, Settings
 from sub2api_mcp.contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineRecord,
     ProbeResult,
     QuarantineProbeAttempt,
@@ -35,17 +37,34 @@ class FakeOperations:
         probe: ProbeResult,
         *,
         excluded_account_ids: frozenset[str] = frozenset(),
+        before_quarantine: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+        after_quarantine: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> list[dict[str, object]]:
         return []
 
     async def probe_quarantined(
         self,
         marker: AccountQuarantineRecord,
+        *,
+        before_restore: Callable[[str], Awaitable[None]] | None = None,
+        after_restore: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> QuarantineProbeAttempt:
         return QuarantineProbeAttempt(
             account_id=marker.account_id,
             result=QuarantineProbeResult.INVALID,
         )
+
+    async def reconcile_quarantine_intent(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> str:
+        return "KEEP"
+
+    async def reconcile_quarantine_restore(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> str:
+        return "KEEP"
 
     async def find_active_account(self, email: str):  # type: ignore[no-untyped-def]
         return None

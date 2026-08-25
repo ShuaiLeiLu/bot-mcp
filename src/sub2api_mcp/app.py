@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol
@@ -23,6 +24,7 @@ from .auth import ApiKeyAuthenticator, Principal, bind_principal
 from .bootstrap import bootstrap_legacy_core
 from .config import Settings
 from .contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineRecord,
     JobType,
     ProbeResult,
@@ -55,12 +57,27 @@ class RuntimeOperations(ServiceOperations, Protocol):
         probe: ProbeResult,
         *,
         excluded_account_ids: frozenset[str] = frozenset(),
+        before_quarantine: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+        after_quarantine: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> list[dict[str, object]]: ...
 
     async def probe_quarantined(
         self,
         marker: AccountQuarantineRecord,
+        *,
+        before_restore: Callable[[str], Awaitable[None]] | None = None,
+        after_restore: Callable[[str, bool, bool], Awaitable[None]] | None = None,
     ) -> QuarantineProbeAttempt: ...
+
+    async def reconcile_quarantine_intent(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> str: ...
+
+    async def reconcile_quarantine_restore(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> str: ...
 
 
 @dataclass(slots=True)
