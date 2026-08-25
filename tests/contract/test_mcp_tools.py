@@ -208,6 +208,10 @@ async def test_read_tool_returns_stable_json_envelope(tmp_path: Path) -> None:
     assert result["requestId"] == "request-1"
     assert result["data"]["version"] == "0.1.0"
     assert result["data"]["account_quarantine_count"] == 0
+    assert result["data"]["account_quarantine_counts"] == {
+        "CHANNEL_TEST_FAILED": 0,
+        "SLOW_FIRST_TOKEN": 0,
+    }
 
 
 @pytest.mark.asyncio

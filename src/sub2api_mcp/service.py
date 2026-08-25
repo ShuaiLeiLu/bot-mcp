@@ -66,6 +66,10 @@ class Sub2APIService:
             "outbox_backlog": await self.repository.outbox_backlog(),
             "delivery_targets": len(await self.repository.list_delivery_targets()),
             "account_quarantine_count": await self.repository.account_quarantine_count(),
+            "account_quarantine_counts": {
+                reason.value: await self.repository.account_quarantine_count(reason)
+                for reason in AccountQuarantineReason
+            },
             "langbot_configured": self._langbot is not None,
         }
 
