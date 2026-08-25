@@ -15,10 +15,16 @@ from ..contracts import DeliveryPurpose, NotificationPayload, OutboxEventType
 from ..errors import ServiceError
 from ..metrics import Metrics
 from ..repository import SqliteRepository
+from .account_recovery import AccountRecoveryExecutor, AccountRecoveryOperations
 from .contracts import (
+    AccountRecoveryOwner,
+    AccountRecoveryRunStatus,
+    AccountRecoveryRunTrigger,
     AutoApplyPolicy,
     ChannelPolicyOverride,
     GroupPolicyOverride,
+    GuardianAccountRecoveryRecord,
+    GuardianAccountRecoveryRun,
     GuardianFieldName,
     GuardianFieldOwner,
     GuardianFieldOwnership,
@@ -67,6 +73,7 @@ class GuardianService:
         engine: GuardianEngine,
         metrics: Metrics | None = None,
         notification_repository: SqliteRepository | None = None,
+        account_operations: AccountRecoveryOperations | None = None,
     ) -> None:
         self.repository = repository
         self.engine = engine
@@ -75,6 +82,12 @@ class GuardianService:
         self._logger = logging.getLogger("sub2api_mcp.guardian")
         self._metrics = metrics
         self._notification_repository = notification_repository
+        self._account_recovery = (
+            AccountRecoveryExecutor(repository, account_operations)
+            if account_operations is not None
+            else None
+        )
+        self._notified_account_recovery_run_ids: set[str] = set()
         self._last_retention_at: datetime | None = None
         self._recovery_metric_requests = 0
         self._recovery_metric_tokens = 0
@@ -183,6 +196,7 @@ class GuardianService:
                 and int(run_result.get("state_transitions", 0)) > 0
             ):
                 await self._notify_run(result)
+            await self._run_conditional_account_recovery(result)
             await self._after_run_operations(result)
             return result
         finally:
@@ -191,6 +205,180 @@ class GuardianService:
                 self._metrics.guardian_duration.labels(mode=mode).observe(
                     time.monotonic() - started
                 )
+
+    async def execute_account_recovery(
+        self,
+        *,
+        snapshot_id: str,
+        trigger: AccountRecoveryRunTrigger,
+        episode_id: str | None = None,
+        channel_id: str | None = None,
+        group_id: str | None = None,
+        already_processed_account_ids: frozenset[str] = frozenset(),
+    ) -> GuardianAccountRecoveryRun:
+        if self._account_recovery is None:
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_ADAPTER_UNAVAILABLE",
+                "Guardian account recovery operations are unavailable",
+            )
+        policy = await self.repository.get_policy()
+        run = await self._account_recovery.execute(
+            snapshot_id=snapshot_id,
+            trigger=trigger,
+            policy=policy.account_recovery,
+            policy_revision=policy.revision,
+            episode_id=episode_id,
+            channel_id=channel_id,
+            group_id=group_id,
+            quarantined_account_ids=await self._quarantined_account_ids(),
+            already_processed_account_ids=already_processed_account_ids,
+        )
+        records = await self.repository.list_account_recovery_results(run.run_id)
+        if run.status is not AccountRecoveryRunStatus.RUNNING:
+            await self._notify_account_recovery(run, records)
+        return run
+
+    async def _run_conditional_account_recovery(
+        self,
+        guardian_run: dict[str, Any],
+    ) -> None:
+        if self._account_recovery is None or guardian_run.get("status") != "SUCCEEDED":
+            return
+        result = cast(dict[str, Any], guardian_run.get("result") or {})
+        snapshot_id = result.get("snapshot_id")
+        if not isinstance(snapshot_id, str):
+            return
+        policy = await self.repository.get_policy()
+        if (
+            not policy.account_recovery.enabled
+            or policy.account_recovery.owner is not AccountRecoveryOwner.GUARDIAN
+        ):
+            return
+        processed: set[str] = set()
+        completed_runs: list[GuardianAccountRecoveryRun] = []
+        raw_value = result.get("account_recovery_triggers")
+        raw_triggers = cast(list[object], raw_value) if isinstance(raw_value, list) else []
+        for raw_value in raw_triggers:
+            if not isinstance(raw_value, dict):
+                continue
+            raw = cast(dict[str, object], raw_value)
+            episode_id = raw.get("episode_id")
+            channel_id = raw.get("channel_id")
+            group_id = raw.get("group_id")
+            if not all(isinstance(value, str) for value in (episode_id, channel_id, group_id)):
+                continue
+            run = await self.execute_account_recovery(
+                snapshot_id=snapshot_id,
+                trigger=AccountRecoveryRunTrigger.CHANNEL_ERROR,
+                episode_id=cast(str, episode_id),
+                channel_id=cast(str, channel_id),
+                group_id=cast(str, group_id),
+                already_processed_account_ids=frozenset(processed),
+            )
+            completed_runs.append(run)
+            records = await self.repository.list_account_recovery_results(run.run_id)
+            processed.update(item.account_id for item in records if item.tested)
+        bad_state_run = await self.execute_account_recovery(
+            snapshot_id=snapshot_id,
+            trigger=AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE,
+            already_processed_account_ids=frozenset(processed),
+        )
+        completed_runs.append(bad_state_run)
+        result["account_recovery_runs"] = [
+            item.model_dump(mode="json") for item in completed_runs
+        ]
+
+    async def _quarantined_account_ids(self) -> frozenset[str]:
+        if self._notification_repository is None:
+            return frozenset()
+        account_ids: set[str] = set()
+        cursor: str | None = None
+        for _ in range(100):
+            page = await self._notification_repository.list_account_quarantines(
+                limit=100,
+                cursor=cursor,
+            )
+            account_ids.update(item.account_id for item in page.items)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        else:
+            raise ServiceError(
+                "QUARANTINE_SCAN_LIMIT_REACHED",
+                "The quarantine registry exceeds the safe scan limit",
+            )
+        intents = await self._notification_repository.list_account_quarantine_intents(
+            limit=10_000
+        )
+        account_ids.update(item.account_id for item in intents)
+        return frozenset(account_ids)
+
+    async def _notify_account_recovery(
+        self,
+        run: GuardianAccountRecoveryRun,
+        records: list[GuardianAccountRecoveryRecord],
+    ) -> bool:
+        if (
+            self._notification_repository is None
+            or run.run_id in self._notified_account_recovery_run_ids
+            or (run.status is AccountRecoveryRunStatus.SUCCEEDED and not records)
+        ):
+            return False
+        try:
+            targets = [
+                target.delivery_target_id
+                for target in await self._notification_repository.list_delivery_targets()
+                if target.enabled and DeliveryPurpose.RECOVERY_ADMIN in target.purposes
+            ]
+            if not targets:
+                return False
+            result_labels = {
+                "ENABLED": "已启用（已回读确认）",
+                "DISABLED": "已禁用（已回读确认）",
+                "INDETERMINATE": "状态不确定，未改动",
+                "SKIPPED": "已跳过",
+            }
+            details = [
+                (
+                    f"{index}. 账号 #{item.account_id}｜"
+                    f"{result_labels[item.result.value]}｜{item.reason or '—'}"
+                )
+                for index, item in enumerate(records[:30], start=1)
+            ]
+            if len(records) > len(details):
+                details.append(f"其余 {len(records) - len(details)} 项已写入 Guardian 账本")
+            summary = run.result or {}
+            notification = NotificationPayload(
+                text="\n".join(
+                    [
+                        "Guardian 账号恢复结果",
+                        _format_trigger_time(run.finished_at or run.started_at),
+                        f"触发：{run.trigger.value}",
+                        f"已测试：{summary.get('tested', 0)}｜启用：{summary.get('enabled', 0)}｜"
+                        f"禁用：{summary.get('disabled', 0)}｜不确定："
+                        f"{summary.get('indeterminate', 0)}｜跳过：{summary.get('skipped', 0)}",
+                        *details,
+                    ]
+                )
+            )
+            await self._notification_repository.enqueue_outbox(
+                OutboxEventType.RECOVERY_RESULT,
+                {
+                    "dedupKey": f"guardian:account-recovery:{run.run_id}",
+                    "coalesceKey": f"guardian:account-recovery:{run.run_id}",
+                    "recoveryRunId": run.run_id,
+                    "notification": notification.model_dump(mode="json", exclude_none=True),
+                },
+                targets,
+            )
+            self._notified_account_recovery_run_ids.add(run.run_id)
+            return True
+        except Exception:
+            self._logger.exception(
+                "guardian_account_recovery_notification_enqueue_failed",
+                extra={"recoveryRunId": run.run_id},
+            )
+            return False
 
     async def _after_run_operations(self, run: dict[str, Any]) -> None:
         try:

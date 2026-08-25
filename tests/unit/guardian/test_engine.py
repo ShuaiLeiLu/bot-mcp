@@ -88,6 +88,7 @@ async def test_engine_runs_complete_observe_only_cycle(tmp_path: Path) -> None:
     assert repeated["run_id"] == run["run_id"]
     assert operations.calls == 1
     assert {item["channel_id"] for item in channels["items"]} == {"11", "12"}
+    assert await repository.get_open_channel_error_episode("12") is None
 
 
 @pytest.mark.asyncio

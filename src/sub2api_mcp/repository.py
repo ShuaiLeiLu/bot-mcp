@@ -1394,6 +1394,14 @@ class SqliteRepository:
         unique_target_ids = list(dict.fromkeys(target_ids))
         event_id = str(uuid.uuid4())
         now = _iso(self._clock())
+        raw_dedup_key = payload.get("dedupKey")
+        dedup_key = (
+            raw_dedup_key
+            if event_type is OutboxEventType.RECOVERY_RESULT
+            and isinstance(raw_dedup_key, str)
+            and 1 <= len(raw_dedup_key) <= 128
+            else None
+        )
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1407,6 +1415,25 @@ class SqliteRepository:
                     raise ServiceError(
                         "DELIVERY_TARGET_NOT_FOUND",
                         "A delivery target does not exist or is disabled",
+                    )
+            if dedup_key is not None:
+                existing = connection.execute(
+                    "SELECT event_id, payload_json, created_at FROM notification_outbox "
+                    "WHERE event_type = ? "
+                    "AND json_extract(payload_json, '$.dedupKey') = ? LIMIT 1",
+                    (event_type.value, dedup_key),
+                ).fetchone()
+                if existing is not None:
+                    stored_payload = json.loads(existing["payload_json"])
+                    stored_created_at = _datetime(existing["created_at"])
+                    if not isinstance(stored_payload, dict) or stored_created_at is None:
+                        raise RuntimeError("persisted outbox event is invalid")
+                    connection.execute("COMMIT")
+                    return OutboxEventRecord(
+                        event_id=existing["event_id"],
+                        event_type=event_type,
+                        payload=cast(dict[str, Any], stored_payload),
+                        created_at=stored_created_at,
                     )
             if event_type is OutboxEventType.STATUS_CHANGED:
                 placeholders = ",".join("?" for _ in unique_target_ids)

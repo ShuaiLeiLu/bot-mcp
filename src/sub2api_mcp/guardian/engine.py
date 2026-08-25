@@ -10,6 +10,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from ..contracts import ProbeResult
 from .contracts import (
+    AccountRecoveryOwner,
     BreakerPolicy,
     ChannelDecision,
     ChannelDecisionInput,
@@ -300,6 +301,7 @@ class GuardianEngine:
         expected_changes = 0
         duplicate_observations = 0
         traffic_buckets_processed = 0
+        account_recovery_triggers: list[dict[str, str]] = []
 
         for entry in snapshot.entries:
             active_run = await self.repository.get_run(run_id)
@@ -319,6 +321,35 @@ class GuardianEngine:
                 }
             existing = await self.repository.get_channel(entry.monitor_id)
             existing_details = cast(dict[str, Any], existing["details"] if existing else {})
+            if snapshot_id is not None and captured_at is not None:
+                account_recovery_active = (
+                    policy.account_recovery.enabled
+                    and policy.account_recovery.owner is AccountRecoveryOwner.GUARDIAN
+                )
+                if (
+                    account_recovery_active
+                    and entry.status in {"failed", "error"}
+                    and entry.group_id is not None
+                ):
+                    episode = await self.repository.open_channel_error_episode(
+                        channel_id=entry.monitor_id,
+                        group_id=entry.group_id,
+                        snapshot_id=snapshot_id,
+                        opened_at=captured_at,
+                    )
+                    if episode.opened_snapshot_id == snapshot_id:
+                        account_recovery_triggers.append(
+                            {
+                                "episode_id": episode.episode_id,
+                                "channel_id": episode.channel_id,
+                                "group_id": entry.group_id,
+                            }
+                        )
+                else:
+                    await self.repository.close_channel_error_episode(
+                        entry.monitor_id,
+                        closed_at=captured_at,
+                    )
             manual_control = ManualControl(
                 existing["manual_control"] if existing else ManualControl.NONE.value
             )
@@ -810,6 +841,7 @@ class GuardianEngine:
             "weight_candidates": weights,
             "duplicate_observations": duplicate_observations,
             "traffic_buckets_processed": traffic_buckets_processed,
+            "account_recovery_triggers": account_recovery_triggers,
             "writeback_blocked_reason": (
                 "observe_only" if policy.observe_only else "writeback_adapter_not_enabled"
             ),
