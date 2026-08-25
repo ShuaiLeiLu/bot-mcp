@@ -53,9 +53,18 @@ _LOGGER = logging.getLogger("sub2api_mcp.scheduler")
 class Sub2APIOperations(Protocol):
     async def probe(self) -> ProbeResult: ...
 
-    async def recover(self) -> list[dict[str, object]]: ...
+    async def recover(
+        self,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]: ...
 
-    async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]: ...
+    async def maintain(
+        self,
+        probe: ProbeResult,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]: ...
 
     async def probe_quarantined(
         self,
@@ -185,7 +194,10 @@ class SchedulerService:
     async def handle_recovery(self, job: JobRecord) -> dict[str, Any]:
         del job
         targets = await self.require_control_target(JobType.RECOVERY)
-        outcomes = await self._adapter.recover()
+        excluded_account_ids = await self._quarantined_account_ids()
+        outcomes = await self._adapter.recover(
+            excluded_account_ids=excluded_account_ids
+        )
         if outcomes:
             await self._repository.enqueue_outbox(
                 OutboxEventType.RECOVERY_RESULT,
@@ -207,8 +219,12 @@ class SchedulerService:
         selected_markers = await self._repository.list_account_quarantines_for_probe(
             limit=5
         )
+        excluded_account_ids = await self._quarantined_account_ids()
         probe = self._latest_probe or await self._adapter.probe()
-        raw_outcomes = await self._adapter.maintain(probe)
+        raw_outcomes = await self._adapter.maintain(
+            probe,
+            excluded_account_ids=excluded_account_ids,
+        )
         try:
             outcomes = _MAINTENANCE_OUTCOME_ADAPTER.validate_python(raw_outcomes)
         except ValidationError as exc:
@@ -327,6 +343,23 @@ class SchedulerService:
         for reason in AccountQuarantineReason:
             count = await self._repository.account_quarantine_count(reason)
             self._metrics.account_quarantines.labels(reason=reason.value).set(count)
+
+    async def _quarantined_account_ids(self) -> frozenset[str]:
+        account_ids: set[str] = set()
+        cursor: str | None = None
+        for _ in range(100):
+            page = await self._repository.list_account_quarantines(
+                limit=100,
+                cursor=cursor,
+            )
+            account_ids.update(item.account_id for item in page.items)
+            if page.next_cursor is None:
+                return frozenset(account_ids)
+            cursor = page.next_cursor
+        raise ServiceError(
+            "QUARANTINE_SCAN_LIMIT_REACHED",
+            "The quarantine registry exceeds the safe scan limit",
+        )
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
         purpose_by_type = {

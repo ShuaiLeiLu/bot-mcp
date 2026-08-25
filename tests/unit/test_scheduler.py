@@ -45,7 +45,9 @@ class FakeSub2APIAdapter:
         default_factory=_empty_quarantine_results
     )
     recovery_calls: int = 0
+    recovery_excluded_ids: frozenset[str] = frozenset()
     maintenance_calls: int = 0
+    maintenance_excluded_ids: frozenset[str] = frozenset()
     quarantine_calls: list[str] = field(default_factory=lambda: list[str]())
 
     async def probe(self) -> ProbeResult:
@@ -53,12 +55,23 @@ class FakeSub2APIAdapter:
         self.calls += 1
         return result
 
-    async def recover(self) -> list[dict[str, object]]:
+    async def recover(
+        self,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         self.recovery_calls += 1
+        self.recovery_excluded_ids = excluded_account_ids
         return self.recovery_results
 
-    async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]:
+    async def maintain(
+        self,
+        probe: ProbeResult,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         self.maintenance_calls += 1
+        self.maintenance_excluded_ids = excluded_account_ids
         return self.maintenance_results
 
     async def probe_quarantined(
@@ -528,6 +541,9 @@ async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
     delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
 
     assert adapter.quarantine_calls == ["101", "102", "103", "104", "105"]
+    assert adapter.maintenance_excluded_ids == frozenset(
+        {"101", "102", "103", "104", "105", "106"}
+    )
     assert len(result["probes"]) == 5
     assert await repository.get_account_quarantine("104") is None
     assert await repository.get_account_quarantine("106") is not None
@@ -588,6 +604,46 @@ async def test_existing_quarantine_queues_probes_when_detection_guards_are_off(
     await service.handle_probe(job)
 
     assert await repository.active_job_count(JobType.MAINTENANCE) == 1
+
+
+@pytest.mark.asyncio
+async def test_ordinary_recovery_excludes_durable_quarantine_markers(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    await repository.upsert_account_quarantine(
+        AccountQuarantineRecord(
+            account_id="101",
+            reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+            group_ids=("7",),
+            threshold_ms=30_000,
+            observed_count=1,
+            quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+        )
+    )
+    adapter = FakeSub2APIAdapter([_probe(1.0)])
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, recovery_enabled=True),
+    )
+
+    job = await repository.create_job(JobType.RECOVERY, {})
+    await service.handle_recovery(job)
+
+    assert adapter.recovery_excluded_ids == frozenset({"101"})
 
 
 @pytest.mark.asyncio

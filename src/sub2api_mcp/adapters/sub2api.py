@@ -113,7 +113,11 @@ class LegacySub2APIAdapter:
         )
         return snapshot.model_dump(mode="json")
 
-    async def recover(self) -> list[dict[str, object]]:
+    async def recover(
+        self,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         if not self._recovery_enabled:
             return []
         current = datetime.now(UTC)
@@ -124,7 +128,11 @@ class LegacySub2APIAdapter:
         )
         if window is None:
             return []
-        candidates = await self._client.fetch_recovery_candidates(now=current)
+        candidates = [
+            candidate
+            for candidate in await self._client.fetch_recovery_candidates(now=current)
+            if candidate.account_id not in excluded_account_ids
+        ]
         candidates.sort(key=lambda item: int(item.account_id))
         by_id = {item.account_id: item for item in candidates}
         current_ids = set(by_id)
@@ -151,7 +159,12 @@ class LegacySub2APIAdapter:
                 self._recovery_rotation = self._recovery_rotation[1:] + [account_id]
         return outcomes
 
-    async def maintain(self, probe: ProbeResult) -> list[dict[str, object]]:
+    async def maintain(
+        self,
+        probe: ProbeResult,
+        *,
+        excluded_account_ids: frozenset[str] = frozenset(),
+    ) -> list[dict[str, object]]:
         del probe
         if not (
             self._maintenance_policy.channel_account_sweep_enabled
@@ -159,7 +172,11 @@ class LegacySub2APIAdapter:
         ):
             return []
         probes = self._last_probes or await self._client.fetch_probe()
-        report = await self._maintenance.run(probes, now=datetime.now(UTC))
+        report = await self._maintenance.run(
+            probes,
+            now=datetime.now(UTC),
+            excluded_account_ids=excluded_account_ids,
+        )
         reason_map = {
             "channel_test_failed": AccountQuarantineReason.CHANNEL_TEST_FAILED,
             "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
