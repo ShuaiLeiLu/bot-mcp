@@ -6,6 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from sub2api_mcp.guardian.contracts import (
+    AccountRecoveryOwner,
+    AccountRecoveryPolicy,
+    AccountRecoveryTrigger,
+    GuardianAccountObservation,
+    GuardianAccountStatus,
     GuardianEventType,
     GuardianEvidence,
     GuardianEvidenceBucket,
@@ -16,6 +21,7 @@ from sub2api_mcp.guardian.contracts import (
     GuardianPolicy,
     GuardianRolloutStage,
     GuardianSampleSource,
+    GuardianSchedulingMode,
     GuardianScoreV2,
     SamplingMode,
 )
@@ -41,6 +47,7 @@ def test_policy_defaults_to_observe_only_and_safe_limits() -> None:
     assert policy.confidence.fuse_min == 0.85
     assert policy.rollout.stage is GuardianRolloutStage.OBSERVE
     assert policy.recovery_budget.enabled is False
+    assert policy.scheduling_mode is GuardianSchedulingMode.DIRECT
 
 
 def test_policy_rejects_self_contradictory_windows_and_load_bounds() -> None:
@@ -78,6 +85,69 @@ def test_v1_policy_payload_loads_with_safe_v2_defaults() -> None:
     assert policy.auto_apply.load_factor is False
     assert policy.auto_apply.priority is False
     assert policy.auto_apply.schedulable is False
+    assert policy.account_recovery.enabled is False
+    assert policy.account_recovery.owner is AccountRecoveryOwner.SCHEDULER
+    assert policy.scheduling_mode is GuardianSchedulingMode.DIRECT
+
+
+def test_conditional_account_recovery_contracts_are_strict() -> None:
+    policy = AccountRecoveryPolicy()
+    paused = GuardianAccountObservation(
+        account_id="997",
+        group_ids=("7", "36"),
+        status=GuardianAccountStatus.ACTIVE,
+        schedulable=False,
+    )
+    error = GuardianAccountObservation(
+        account_id="998",
+        group_ids=("36",),
+        status=GuardianAccountStatus.ERROR,
+        schedulable=False,
+    )
+    disabled = GuardianAccountObservation(
+        account_id="999",
+        group_ids=("36",),
+        status=GuardianAccountStatus.DISABLED,
+        schedulable=False,
+    )
+
+    assert policy.enabled is False
+    assert policy.owner is AccountRecoveryOwner.SCHEDULER
+    assert policy.trigger is AccountRecoveryTrigger.CONDITIONAL
+    assert policy.max_concurrency == 1
+    assert policy.max_accounts_per_episode == 1000
+    assert paused.status is GuardianAccountStatus.ACTIVE
+    assert paused.schedulable is False
+    assert error.status is GuardianAccountStatus.ERROR
+    assert disabled.status is GuardianAccountStatus.DISABLED
+
+    with pytest.raises(ValidationError):
+        GuardianAccountObservation.model_validate(
+            {
+                **error.model_dump(mode="json"),
+                "group_ids": ["36", "7"],
+            }
+        )
+    with pytest.raises(ValidationError):
+        GuardianAccountObservation.model_validate(
+            {
+                **error.model_dump(mode="json"),
+                "group_ids": ["36", "36"],
+            }
+        )
+    with pytest.raises(ValidationError):
+        GuardianAccountObservation.model_validate(
+            {
+                **error.model_dump(mode="json"),
+                "status": "paused",
+            }
+        )
+    with pytest.raises(ValidationError):
+        AccountRecoveryPolicy.model_validate({"trigger": "PERIODIC_ALL"})
+    with pytest.raises(ValidationError):
+        AccountRecoveryPolicy.model_validate({"max_concurrency": 0})
+    with pytest.raises(ValidationError):
+        GuardianPolicy.model_validate({"scheduling_mode": "OBSERVE"})
 
 
 def test_v2_evidence_and_field_ownership_contracts_are_strict() -> None:

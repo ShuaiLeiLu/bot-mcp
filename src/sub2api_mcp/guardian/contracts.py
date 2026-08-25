@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -34,6 +35,138 @@ class GuardianSampleSource(StrEnum):
 class SamplingMode(StrEnum):
     SHARED = "SHARED"
     ACTIVE = "ACTIVE"
+
+
+class AccountRecoveryOwner(StrEnum):
+    SCHEDULER = "SCHEDULER"
+    GUARDIAN = "GUARDIAN"
+
+
+class AccountRecoveryTrigger(StrEnum):
+    CONDITIONAL = "CONDITIONAL"
+
+
+class AccountRecoveryRunTrigger(StrEnum):
+    BAD_ACCOUNT_STATE = "BAD_ACCOUNT_STATE"
+    CHANNEL_ERROR = "CHANNEL_ERROR"
+    MANUAL = "MANUAL"
+
+
+class AccountRecoveryClassification(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    MANUAL_PAUSE = "MANUAL_PAUSE"
+    UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    DISABLED = "DISABLED"
+    SYSTEM_QUARANTINE = "SYSTEM_QUARANTINE"
+    EXCLUDED = "EXCLUDED"
+
+
+class AccountRecoveryResult(StrEnum):
+    ENABLED = "ENABLED"
+    DISABLED = "DISABLED"
+    INDETERMINATE = "INDETERMINATE"
+    SKIPPED = "SKIPPED"
+
+
+class ChannelErrorEpisodeStatus(StrEnum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class AccountRecoveryRunStatus(StrEnum):
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"
+
+
+class GuardianAccountStatus(StrEnum):
+    ACTIVE = "active"
+    ERROR = "error"
+    DISABLED = "disabled"
+    INACTIVE = "inactive"
+
+
+class GuardianAccountObservation(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    group_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    status: GuardianAccountStatus
+    schedulable: bool
+    expired: bool = False
+    temporary_unavailable: bool = False
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("group IDs must be positive decimal identifiers")
+        if tuple(sorted(set(value), key=int)) != value:
+            raise ValueError("group IDs must be unique and numerically sorted")
+        return value
+
+
+class GuardianChannelErrorEpisode(StrictModel):
+    episode_id: str = Field(min_length=1, max_length=128)
+    channel_id: str = Field(min_length=1, max_length=128)
+    group_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
+    opened_snapshot_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: ChannelErrorEpisodeStatus
+    opened_at: datetime
+    closed_at: datetime | None = None
+
+    @field_validator("opened_at", "closed_at")
+    @classmethod
+    def validate_episode_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("episode timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def validate_episode_status(self) -> GuardianChannelErrorEpisode:
+        if (self.status is ChannelErrorEpisodeStatus.OPEN) != (self.closed_at is None):
+            raise ValueError("episode status and closed_at are inconsistent")
+        return self
+
+
+class GuardianAccountRecoveryRun(StrictModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    dedup_key: str = Field(min_length=1, max_length=512)
+    trigger: AccountRecoveryRunTrigger
+    snapshot_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    episode_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_revision: int = Field(ge=1)
+    status: AccountRecoveryRunStatus
+    result: dict[str, int] | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def validate_run_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("account recovery run timestamps must be timezone-aware")
+        return value
+
+
+class GuardianAccountRecoveryRecord(StrictModel):
+    ledger_id: str = Field(min_length=1, max_length=128)
+    run_id: str = Field(min_length=1, max_length=128)
+    dedup_key: str = Field(min_length=1, max_length=512)
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    channel_id: str | None = Field(default=None, min_length=1, max_length=128)
+    group_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
+    classification: AccountRecoveryClassification
+    result: AccountRecoveryResult
+    reason: str = Field(default="", max_length=200)
+    tested: bool
+    occurred_at: datetime
+
+    @field_validator("occurred_at")
+    @classmethod
+    def validate_result_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("account recovery result time must be timezone-aware")
+        return value
 
 
 class GuardianFreshness(StrEnum):
@@ -94,6 +227,10 @@ class GuardianStrategy(StrEnum):
     PRICE = "PRICE"
     SPEED = "SPEED"
     BALANCED = "BALANCED"
+
+
+class GuardianSchedulingMode(StrEnum):
+    DIRECT = "DIRECT"
 
 
 class AutoApplyPolicy(StrictModel):
@@ -284,6 +421,14 @@ class RecoveryProbeBudgetPolicy(StrictModel):
     daily_tokens: int = Field(default=10_000, ge=1, le=1_000_000_000)
 
 
+class AccountRecoveryPolicy(StrictModel):
+    enabled: bool = False
+    owner: AccountRecoveryOwner = AccountRecoveryOwner.SCHEDULER
+    trigger: AccountRecoveryTrigger = AccountRecoveryTrigger.CONDITIONAL
+    max_concurrency: int = Field(default=1, ge=1, le=8)
+    max_accounts_per_episode: int = Field(default=1000, ge=1, le=10_000)
+
+
 class RecoveryProbeCandidate(StrictModel):
     channel_id: str = Field(min_length=1, max_length=128)
     health: GuardianHealth
@@ -322,6 +467,7 @@ class ScopePolicy(StrictModel):
 class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
     enabled: bool = False
+    scheduling_mode: GuardianSchedulingMode = GuardianSchedulingMode.DIRECT
     observe_only: bool = True
     scan_interval_seconds: int = Field(default=15, ge=5, le=3600)
     strategy: GuardianStrategy = GuardianStrategy.PRICE
@@ -338,6 +484,9 @@ class GuardianPolicy(StrictModel):
     writes: WritePolicy = Field(default_factory=WritePolicy)
     recovery_budget: RecoveryProbeBudgetPolicy = Field(
         default_factory=RecoveryProbeBudgetPolicy
+    )
+    account_recovery: AccountRecoveryPolicy = Field(
+        default_factory=AccountRecoveryPolicy
     )
     rollout: RolloutPolicy = Field(default_factory=RolloutPolicy)
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
