@@ -363,15 +363,18 @@ Dependencies: approved spec.
 Likely files: `schema.py`, `contracts.py`, `repository.py`, `tests/unit/test_repository.py`.  
 Scope: M (4 files).
 
-### Task AQ2 — Enforce one usable account per group
+### Task AQ2 — Sweep failed channels and enforce one usable account per group
 
-Add a deterministic minimum-pool decision to log maintenance before disabling slow/error-log
+When a mapped channel enters failed/error state, test all eligible accounts in the resolved group
+before mutation. Add a deterministic minimum-pool decision for channel-failure and log-latency
 candidates, including multi-group and missing-group fail-closed behavior.
 
 Acceptance:
 - The final usable account in any group is never disabled.
 - Multi-group candidates require spare capacity in every group.
 - Successful disables decrement counts; failed/skipped disables do not.
+- At least one explicit successful test is required before disabling any failed account; an
+  all-failed sweep emits `NO_HEALTHY_ACCOUNT` and performs no disable mutation.
 
 Verification: RED/GREEN core maintenance matrix and existing compatibility tests.  
 Dependencies: AQ1 contract shape only.  
@@ -388,12 +391,14 @@ Scope: S (2 files per repository).
 
 ### Task AQ3 — Persist verified system quarantines
 
-Connect successful slow-first-token maintenance adjustments to the repository marker in the same
-control-job flow and emit explicit minimum-pool-protected/quarantined results.
+Connect successful slow-first-token and failed-channel maintenance adjustments to the repository
+marker in the same control-job flow and emit explicit minimum-pool-protected, no-healthy-account,
+and quarantined results.
 
 Acceptance:
-- Only a verified successful disable creates a marker.
-- Slow candidates blocked by minimum pool create no marker or mutation.
+- Only a verified successful disable creates a reason-specific marker.
+- Slow/channel candidates blocked by minimum pool or an all-failed sweep create no marker or
+  disable mutation.
 - Restarted services retain marker ownership and never infer it from upstream status.
 
 Verification: scheduler/repository integration tests with fake Sub2API.  
@@ -404,13 +409,14 @@ Scope: M (5 files).
 
 ### Task AQ4 — Measure probes and restore quarantined accounts
 
-Add bounded SSE first-event timing, rotating quarantine probe selection, fail-closed slow/failed
-updates, and verified active+schedulable re-entry.
+Add bounded SSE first-event timing, rotating quarantine probe selection, reason-specific
+slow/failed updates, and verified active+schedulable re-entry.
 
 Acceptance:
 - Missing latency, malformed SSE, timeout, explicit failure, or latency over threshold stays
-  quarantined.
-- Explicit success at/below threshold restores active scheduling and removes the marker.
+  quarantined for latency markers.
+- Explicit success at/below threshold restores a latency marker; explicit success restores a
+  channel-test marker.
 - Ordinary error recovery and human-paused accounts never consume quarantine records.
 
 Verification: timing parser unit tests, adapter integration tests, restart/retry test.  
@@ -463,6 +469,7 @@ Scope: operational.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Multi-group account empties another channel | High | Require spare capacity in every captured group. |
+| Failed channel has no healthy accounts | High | No disable mutation; emit `NO_HEALTHY_ACCOUNT` and require capacity/account intervention. |
 | System quarantine mistaken for human pause | High | Durable local ownership marker; never infer from upstream switch. |
 | Buffered test hides first-token latency | High | Measure first valid SSE event, not total duration. |
 | Crash between disable and marker write | High | Verified mutation result, immediate durable write, audit event, startup reconciliation alert. |
