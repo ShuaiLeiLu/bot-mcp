@@ -70,7 +70,9 @@ class BlockingOperations(FakeOperations):
 
 
 @pytest.mark.asyncio
-async def test_engine_runs_complete_observe_only_cycle(tmp_path: Path) -> None:
+async def test_engine_runs_complete_direct_mode_cycle_without_implicit_writes(
+    tmp_path: Path,
+) -> None:
     repository = GuardianRepository(tmp_path / "state.db")
     await repository.initialize()
     operations = FakeOperations()
@@ -83,7 +85,7 @@ async def test_engine_runs_complete_observe_only_cycle(tmp_path: Path) -> None:
     assert run["status"] == "SUCCEEDED"
     assert run["result"]["channels_evaluated"] == 2
     assert run["result"]["writes_applied"] == 0
-    assert run["result"]["observe_only"] is True
+    assert run["result"]["scheduling_mode"] == "DIRECT"
     assert run["result"]["transitions"][0]["event_type"] == "PERFECT"
     assert repeated["run_id"] == run["run_id"]
     assert operations.calls == 1

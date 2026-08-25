@@ -187,7 +187,7 @@ class GuardianEngine:
                         run_id,
                         status="SUCCEEDED",
                         result={
-                            "observe_only": policy.observe_only,
+                            "scheduling_mode": policy.scheduling_mode.value,
                             "requested_dry_run": dry_run,
                             "channels_evaluated": 0,
                             "state_transitions": 0,
@@ -308,7 +308,7 @@ class GuardianEngine:
             if active_run is not None and active_run["cancel_requested"]:
                 return {
                     "_cancelled": True,
-                    "observe_only": policy.observe_only,
+                    "scheduling_mode": policy.scheduling_mode.value,
                     "requested_dry_run": requested_dry_run,
                     "channels_evaluated": len(evaluated),
                     "state_transitions": transitions,
@@ -323,7 +323,8 @@ class GuardianEngine:
             existing_details = cast(dict[str, Any], existing["details"] if existing else {})
             if snapshot_id is not None and captured_at is not None:
                 account_recovery_active = (
-                    policy.account_recovery.enabled
+                    policy.enabled
+                    and policy.account_recovery.enabled
                     and policy.account_recovery.owner is AccountRecoveryOwner.GUARDIAN
                 )
                 if (
@@ -830,7 +831,7 @@ class GuardianEngine:
                 )
         return {
             "_cancelled": False,
-            "observe_only": policy.observe_only,
+            "scheduling_mode": policy.scheduling_mode.value,
             "requested_dry_run": requested_dry_run,
             "channels_evaluated": len(evaluated),
             "state_transitions": transitions,
@@ -843,7 +844,7 @@ class GuardianEngine:
             "traffic_buckets_processed": traffic_buckets_processed,
             "account_recovery_triggers": account_recovery_triggers,
             "writeback_blocked_reason": (
-                "observe_only" if policy.observe_only else "writeback_adapter_not_enabled"
+                "guardian_disabled" if not policy.enabled else "writeback_not_applied"
             ),
         }
 

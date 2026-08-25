@@ -2240,7 +2240,8 @@ class GuardianRepository:
         runs = await self.list_runs(limit=1)
         policy = await self.get_policy()
         return {
-            "observe_only": policy.observe_only,
+            "enabled": policy.enabled,
+            "scheduling_mode": policy.scheduling_mode.value,
             "policy_revision": policy.revision,
             "channel_count": counts["channel_count"],
             "group_count": counts["group_count"],
