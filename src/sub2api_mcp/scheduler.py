@@ -474,7 +474,7 @@ class SchedulerService:
                 if isinstance(latency_value, int) and not isinstance(latency_value, bool)
                 else "未取得有效延迟"
             )
-            if result == QuarantineProbeResult.SUCCESS.value:
+            if result == QuarantineProbeResult.RECOVERED.value:
                 result_label = "恢复回池：测试及账号状态读回均成功"
             elif result == QuarantineProbeResult.SLOW.value:
                 result_label = "继续隔离：首字延迟仍高于阈值"

@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS account_quarantines (
         last_probe_latency_ms IS NULL OR last_probe_latency_ms >= 0
     ),
     last_probe_result TEXT NOT NULL CHECK (
-        last_probe_result IN ('NEVER', 'SUCCESS', 'FAILED', 'SLOW', 'INVALID')
+        last_probe_result IN ('NEVER', 'RECOVERED', 'FAILED', 'SLOW', 'INVALID')
     ),
     updated_at TEXT NOT NULL
 );

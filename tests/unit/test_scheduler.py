@@ -503,7 +503,7 @@ async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
             ),
             "104": QuarantineProbeAttempt(
                 account_id="104",
-                result=QuarantineProbeResult.SUCCESS,
+                result=QuarantineProbeResult.RECOVERED,
                 latency_ms=2_000,
                 recovered=True,
             ),
@@ -537,7 +537,7 @@ async def test_quarantine_probes_are_bounded_and_recovered_markers_are_removed(
     assert "继续隔离" in delivery.payload["notification"]["text"]
     rendered_metrics = metrics.render().decode()
     assert (
-        'sub2api_account_quarantine_probes_total{reason="SLOW_FIRST_TOKEN",result="SUCCESS"} 1.0'
+        'sub2api_account_quarantine_probes_total{reason="SLOW_FIRST_TOKEN",result="RECOVERED"} 1.0'
         in rendered_metrics
     )
     assert (

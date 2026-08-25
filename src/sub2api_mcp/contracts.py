@@ -153,7 +153,7 @@ class AccountQuarantineReason(StrEnum):
 
 class QuarantineProbeResult(StrEnum):
     NEVER = "NEVER"
-    SUCCESS = "SUCCESS"
+    RECOVERED = "RECOVERED"
     FAILED = "FAILED"
     SLOW = "SLOW"
     INVALID = "INVALID"
@@ -171,7 +171,7 @@ class QuarantineProbeAttempt(StrictModel):
             raise ValueError("a probe attempt cannot use NEVER")
         if self.result is QuarantineProbeResult.SLOW and self.latency_ms is None:
             raise ValueError("slow probe attempts require measured latency")
-        if self.recovered != (self.result is QuarantineProbeResult.SUCCESS):
+        if self.recovered != (self.result is QuarantineProbeResult.RECOVERED):
             raise ValueError("successful probe attempts require verified recovery")
         return self
 

@@ -227,7 +227,7 @@ class LegacySub2APIAdapter:
         return QuarantineProbeAttempt(
             account_id=marker.account_id,
             result=(
-                QuarantineProbeResult.SUCCESS
+                QuarantineProbeResult.RECOVERED
                 if restored.success
                 else QuarantineProbeResult.FAILED
             ),

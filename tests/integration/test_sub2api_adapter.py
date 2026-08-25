@@ -254,7 +254,7 @@ async def test_fast_slow_quarantine_is_verified_and_restored() -> None:
         _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
     )
 
-    assert outcome.result is QuarantineProbeResult.SUCCESS
+    assert outcome.result is QuarantineProbeResult.RECOVERED
     assert outcome.recovered is True
     assert fake.restore_calls == 1
 
@@ -272,7 +272,7 @@ async def test_channel_failure_quarantine_does_not_require_latency_to_restore() 
         _quarantine(AccountQuarantineReason.CHANNEL_TEST_FAILED)
     )
 
-    assert outcome.result is QuarantineProbeResult.SUCCESS
+    assert outcome.result is QuarantineProbeResult.RECOVERED
     assert outcome.recovered is True
     assert fake.restore_calls == 1
 
