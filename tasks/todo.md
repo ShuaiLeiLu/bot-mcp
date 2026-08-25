@@ -164,7 +164,7 @@ Status: Plan proposed for approval
 - [x] GR14: Update the light Guardian UI for direct mode.
 - [x] GR15: Remove legacy Scheduler recovery orchestration and periodic window/rotation.
 - [x] GR16: Complete notifications, metrics, runbook and changelog.
-- [ ] GR17: Pass replay, full tests, lint, types, audit, Docker and health gates.
+- [x] GR17: Pass replay, full tests, lint, types, audit, Docker and health gates.
 - [ ] GR18: Back up, deploy enabled, verify production and complete rollback drill.
 
 ## Guardian Direct Scheduling Checkpoints
