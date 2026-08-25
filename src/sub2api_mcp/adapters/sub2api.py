@@ -17,7 +17,12 @@ from recovery import active_recovery_window
 
 from ..actor_bridge import ActorAccount
 from ..config import Settings
-from ..contracts import ProbeResult
+from ..contracts import (
+    AccountQuarantineReason,
+    MaintenanceOutcome,
+    MaintenanceOutcomeCode,
+    ProbeResult,
+)
 from ..guardian.contracts import UpstreamProbeSnapshot
 
 _SNAPSHOT_ADAPTER = TypeAdapter(dict[str, Any])
@@ -152,7 +157,38 @@ class LegacySub2APIAdapter:
             return []
         probes = self._last_probes or await self._client.fetch_probe()
         report = await self._maintenance.run(probes, now=datetime.now(UTC))
-        return [asdict(item) for item in report.adjustments]
+        reason_map = {
+            "channel_test_failed": AccountQuarantineReason.CHANNEL_TEST_FAILED,
+            "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        }
+        outcomes = [
+            MaintenanceOutcome(
+                outcome=MaintenanceOutcomeCode.QUARANTINED,
+                account_id=item.account_id,
+                account_name=item.account_name,
+                reason=reason_map[item.reason],
+                group_ids=item.group_ids,
+                threshold_ms=item.threshold_ms,
+                observed_count=item.observed_count,
+            )
+            for item in report.adjustments
+            if item.reason in reason_map
+        ]
+        for notice in report.notices:
+            outcomes.append(
+                MaintenanceOutcome(
+                    outcome=MaintenanceOutcomeCode(notice.code),
+                    account_id=notice.account_id or None,
+                    account_name=notice.account_name or None,
+                    reason=reason_map.get(notice.reason),
+                    group_id=notice.group_id or None,
+                    group_name=notice.group_name or None,
+                )
+            )
+        return [
+            item.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+            for item in outcomes
+        ]
 
     async def find_active_account(self, email: str) -> ActorAccount | None:
         account = await self._client.find_account_by_email(email)

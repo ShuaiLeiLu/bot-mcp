@@ -207,6 +207,50 @@ class AccountQuarantinePage(StrictModel):
     next_cursor: str | None = None
 
 
+class MaintenanceOutcomeCode(StrEnum):
+    QUARANTINED = "QUARANTINED"
+    MINIMUM_POOL_PROTECTED = "MINIMUM_POOL_PROTECTED"
+    NO_HEALTHY_ACCOUNT = "NO_HEALTHY_ACCOUNT"
+    AMBIGUOUS_GROUP_MAPPING = "AMBIGUOUS_GROUP_MAPPING"
+    SWEEP_LIMIT_REACHED = "SWEEP_LIMIT_REACHED"
+
+
+class MaintenanceOutcome(StrictModel):
+    outcome: MaintenanceOutcomeCode
+    account_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
+    account_name: str | None = Field(default=None, min_length=1, max_length=200)
+    reason: AccountQuarantineReason | None = None
+    group_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    group_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
+    group_name: str | None = Field(default=None, min_length=1, max_length=200)
+    threshold_ms: int | None = Field(default=None, ge=1, le=3_600_000)
+    observed_count: int | None = Field(default=None, ge=1, le=1_000_000)
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_outcome_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("group IDs must be positive decimal identifiers")
+        if tuple(sorted(set(value), key=int)) != value:
+            raise ValueError("group IDs must be unique and numerically sorted")
+        return value
+
+    @model_validator(mode="after")
+    def validate_outcome_fields(self) -> MaintenanceOutcome:
+        if self.outcome is MaintenanceOutcomeCode.QUARANTINED and (
+            self.account_id is None
+            or self.account_name is None
+            or self.reason is None
+            or not self.group_ids
+            or self.threshold_ms is None
+            or self.observed_count is None
+        ):
+            raise ValueError("quarantined outcomes require complete marker fields")
+        if self.outcome is not MaintenanceOutcomeCode.QUARANTINED and self.group_ids:
+            raise ValueError("non-quarantine outcomes cannot create marker groups")
+        return self
+
+
 class NotificationPayload(StrictModel):
     text: str = Field(min_length=1, max_length=10000)
     image_url: str | None = Field(default=None, max_length=2048)

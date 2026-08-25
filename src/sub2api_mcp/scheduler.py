@@ -12,10 +12,16 @@ from datetime import UTC, datetime, time
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from pydantic import TypeAdapter, ValidationError
+
 from .contracts import (
+    AccountQuarantineReason,
+    AccountQuarantineRecord,
     DeliveryPurpose,
     JobRecord,
     JobType,
+    MaintenanceOutcome,
+    MaintenanceOutcomeCode,
     NotificationPayload,
     OutboxEventType,
     ProbeResult,
@@ -25,10 +31,10 @@ from .metrics import Metrics
 from .repository import SqliteRepository
 
 _MAINTENANCE_REASON_LABELS = {
-    "channel_test_failed": "渠道异常且可用性测试失败",
-    "repeated_errors": "30 分钟内重复出现上游错误",
-    "slow_first_token": "首字响应延迟连续超过 30 秒",
+    AccountQuarantineReason.CHANNEL_TEST_FAILED: "渠道异常且可用性测试失败",
+    AccountQuarantineReason.SLOW_FIRST_TOKEN: "首字响应延迟连续超过 30 秒",
 }
+_MAINTENANCE_OUTCOME_ADAPTER = TypeAdapter(list[MaintenanceOutcome])
 _RECOVERY_BUCKET_LABELS = {
     "error": "错误",
     "temporary": "临时不可调度",
@@ -190,21 +196,55 @@ class SchedulerService:
         del job
         targets = await self.require_control_target(JobType.MAINTENANCE)
         probe = self._latest_probe or await self._adapter.probe()
-        adjustments = await self._adapter.maintain(probe)
-        if adjustments:
+        raw_outcomes = await self._adapter.maintain(probe)
+        try:
+            outcomes = _MAINTENANCE_OUTCOME_ADAPTER.validate_python(raw_outcomes)
+        except ValidationError as exc:
+            raise ServiceError(
+                "MAINTENANCE_RESULT_INVALID",
+                "The account maintenance result is invalid",
+            ) from exc
+        adjustments: list[dict[str, Any]] = []
+        for outcome in outcomes:
+            if outcome.outcome is not MaintenanceOutcomeCode.QUARANTINED:
+                continue
+            assert (
+                outcome.account_id is not None
+                and outcome.account_name is not None
+                and outcome.reason is not None
+                and outcome.threshold_ms is not None
+                and outcome.observed_count is not None
+            )
+            marker = AccountQuarantineRecord(
+                account_id=outcome.account_id,
+                reason=outcome.reason,
+                group_ids=outcome.group_ids,
+                threshold_ms=outcome.threshold_ms,
+                observed_count=outcome.observed_count,
+                quarantined_at=self._clock(),
+            )
+            await self._repository.upsert_account_quarantine(marker)
+            adjustments.append(outcome.model_dump(mode="json", exclude_none=True))
+        if outcomes:
             await self._repository.enqueue_outbox(
                 OutboxEventType.MAINTENANCE_RESULT,
                 {
                     "notification": {
                         "text": self._format_maintenance_results(
-                            adjustments,
+                            outcomes,
                             triggered_at=self._clock(),
                         )
                     },
                 },
                 targets,
             )
-        return {"adjustments": adjustments}
+        return {
+            "adjustments": adjustments,
+            "outcomes": [
+                outcome.model_dump(mode="json", exclude_none=True)
+                for outcome in outcomes
+            ],
+        }
 
     async def require_control_target(self, job_type: JobType) -> list[str]:
         purpose_by_type = {
@@ -238,7 +278,7 @@ class SchedulerService:
     @classmethod
     def _format_maintenance_results(
         cls,
-        values: list[dict[str, object]],
+        values: list[MaintenanceOutcome],
         *,
         triggered_at: datetime,
     ) -> str:
@@ -247,15 +287,54 @@ class SchedulerService:
             f"{cls._format_trigger_time(triggered_at)}"
         ]
         for index, value in enumerate(values, start=1):
-            account_name = cls._display_text(value.get("account_name"), "未知账号")
-            account_id = cls._display_text(value.get("account_id"), "--")
-            reason_code = str(value.get("reason") or "")
-            reason = _MAINTENANCE_REASON_LABELS.get(reason_code, "触发账号健康规则")
-            blocks.append(
-                f"{index}. {account_name}（账号 #{account_id}）\n"
-                f"原因：{reason}\n"
-                "结果：已关闭账号调度"
-            )
+            account_name = cls._display_text(value.account_name, "未知账号")
+            account_id = cls._display_text(value.account_id, "--")
+            group_name = cls._display_text(value.group_name, "未知渠道")
+            if value.outcome is MaintenanceOutcomeCode.QUARANTINED:
+                reason_code = value.reason
+                reason = (
+                    _MAINTENANCE_REASON_LABELS.get(
+                        reason_code,
+                        "触发账号健康规则",
+                    )
+                    if reason_code is not None
+                    else "触发账号健康规则"
+                )
+                quarantine_type = (
+                    "系统延迟隔离"
+                    if reason_code is AccountQuarantineReason.SLOW_FIRST_TOKEN
+                    else "渠道失败隔离"
+                )
+                blocks.append(
+                    f"{index}. {account_name}（账号 #{account_id}）\n"
+                    f"类型：{quarantine_type}\n"
+                    f"原因：{reason}\n"
+                    "结果：已隔离并关闭账号调度"
+                )
+            elif value.outcome is MaintenanceOutcomeCode.NO_HEALTHY_ACCOUNT:
+                blocks.append(
+                    f"{index}. {group_name}\n"
+                    "类型：渠道无健康账号\n"
+                    "结果：未自动禁用任何账号，请人工补充或检查可用账号"
+                )
+            elif value.outcome is MaintenanceOutcomeCode.MINIMUM_POOL_PROTECTED:
+                blocks.append(
+                    f"{index}. {account_name}（账号 #{account_id}）\n"
+                    "类型：最小池保护\n"
+                    "结果：为保证渠道至少保留 1 个可用账号，本次未禁用"
+                )
+            elif value.outcome is MaintenanceOutcomeCode.AMBIGUOUS_GROUP_MAPPING:
+                blocks.append(
+                    f"{index}. {group_name}\n"
+                    "类型：渠道分组映射不明确\n"
+                    "结果：安全停止，未测试或禁用账号"
+                )
+            else:
+                blocks.append(
+                    f"{index}. {group_name}\n"
+                    "类型：探测数量超过安全上限\n"
+                    "结果：安全停止，未禁用账号"
+                )
         return "\n\n".join(blocks)
 
     @classmethod

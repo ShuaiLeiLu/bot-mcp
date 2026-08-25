@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from sub2api_mcp.contracts import (
+    AccountQuarantineReason,
     DeliveryPurpose,
     DeliveryTargetCreate,
     JobType,
@@ -308,9 +309,13 @@ async def test_maintenance_notification_uses_readable_chinese_layout(tmp_path: P
         [_probe(1.0)],
         maintenance_results=[
             {
+                "outcome": "QUARANTINED",
                 "account_id": "1032",
                 "account_name": "ai 特惠",
-                "reason": "slow_first_token",
+                "reason": "SLOW_FIRST_TOKEN",
+                "group_ids": ["7"],
+                "threshold_ms": 30_000,
+                "observed_count": 3,
             }
         ],
     )
@@ -324,18 +329,114 @@ async def test_maintenance_notification_uses_readable_chinese_layout(tmp_path: P
 
     job = await repository.create_job(JobType.MAINTENANCE, {})
     await service.handle_maintenance(job)
+    marker = await repository.get_account_quarantine("1032")
     delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
 
+    assert marker is not None
+    assert marker.reason is AccountQuarantineReason.SLOW_FIRST_TOKEN
+    assert marker.group_ids == ("7",)
+    assert marker.observed_count == 3
     assert delivery is not None
     assert delivery.event_type is OutboxEventType.MAINTENANCE_RESULT
     assert delivery.payload["notification"]["text"] == (
         "账号维护结果｜1 个账号\n"
         "触发时间：2026-08-24 10:15:30（北京时间）\n\n"
         "1. ai 特惠（账号 #1032）\n"
+        "类型：系统延迟隔离\n"
         "原因：首字响应延迟连续超过 30 秒\n"
-        "结果：已关闭账号调度"
+        "结果：已隔离并关闭账号调度"
     )
     assert target.delivery_target_id == delivery.target.delivery_target_id
+
+
+@pytest.mark.asyncio
+async def test_no_healthy_account_notice_never_creates_a_quarantine_marker(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        maintenance_results=[
+            {
+                "outcome": "NO_HEALTHY_ACCOUNT",
+                "group_id": "7",
+                "group_name": "特惠渠道",
+            }
+        ],
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=True),
+        clock=lambda: datetime(2026, 8, 24, 2, 15, 30, tzinfo=UTC),
+    )
+
+    job = await repository.create_job(JobType.MAINTENANCE, {})
+    result = await service.handle_maintenance(job)
+    delivery = await repository.claim_next_delivery("worker", lease_seconds=30)
+
+    assert await repository.account_quarantine_count() == 0
+    assert result["adjustments"] == []
+    assert delivery is not None
+    assert "渠道无健康账号" in delivery.payload["notification"]["text"]
+    assert "未自动禁用任何账号" in delivery.payload["notification"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_maintenance_result_fails_closed_before_persistence(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    await repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="maintenance-admin",
+            bot_uuid="bot",
+            target_type=TargetType.PERSON,
+            target_id="admin",
+            purposes=frozenset({DeliveryPurpose.MAINTENANCE_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+            required=True,
+        )
+    )
+    adapter = FakeSub2APIAdapter(
+        [_probe(1.0)],
+        maintenance_results=[
+            {
+                "outcome": "QUARANTINED",
+                "account_id": "1032",
+                "account_name": "缺少分组",
+                "reason": "SLOW_FIRST_TOKEN",
+                "threshold_ms": 30_000,
+                "observed_count": 3,
+            }
+        ],
+    )
+    service = SchedulerService(
+        repository,
+        adapter,
+        Metrics.create(),
+        SchedulerPolicy(enabled=True, maintenance_enabled=True),
+    )
+
+    job = await repository.create_job(JobType.MAINTENANCE, {})
+    with pytest.raises(ServiceError) as invalid_result:
+        await service.handle_maintenance(job)
+
+    assert invalid_result.value.code == "MAINTENANCE_RESULT_INVALID"
+    assert await repository.account_quarantine_count() == 0
+    assert await repository.outbox_backlog() == 0
 
 
 @pytest.mark.asyncio
