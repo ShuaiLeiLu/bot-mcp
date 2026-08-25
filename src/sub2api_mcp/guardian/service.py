@@ -281,6 +281,7 @@ class GuardianService:
             "enabled": policy.enabled,
             "owner": policy.account_recovery.owner.value,
             "trigger": policy.account_recovery.trigger.value,
+            "retry_cooldown_seconds": policy.account_recovery.retry_cooldown_seconds,
             "latest_abnormal_snapshot": (
                 await self.repository.latest_abnormal_account_snapshot()
             ),

@@ -40,6 +40,7 @@ from ..guardian.contracts import (
     AccountTestExecutionResult,
     GuardianAccountMutationOutcome,
     GuardianAccountSchedulingState,
+    GuardianAccountStatus,
     GuardianAccountTestOutcome,
     GuardianFieldName,
     UpstreamProbeSnapshot,
@@ -167,6 +168,12 @@ class LegacySub2APIAdapter:
         account_id: str,
     ) -> GuardianAccountTestOutcome:
         state = await self._client.fetch_account_dispatch_state(account_id)
+        observed_status = (
+            GuardianAccountStatus(state.status)
+            if state.success
+            else None
+        )
+        observed_schedulable = state.schedulable if state.success else None
         blocked = self._guardian_account_block_reason(state)
         if blocked is not None:
             return GuardianAccountTestOutcome(
@@ -177,6 +184,8 @@ class LegacySub2APIAdapter:
                     else AccountTestExecutionResult.SKIPPED
                 ),
                 reason=blocked,
+                observed_status=observed_status,
+                observed_schedulable=observed_schedulable,
             )
         tested = await self._client.test_account_availability(account_id)
         if tested.account_id != account_id:
@@ -197,14 +206,45 @@ class LegacySub2APIAdapter:
             reason=tested.reason,
             first_event_ms=tested.first_event_ms,
             attempted=True,
+            observed_status=observed_status,
+            observed_schedulable=observed_schedulable,
         )
 
     async def guardian_enable_account(
         self,
         account_id: str,
+        *,
+        tested: GuardianAccountTestOutcome,
     ) -> GuardianAccountMutationOutcome:
+        if (
+            tested.account_id != account_id
+            or tested.observed_status is None
+            or tested.observed_schedulable is None
+        ):
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.INDETERMINATE,
+                reason="test_context_invalid",
+            )
+        if (
+            tested.observed_status is GuardianAccountStatus.ACTIVE
+            and tested.observed_schedulable is False
+        ):
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.BLOCKED,
+                reason="manual_pause",
+            )
+        if tested.result is not AccountTestExecutionResult.SUCCESS:
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.INDETERMINATE,
+                reason="test_context_invalid",
+            )
         state = await self._client.fetch_account_dispatch_state(account_id)
         blocked = self._guardian_account_block_reason(state)
+        if blocked == "manual_pause":
+            blocked = None
         if blocked is not None:
             return GuardianAccountMutationOutcome(
                 account_id=account_id,

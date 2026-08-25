@@ -135,7 +135,7 @@
 
           <section class="page" id="page-recovery">
             <div class="section-intro"><div><h2>账号恢复</h2><p>仅处理最新快照中的异常账号；新渠道故障事件会扩展到唯一映射分组，人工暂停永不触碰。</p></div><button class="primary" id="recovery-run" type="button">处理待恢复账号</button></div>
-            <div class="metric-grid four"><article class="metric"><span>恢复归属</span><strong id="recovery-owner">GUARDIAN</strong><small>唯一执行方</small></article><article class="metric"><span>异常快照</span><strong id="recovery-snapshot">无</strong><small>仅显示摘要</small></article><article class="metric"><span>开放事件</span><strong id="recovery-episodes">0</strong><small>连续错误事件</small></article><article class="metric"><span>最近任务</span><strong id="recovery-runs">0</strong><small>持久化运行记录</small></article></div>
+            <div class="metric-grid four"><article class="metric"><span>恢复归属</span><strong id="recovery-owner">GUARDIAN</strong><small id="recovery-owner-note">重试冷却 900 秒</small></article><article class="metric"><span>异常快照</span><strong id="recovery-snapshot">无</strong><small>仅显示摘要</small></article><article class="metric"><span>开放事件</span><strong id="recovery-episodes">0</strong><small>连续错误事件</small></article><article class="metric"><span>最近任务</span><strong id="recovery-runs">0</strong><small>持久化运行记录</small></article></div>
             <div class="dashboard-grid recovery-grid"><article class="panel"><div class="panel-heading"><div><h2>开放故障事件</h2><p>同一连续错误事件只扩展探测一次。</p></div></div><div class="event-list" id="recovery-episode-list"><p class="empty">暂无开放事件</p></div></article><article class="panel"><div class="panel-heading"><div><h2>最近恢复任务</h2><p>展示触发类型与聚合结果，不回显账号身份。</p></div></div><div class="event-list" id="recovery-run-list"><p class="empty">暂无恢复任务</p></div></article></div>
           </section>
 
@@ -175,6 +175,9 @@
                   <label><span>单渠道每小时请求</span><input id="p-recovery-channel-hourly" type="number" min="1"></label>
                   <label><span>每日请求上限</span><input id="p-recovery-daily-requests" type="number" min="1"></label>
                   <label><span>每日 Token 上限</span><input id="p-recovery-daily-tokens" type="number" min="1"></label>
+                </div></article>
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>异常账号恢复</h3><p>异常账号按持久化账本冷却，避免每个新快照重复消耗测试请求。</p></div></div><div class="form-grid three-cols">
+                  <label><span>重复测试冷却（秒）</span><input id="p-account-recovery-cooldown" type="number" min="60" max="86400"></label>
                 </div></article>
               </div>
 

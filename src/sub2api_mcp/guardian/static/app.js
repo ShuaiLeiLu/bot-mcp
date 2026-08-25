@@ -38,6 +38,7 @@ const policyFields = [
   ["#p-recovery-channel-hourly", "recovery_budget.per_channel_hourly_requests", "number"],
   ["#p-recovery-daily-requests", "recovery_budget.daily_requests", "number"],
   ["#p-recovery-daily-tokens", "recovery_budget.daily_tokens", "number"],
+  ["#p-account-recovery-cooldown", "account_recovery.retry_cooldown_seconds", "number"],
   ["#p-short-window", "scoring.short_window", "number"],
   ["#p-long-window", "scoring.long_window", "number"],
   ["#p-slow-ttfb", "scoring.slow_ttfb_ms", "number"],
@@ -328,6 +329,7 @@ async function loadRecovery() {
   const episodes = data.open_episodes || [];
   const runs = data.recent_runs || [];
   $("#recovery-owner").textContent = data.owner || "GUARDIAN";
+  $("#recovery-owner-note").textContent = `重试冷却 ${data.retry_cooldown_seconds || 900} 秒`;
   $("#recovery-snapshot").textContent = data.latest_abnormal_snapshot ? "待处理" : "无";
   $("#recovery-episodes").textContent = episodes.length;
   $("#recovery-runs").textContent = runs.length;

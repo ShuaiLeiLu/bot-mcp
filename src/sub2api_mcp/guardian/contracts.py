@@ -93,6 +93,8 @@ class GuardianAccountTestOutcome(StrictModel):
     reason: str = Field(default="", max_length=200)
     first_event_ms: int | None = Field(default=None, ge=0, le=3_600_000)
     attempted: bool = False
+    observed_status: GuardianAccountStatus | None = None
+    observed_schedulable: bool | None = None
 
 
 class GuardianAccountMutationOutcome(StrictModel):
@@ -474,6 +476,7 @@ class AccountRecoveryPolicy(StrictModel):
     trigger: AccountRecoveryTrigger = AccountRecoveryTrigger.CONDITIONAL
     max_concurrency: int = Field(default=1, ge=1, le=8)
     max_accounts_per_episode: int = Field(default=1000, ge=1, le=10_000)
+    retry_cooldown_seconds: int = Field(default=900, ge=60, le=86_400)
 
 
 class RecoveryProbeCandidate(StrictModel):

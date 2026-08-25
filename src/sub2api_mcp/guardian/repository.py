@@ -38,7 +38,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 6
+GUARDIAN_SCHEMA_VERSION = 7
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -284,6 +284,8 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_run
     ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id);
+CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent
+    ON guardian_account_recovery_ledger(occurred_at, account_id) WHERE tested = 1;
 CREATE INDEX IF NOT EXISTS idx_guardian_samples_retention
     ON guardian_samples(occurred_at, sample_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_runs_retention
@@ -399,6 +401,8 @@ class GuardianRepository:
                 self._migrate_v4_to_v5_sync(connection)
             if current_version < 6:
                 self._migrate_v5_to_v6_sync(connection)
+            if current_version < 7:
+                self._migrate_v6_to_v7_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -611,6 +615,14 @@ class GuardianRepository:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_guardian_idempotency_created "
             "ON guardian_idempotency(created_at, idempotency_key, action, subject)"
+        )
+
+    @staticmethod
+    def _migrate_v6_to_v7_sync(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent "
+            "ON guardian_account_recovery_ledger(occurred_at, account_id) "
+            "WHERE tested = 1"
         )
 
     @staticmethod
@@ -1489,6 +1501,30 @@ class GuardianRepository:
                 (run_id,),
             ).fetchall()
         return [self._account_recovery_record_from_row(row) for row in rows]
+
+    async def list_recent_tested_account_ids(
+        self,
+        *,
+        since: datetime,
+    ) -> frozenset[str]:
+        if since.tzinfo is None:
+            raise ValueError("recent account recovery cutoff must be timezone-aware")
+        return await asyncio.to_thread(
+            self._list_recent_tested_account_ids_sync,
+            since,
+        )
+
+    def _list_recent_tested_account_ids_sync(
+        self,
+        since: datetime,
+    ) -> frozenset[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT account_id FROM guardian_account_recovery_ledger "
+                "WHERE tested = 1 AND occurred_at >= ? ORDER BY account_id",
+                (_iso(since),),
+            ).fetchall()
+        return frozenset(str(row["account_id"]) for row in rows)
 
     async def update_policy(
         self, policy: GuardianPolicy, *, expected_revision: int

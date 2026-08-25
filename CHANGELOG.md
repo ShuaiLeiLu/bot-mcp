@@ -66,6 +66,15 @@
 - Retention migrations add time-oriented indexes, checkpoint the WAL after each bounded cleanup,
   and expose cleanup outcome, deleted-row, and database-size metrics.
 
+### Fixed
+
+- Conditional account recovery now carries the tested pre-mutation state through verified
+  enablement, so an upstream `active + schedulable=false` transition created during a successful
+  error recovery is completed instead of being misclassified as a human pause. True pre-test
+  manual pauses remain immutable.
+- Bad-state account tests now use a durable 15-minute cross-snapshot cooldown, preventing the
+  same disabled account from being tested and disabled again every scheduler snapshot.
+
 ## [0.1.0] - 2026-08-23
 
 ### Added

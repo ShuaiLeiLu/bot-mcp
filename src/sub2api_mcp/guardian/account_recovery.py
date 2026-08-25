@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from ..errors import ServiceError
@@ -38,6 +38,8 @@ class AccountRecoveryOperations(Protocol):
     async def guardian_enable_account(
         self,
         account_id: str,
+        *,
+        tested: GuardianAccountTestOutcome,
     ) -> GuardianAccountMutationOutcome: ...
 
     async def guardian_disable_account(
@@ -242,6 +244,14 @@ class AccountRecoveryExecutor:
                 return run
             stored = await self._repository.list_account_recovery_results(run.run_id)
             stored_account_ids = frozenset(item.account_id for item in stored)
+            recently_tested_account_ids: frozenset[str] = (
+                await self._repository.list_recent_tested_account_ids(
+                    since=started_at
+                    - timedelta(seconds=policy.retry_cooldown_seconds)
+                )
+                if trigger is AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE
+                else frozenset[str]()
+            )
             observations = await self._repository.list_account_observations(snapshot_id)
             selection = select_account_recovery_candidates(
                 observations,
@@ -250,7 +260,9 @@ class AccountRecoveryExecutor:
                 group_id=group_id,
                 quarantined_account_ids=quarantined_account_ids,
                 already_processed_account_ids=(
-                    already_processed_account_ids | stored_account_ids
+                    already_processed_account_ids
+                    | stored_account_ids
+                    | recently_tested_account_ids
                 ),
             )
             counts = {
@@ -339,18 +351,20 @@ class AccountRecoveryExecutor:
             return AccountRecoveryResult.SKIPPED, tested.reason, tested.attempted, False
         if tested.result is AccountTestExecutionResult.INDETERMINATE:
             return AccountRecoveryResult.INDETERMINATE, tested.reason, tested.attempted, False
-        operation = (
-            self._operations.guardian_enable_account
-            if tested.result is AccountTestExecutionResult.SUCCESS
-            else self._operations.guardian_disable_account
-        )
         expected = (
             AccountRecoveryResult.ENABLED
             if tested.result is AccountTestExecutionResult.SUCCESS
             else AccountRecoveryResult.DISABLED
         )
         try:
-            mutation = await operation(account_id)
+            mutation = (
+                await self._operations.guardian_enable_account(
+                    account_id,
+                    tested=tested,
+                )
+                if tested.result is AccountTestExecutionResult.SUCCESS
+                else await self._operations.guardian_disable_account(account_id)
+            )
         except Exception:
             return (
                 AccountRecoveryResult.INDETERMINATE,
