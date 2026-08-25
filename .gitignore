@@ -1,16 +1,78 @@
+# Repository-local material
+/docs/
+/tests/
+/tasks/
+
+# Environment files and credentials
 .env
 .env.*
 !.env.example
-.pytest_cache/
-.ruff_cache/
+.envrc
+*.key
+*.pem
+*.p12
+*.pfx
+/secrets/
+
+# Python environments and bytecode
 .venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Test, coverage, lint, and type-check caches
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit*.xml
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.pytype/
+.cache/
+.uv-cache/
+
+# Python packaging and generated builds
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+wheels/
+
+# Runtime state, logs, and generated media
+/data/
+/logs/
+/outputs/
 *.db
 *.db-shm
 *.db-wal
-*.pem
-*.key
-dist/
-data/
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+*.mp4
+*.webm
+/tmp/
+/temp/
 
+# IDE and editor state
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

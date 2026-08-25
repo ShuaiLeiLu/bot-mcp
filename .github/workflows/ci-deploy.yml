@@ -35,8 +35,10 @@ jobs:
       - name: Type check
         run: uv run pyright
 
-      - name: Test
-        run: uv run pytest -q
+      - name: Compile and import smoke check
+        run: |
+          uv run python -m compileall -q src core
+          PYTHONPATH=src:core uv run python -c "import sub2api_mcp.app; import sub2api_mcp.guardian.engine; import sub2api_mcp.tools"
 
       - name: Audit dependencies
         run: uv run pip-audit

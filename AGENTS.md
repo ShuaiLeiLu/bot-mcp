@@ -10,16 +10,15 @@
 ## Commands
 
 - Install: `uv sync --frozen --all-extras`
-- Test: `uv run pytest -q`
-- Focused test: `uv run pytest tests/unit -q`
+- Local test (when the ignored `tests/` workspace exists): `uv run pytest -q`
 - Lint: `uv run ruff check .`
 - Type check: `uv run pyright`
 - Audit: `uv run pip-audit`
 
 ## Conventions
 
-- Read `tasks/spec.md`, `tasks/plan.md`, and `tasks/todo.md` before changes.
-- Tests are written before behavior changes.
+- Read local planning files under the ignored `tasks/` directory when they are available.
+- Local tests are written before behavior changes and run before pushing.
 - Public inputs/outputs use strict Pydantic models with extra fields forbidden.
 - MCP tools call the service layer; tools contain no scheduler, SQL, or HTTP logic.
 - All SQL is parameterized and wrapped in explicit transactions.
@@ -33,4 +32,4 @@
 - Never reintroduce WeChatPad, recharge, transfer, or payment behavior.
 - Never automatically re-enable a manually paused account.
 - Never contact production services from tests.
-- Do not deploy until the user provides a target machine in a later request.
+- Deploy only through the configured GitHub Actions workflow; never commit deployment credentials.

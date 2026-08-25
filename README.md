@@ -121,11 +121,13 @@ copy .env.example .env        # Windows
 # cp .env.example .env        # Linux/macOS
 
 uv sync --frozen --all-extras
-uv run pytest -q
 uv run ruff check .
 uv run pyright
 uv run python -m sub2api_mcp
 ```
+
+The local-only `tests/` directory is ignored by Git. When it is available in
+your development workspace, run `uv run pytest -q` before pushing.
 
 Replace all placeholder secrets in `.env`. `SUB2API_MCP_ACCESS_TOKENS` is a
 JSON array, for example:
@@ -211,5 +213,4 @@ key before persistence.
 
 ## Operations
 
-See [RUNBOOK.md](RUNBOOK.md), [tasks/spec.md](tasks/spec.md), and
-[tasks/plan.md](tasks/plan.md).
+See [RUNBOOK.md](RUNBOOK.md).
