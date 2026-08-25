@@ -1,6 +1,6 @@
 """SQLite schema for the Sub2API MCP service."""
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 ACCOUNT_QUARANTINE_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS account_quarantines (
@@ -30,6 +30,33 @@ ACCOUNT_QUARANTINE_TABLE_SQL = (
     f"{ACCOUNT_QUARANTINE_TABLE_DDL};{ACCOUNT_QUARANTINE_INDEX_DDL};"
 )
 
+ACCOUNT_QUARANTINE_INTENT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS account_quarantine_intents (
+    account_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK (
+        reason IN ('SLOW_FIRST_TOKEN', 'CHANNEL_TEST_FAILED')
+    ),
+    group_ids_json TEXT NOT NULL,
+    threshold_ms INTEGER NOT NULL CHECK (threshold_ms > 0),
+    observed_count INTEGER NOT NULL CHECK (observed_count > 0),
+    previous_status TEXT NOT NULL CHECK (previous_status IN ('active', 'error')),
+    previous_schedulable INTEGER NOT NULL CHECK (previous_schedulable IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_quarantine_intents_created
+    ON account_quarantine_intents(created_at, account_id);
+"""
+
+ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS account_quarantine_restore_intents (
+    account_id TEXT PRIMARY KEY
+        REFERENCES account_quarantines(account_id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_quarantine_restores_created
+    ON account_quarantine_restore_intents(created_at, account_id);
+"""
+
 SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS service_metadata (
     key TEXT PRIMARY KEY,
@@ -41,6 +68,11 @@ CREATE TABLE IF NOT EXISTS scheduler_state (
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS scheduler_lease (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    owner TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_control_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     owner TEXT NOT NULL,
     expires_at TEXT NOT NULL
@@ -105,6 +137,7 @@ CREATE TABLE IF NOT EXISTS account_bindings (
     bound_at TEXT NOT NULL
 );
 {ACCOUNT_QUARANTINE_TABLE_SQL}
+{ACCOUNT_QUARANTINE_INTENT_TABLE_SQL}
 CREATE TABLE IF NOT EXISTS actor_nonces (
     nonce TEXT PRIMARY KEY,
     expires_at TEXT NOT NULL

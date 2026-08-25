@@ -17,9 +17,11 @@ from pydantic import ValidationError
 
 from .contracts import (
     AccountBinding,
+    AccountQuarantineIntent,
     AccountQuarantinePage,
     AccountQuarantineReason,
     AccountQuarantineRecord,
+    AccountQuarantineRestoreIntent,
     ClaimedDelivery,
     DeliveryStatus,
     DeliveryTargetCreate,
@@ -36,6 +38,7 @@ from .contracts import (
 from .errors import ServiceError
 from .schema import (
     ACCOUNT_QUARANTINE_INDEX_DDL,
+    ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL,
     ACCOUNT_QUARANTINE_TABLE_DDL,
     SCHEMA_SQL,
 )
@@ -64,6 +67,7 @@ def _json(value: object) -> str:
 
 class SqliteRepository:
     SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
+    MAX_ACCOUNT_QUARANTINES = 10_000
 
     def __init__(self, path: Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self.path = path
@@ -90,6 +94,7 @@ class SqliteRepository:
             connection.executescript(SCHEMA_SQL)
             if current_version == 2:
                 self._migrate_quarantine_probe_result(connection)
+            connection.executescript(ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL)
             connection.execute(
                 "INSERT INTO service_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -255,6 +260,8 @@ class SqliteRepository:
 
     @staticmethod
     def _decode_cursor(cursor: str) -> tuple[str, str]:
+        if len(cursor) > 4096:
+            raise ServiceError("INVALID_CURSOR", "The cursor is invalid")
         try:
             padded = cursor + "=" * (-len(cursor) % 4)
             raw_value: object = json.loads(base64.urlsafe_b64decode(padded).decode())
@@ -618,21 +625,44 @@ class SqliteRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (record.account_id,),
+            ).fetchone()
+            intent = connection.execute(
+                "SELECT 1 FROM account_quarantine_intents WHERE account_id = ?",
+                (record.account_id,),
+            ).fetchone()
+            if row is not None and intent is not None:
+                raise ServiceError(
+                    "QUARANTINE_DATA_INVALID",
+                    "The account has conflicting quarantine states",
+                )
+            if intent is not None:
+                raise ServiceError(
+                    "QUARANTINE_TRANSITION_CONFLICT",
+                    "The account has a pending quarantine transition",
+                )
+            if row is not None:
+                connection.execute("COMMIT")
+                return self._quarantine_from_row(row)
+            count = int(
+                connection.execute(
+                    "SELECT (SELECT COUNT(*) FROM account_quarantines) + "
+                    "(SELECT COUNT(*) FROM account_quarantine_intents)"
+                ).fetchone()[0]
+            )
+            if count >= self.MAX_ACCOUNT_QUARANTINES:
+                raise ServiceError(
+                    "QUARANTINE_CAPACITY_REACHED",
+                    "The account quarantine registry is full",
+                )
             connection.execute(
                 "INSERT INTO account_quarantines("
                 "account_id, reason, group_ids_json, threshold_ms, observed_count, "
                 "quarantined_at, last_probe_at, last_probe_latency_ms, "
                 "last_probe_result, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(account_id) DO UPDATE SET "
-                "reason = excluded.reason, group_ids_json = excluded.group_ids_json, "
-                "threshold_ms = excluded.threshold_ms, "
-                "observed_count = excluded.observed_count, "
-                "quarantined_at = excluded.quarantined_at, "
-                "last_probe_at = excluded.last_probe_at, "
-                "last_probe_latency_ms = excluded.last_probe_latency_ms, "
-                "last_probe_result = excluded.last_probe_result, "
-                "updated_at = excluded.updated_at",
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.account_id,
                     record.reason.value,
@@ -658,6 +688,59 @@ class SqliteRepository:
             connection.close()
         assert row is not None
         return self._quarantine_from_row(row)
+
+    async def acquire_account_control_lease(
+        self,
+        owner: str,
+        *,
+        lease_seconds: int,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._acquire_account_control_lease_sync,
+            owner,
+            lease_seconds,
+        )
+
+    def _acquire_account_control_lease_sync(
+        self,
+        owner: str,
+        lease_seconds: int,
+    ) -> bool:
+        now = self._clock().astimezone(UTC)
+        now_text = _iso(now)
+        expires = _iso(now + timedelta(seconds=lease_seconds))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT owner, expires_at FROM account_control_lease WHERE singleton = 1"
+            ).fetchone()
+            if row is not None and row["owner"] != owner and row["expires_at"] > now_text:
+                connection.execute("COMMIT")
+                return False
+            connection.execute(
+                "INSERT INTO account_control_lease(singleton, owner, expires_at) "
+                "VALUES(1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
+                "owner = excluded.owner, expires_at = excluded.expires_at",
+                (owner, expires),
+            )
+            connection.execute("COMMIT")
+            return True
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    async def release_account_control_lease(self, owner: str) -> None:
+        await asyncio.to_thread(self._release_account_control_lease_sync, owner)
+
+    def _release_account_control_lease_sync(self, owner: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM account_control_lease WHERE singleton = 1 AND owner = ?",
+                (owner,),
+            )
 
     async def get_account_quarantine(
         self,
@@ -706,9 +789,14 @@ class SqliteRepository:
         if reason is not None:
             conditions.append("reason = ?")
             parameters.append(reason.value)
+        cursor_kind = (
+            f"account-quarantine:{reason.value}"
+            if reason is not None
+            else "account-quarantine:*"
+        )
         if cursor:
             kind, account_id = self._decode_cursor(cursor)
-            if kind != "account-quarantine":
+            if kind != cursor_kind:
                 raise ServiceError("INVALID_CURSOR", "The quarantine cursor is invalid")
             conditions.append("account_id > ?")
             parameters.append(account_id)
@@ -724,7 +812,7 @@ class SqliteRepository:
         next_cursor = None
         if len(rows) > limit and selected:
             next_cursor = self._encode_cursor(
-                "account-quarantine",
+                cursor_kind,
                 selected[-1]["account_id"],
             )
         return AccountQuarantinePage(
@@ -760,6 +848,325 @@ class SqliteRepository:
             ).fetchall()
         return [self._quarantine_from_row(row) for row in rows]
 
+    async def upsert_account_quarantine_intent(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> AccountQuarantineIntent:
+        return await asyncio.to_thread(
+            self._upsert_account_quarantine_intent_sync,
+            intent,
+        )
+
+    def _upsert_account_quarantine_intent_sync(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> AccountQuarantineIntent:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
+                (intent.account_id,),
+            ).fetchone()
+            marker = connection.execute(
+                "SELECT 1 FROM account_quarantines WHERE account_id = ?",
+                (intent.account_id,),
+            ).fetchone()
+            if existing is not None and marker is not None:
+                raise ServiceError(
+                    "QUARANTINE_DATA_INVALID",
+                    "The account has conflicting quarantine states",
+                )
+            if marker is not None:
+                raise ServiceError(
+                    "QUARANTINE_TRANSITION_CONFLICT",
+                    "The account is already quarantined",
+                )
+            if existing is None:
+                registry_count = int(
+                    connection.execute(
+                        "SELECT (SELECT COUNT(*) FROM account_quarantines) + "
+                        "(SELECT COUNT(*) FROM account_quarantine_intents)"
+                    ).fetchone()[0]
+                )
+                if registry_count >= self.MAX_ACCOUNT_QUARANTINES:
+                    raise ServiceError(
+                        "QUARANTINE_CAPACITY_REACHED",
+                        "The account quarantine registry is full",
+                    )
+                connection.execute(
+                    "INSERT INTO account_quarantine_intents("
+                    "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+                    "previous_status, previous_schedulable, created_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        intent.account_id,
+                        intent.reason.value,
+                        _json(list(intent.group_ids)),
+                        intent.threshold_ms,
+                        intent.observed_count,
+                        intent.previous_status,
+                        int(intent.previous_schedulable),
+                        _iso(intent.created_at),
+                    ),
+                )
+                existing = connection.execute(
+                    "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
+                    (intent.account_id,),
+                ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert existing is not None
+        return self._quarantine_intent_from_row(existing)
+
+    async def list_account_quarantine_intents(
+        self,
+        *,
+        limit: int = 5,
+    ) -> list[AccountQuarantineIntent]:
+        return await asyncio.to_thread(
+            self._list_account_quarantine_intents_sync,
+            limit,
+        )
+
+    def _list_account_quarantine_intents_sync(
+        self,
+        limit: int,
+    ) -> list[AccountQuarantineIntent]:
+        if not 1 <= limit <= self.MAX_ACCOUNT_QUARANTINES:
+            raise ServiceError(
+                "INVALID_PAGE_SIZE",
+                "Account quarantine intent limit is outside the safe range",
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM account_quarantine_intents "
+                "ORDER BY created_at, account_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._quarantine_intent_from_row(row) for row in rows]
+
+    async def promote_account_quarantine_intent(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        return await asyncio.to_thread(
+            self._promote_account_quarantine_intent_sync,
+            account_id,
+        )
+
+    def _promote_account_quarantine_intent_sync(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            intent = connection.execute(
+                "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if intent is None:
+                connection.execute("COMMIT")
+                return None
+            connection.execute(
+                "INSERT OR IGNORE INTO account_quarantines("
+                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+                "quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "last_probe_result, updated_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                (
+                    intent["account_id"],
+                    intent["reason"],
+                    intent["group_ids_json"],
+                    intent["threshold_ms"],
+                    intent["observed_count"],
+                    intent["created_at"],
+                    QuarantineProbeResult.NEVER.value,
+                    _iso(self._clock()),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM account_quarantine_intents WHERE account_id = ?",
+                (account_id,),
+            )
+            marker = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert marker is not None
+        return self._quarantine_from_row(marker)
+
+    async def remove_account_quarantine_intent(self, account_id: str) -> bool:
+        return await asyncio.to_thread(
+            self._remove_account_quarantine_intent_sync,
+            account_id,
+        )
+
+    def _remove_account_quarantine_intent_sync(self, account_id: str) -> bool:
+        with self._connect() as connection:
+            removed = connection.execute(
+                "DELETE FROM account_quarantine_intents WHERE account_id = ?",
+                (account_id,),
+            )
+        return removed.rowcount == 1
+
+    async def account_quarantine_intent_count(self) -> int:
+        return await asyncio.to_thread(self._account_quarantine_intent_count_sync)
+
+    def _account_quarantine_intent_count_sync(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM account_quarantine_intents"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    async def begin_account_quarantine_restore(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRestoreIntent:
+        return await asyncio.to_thread(
+            self._begin_account_quarantine_restore_sync,
+            account_id,
+        )
+
+    def _begin_account_quarantine_restore_sync(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRestoreIntent:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            marker = connection.execute(
+                "SELECT 1 FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if marker is None:
+                raise ServiceError(
+                    "QUARANTINE_NOT_FOUND",
+                    "The account quarantine does not exist",
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO account_quarantine_restore_intents("
+                "account_id, created_at) VALUES(?, ?)",
+                (account_id, _iso(self._clock())),
+            )
+            row = connection.execute(
+                "SELECT * FROM account_quarantine_restore_intents WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        assert row is not None
+        return self._quarantine_restore_intent_from_row(row)
+
+    async def list_account_quarantine_restore_intents(
+        self,
+        *,
+        limit: int = 5,
+    ) -> list[AccountQuarantineRestoreIntent]:
+        return await asyncio.to_thread(
+            self._list_account_quarantine_restore_intents_sync,
+            limit,
+        )
+
+    def _list_account_quarantine_restore_intents_sync(
+        self,
+        limit: int,
+    ) -> list[AccountQuarantineRestoreIntent]:
+        if not 1 <= limit <= self.MAX_ACCOUNT_QUARANTINES:
+            raise ServiceError(
+                "INVALID_PAGE_SIZE",
+                "Account quarantine restore intent limit is outside the safe range",
+            )
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM account_quarantine_restore_intents "
+                "ORDER BY created_at, account_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._quarantine_restore_intent_from_row(row) for row in rows]
+
+    async def complete_account_quarantine_restore(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        return await asyncio.to_thread(
+            self._complete_account_quarantine_restore_sync,
+            account_id,
+        )
+
+    def _complete_account_quarantine_restore_sync(
+        self,
+        account_id: str,
+    ) -> AccountQuarantineRecord | None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            intent = connection.execute(
+                "SELECT 1 FROM account_quarantine_restore_intents WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            marker = connection.execute(
+                "SELECT * FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if intent is None or marker is None:
+                connection.execute("COMMIT")
+                return None
+            parsed = self._quarantine_from_row(marker)
+            connection.execute(
+                "DELETE FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return parsed
+
+    async def cancel_account_quarantine_restore(self, account_id: str) -> bool:
+        return await asyncio.to_thread(
+            self._cancel_account_quarantine_restore_sync,
+            account_id,
+        )
+
+    def _cancel_account_quarantine_restore_sync(self, account_id: str) -> bool:
+        with self._connect() as connection:
+            removed = connection.execute(
+                "DELETE FROM account_quarantine_restore_intents WHERE account_id = ?",
+                (account_id,),
+            )
+        return removed.rowcount == 1
+
+    async def account_quarantine_restore_intent_count(self) -> int:
+        return await asyncio.to_thread(
+            self._account_quarantine_restore_intent_count_sync
+        )
+
+    def _account_quarantine_restore_intent_count_sync(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM account_quarantine_restore_intents"
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
     async def update_account_quarantine_probe(
         self,
         account_id: str,
@@ -792,12 +1199,25 @@ class SqliteRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT last_probe_at FROM account_quarantines WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if existing is None:
+                raise ServiceError(
+                    "QUARANTINE_NOT_FOUND",
+                    "The account quarantine does not exist",
+                )
+            previous_probe = _datetime(existing["last_probe_at"])
+            effective_probed_at = probed_at
+            if previous_probe is not None and effective_probed_at <= previous_probe:
+                effective_probed_at = previous_probe + timedelta(seconds=1)
             updated = connection.execute(
                 "UPDATE account_quarantines SET last_probe_at = ?, "
                 "last_probe_latency_ms = ?, last_probe_result = ?, updated_at = ? "
                 "WHERE account_id = ?",
                 (
-                    _iso(probed_at),
+                    _iso(effective_probed_at),
                     latency_ms,
                     result.value,
                     _iso(self._clock()),
@@ -1385,4 +1805,42 @@ class SqliteRepository:
             raise ServiceError(
                 "QUARANTINE_DATA_INVALID",
                 "Persisted account quarantine data is invalid",
+            ) from exc
+
+    @staticmethod
+    def _quarantine_intent_from_row(row: sqlite3.Row) -> AccountQuarantineIntent:
+        try:
+            return AccountQuarantineIntent.model_validate(
+                {
+                    "account_id": row["account_id"],
+                    "reason": row["reason"],
+                    "group_ids": json.loads(row["group_ids_json"]),
+                    "threshold_ms": row["threshold_ms"],
+                    "observed_count": row["observed_count"],
+                    "previous_status": row["previous_status"],
+                    "previous_schedulable": bool(row["previous_schedulable"]),
+                    "created_at": _datetime(row["created_at"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ServiceError(
+                "QUARANTINE_DATA_INVALID",
+                "Persisted account quarantine intent is invalid",
+            ) from exc
+
+    @staticmethod
+    def _quarantine_restore_intent_from_row(
+        row: sqlite3.Row,
+    ) -> AccountQuarantineRestoreIntent:
+        try:
+            return AccountQuarantineRestoreIntent.model_validate(
+                {
+                    "account_id": row["account_id"],
+                    "created_at": _datetime(row["created_at"]),
+                }
+            )
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise ServiceError(
+                "QUARANTINE_DATA_INVALID",
+                "Persisted account quarantine restore intent is invalid",
             ) from exc

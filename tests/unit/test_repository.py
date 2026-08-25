@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from sub2api_mcp.contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
     DeliveryPurpose,
@@ -30,6 +31,10 @@ class MutableClock:
 
     def __call__(self) -> datetime:
         return self.now
+
+
+class TinyQuarantineRepository(SqliteRepository):
+    MAX_ACCOUNT_QUARANTINES = 1
 
 
 async def _repo(tmp_path: Path, clock: MutableClock) -> SqliteRepository:
@@ -85,6 +90,15 @@ async def test_quarantine_round_trips_and_survives_restart(tmp_path: Path) -> No
     assert probed.last_probe_result is QuarantineProbeResult.SLOW
     assert page.items == [probed]
     assert await restarted.account_quarantine_count() == 1
+    duplicate = await restarted.upsert_account_quarantine(
+        marker.model_copy(
+            update={
+                "quarantined_at": clock.now + timedelta(hours=1),
+                "observed_count": 99,
+            }
+        )
+    )
+    assert duplicate == probed
     assert await restarted.remove_verified_account_quarantine("997") is True
     assert await restarted.remove_verified_account_quarantine("997") is False
     assert await restarted.account_quarantine_count() == 0
@@ -122,6 +136,204 @@ async def test_quarantine_listing_is_bounded_and_cursor_paginated(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_quarantine_cursor_is_bound_to_reason_filter(tmp_path: Path) -> None:
+    repository = await _repo(tmp_path, MutableClock())
+    for account_id, reason in (
+        ("101", AccountQuarantineReason.SLOW_FIRST_TOKEN),
+        ("102", AccountQuarantineReason.SLOW_FIRST_TOKEN),
+        ("103", AccountQuarantineReason.CHANNEL_TEST_FAILED),
+    ):
+        await repository.upsert_account_quarantine(
+            AccountQuarantineRecord(
+                account_id=account_id,
+                reason=reason,
+                group_ids=("36",),
+                threshold_ms=30_000,
+                observed_count=3,
+                quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+            )
+        )
+    first = await repository.list_account_quarantines(
+        limit=1,
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+    )
+    assert first.next_cursor is not None
+
+    with pytest.raises(ServiceError) as mismatched:
+        await repository.list_account_quarantines(
+            limit=1,
+            cursor=first.next_cursor,
+            reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+        )
+    assert mismatched.value.code == "INVALID_CURSOR"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_registry_has_a_hard_capacity(tmp_path: Path) -> None:
+    repository = TinyQuarantineRepository(tmp_path / "state.db")
+    await repository.initialize()
+    base = AccountQuarantineRecord(
+        account_id="101",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("36",),
+        threshold_ms=30_000,
+        observed_count=3,
+        quarantined_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+    )
+    await repository.upsert_account_quarantine(base)
+
+    with pytest.raises(ServiceError) as full:
+        await repository.upsert_account_quarantine(
+            base.model_copy(update={"account_id": "102"})
+        )
+    assert full.value.code == "QUARANTINE_CAPACITY_REACHED"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_intent_promotes_atomically_after_verified_disable(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    intent = AccountQuarantineIntent(
+        account_id="997",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=3,
+        previous_status="active",
+        previous_schedulable=True,
+        created_at=clock.now,
+    )
+
+    saved = await repository.upsert_account_quarantine_intent(intent)
+    intents = await repository.list_account_quarantine_intents(limit=5)
+    promoted = await repository.promote_account_quarantine_intent("997")
+
+    assert saved == intent
+    assert intents == [intent]
+    assert promoted is not None
+    assert promoted.account_id == "997"
+    assert promoted.quarantined_at == clock.now
+    assert await repository.account_quarantine_intent_count() == 0
+    assert await repository.account_quarantine_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_quarantine_intent_survives_restart_until_reconciled(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    intent = AccountQuarantineIntent(
+        account_id="997",
+        reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=1,
+        previous_status="error",
+        previous_schedulable=True,
+        created_at=clock.now,
+    )
+    await repository.upsert_account_quarantine_intent(intent)
+
+    restarted = await _repo(tmp_path, clock)
+
+    assert await restarted.list_account_quarantine_intents(limit=5) == [intent]
+    assert await restarted.remove_account_quarantine_intent("997") is True
+    assert await restarted.remove_account_quarantine_intent("997") is False
+
+
+@pytest.mark.asyncio
+async def test_quarantine_intent_cannot_overlap_an_existing_marker(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    await repository.upsert_account_quarantine(
+        AccountQuarantineRecord(
+            account_id="997",
+            reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+            group_ids=("7",),
+            threshold_ms=30_000,
+            observed_count=3,
+            quarantined_at=clock.now,
+        )
+    )
+    intent = AccountQuarantineIntent(
+        account_id="997",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=3,
+        previous_status="active",
+        previous_schedulable=True,
+        created_at=clock.now,
+    )
+
+    with pytest.raises(ServiceError) as conflict:
+        await repository.upsert_account_quarantine_intent(intent)
+
+    assert conflict.value.code == "QUARANTINE_TRANSITION_CONFLICT"
+    assert await repository.account_quarantine_count() == 1
+    assert await repository.account_quarantine_intent_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_quarantine_marker_cannot_overlap_an_existing_intent(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    intent = AccountQuarantineIntent(
+        account_id="997",
+        reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=1,
+        previous_status="error",
+        previous_schedulable=True,
+        created_at=clock.now,
+    )
+    await repository.upsert_account_quarantine_intent(intent)
+    marker = AccountQuarantineRecord(
+        account_id="997",
+        reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=1,
+        quarantined_at=clock.now,
+    )
+
+    with pytest.raises(ServiceError) as conflict:
+        await repository.upsert_account_quarantine(marker)
+
+    assert conflict.value.code == "QUARANTINE_TRANSITION_CONFLICT"
+    assert await repository.account_quarantine_count() == 0
+    assert await repository.account_quarantine_intent_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_intent_completes_marker_removal_atomically(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    marker = AccountQuarantineRecord(
+        account_id="997",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=3,
+        quarantined_at=clock.now,
+    )
+    await repository.upsert_account_quarantine(marker)
+
+    intent = await repository.begin_account_quarantine_restore("997")
+    restarted = await _repo(tmp_path, clock)
+    pending = await restarted.list_account_quarantine_restore_intents(limit=5)
+    removed = await restarted.complete_account_quarantine_restore("997")
+
+    assert intent.account_id == "997"
+    assert pending == [intent]
+    assert removed == marker
+    assert await restarted.get_account_quarantine("997") is None
+    assert await restarted.account_quarantine_restore_intent_count() == 0
+
+
+@pytest.mark.asyncio
 async def test_quarantine_probe_selection_rotates_oldest_observations(tmp_path: Path) -> None:
     clock = MutableClock()
     repository = await _repo(tmp_path, clock)
@@ -153,6 +365,48 @@ async def test_quarantine_probe_selection_rotates_oldest_observations(tmp_path: 
     with pytest.raises(ServiceError) as invalid_limit:
         await repository.list_account_quarantines_for_probe(limit=6)
     assert invalid_limit.value.code == "INVALID_PAGE_SIZE"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_rotation_survives_wall_clock_regression(tmp_path: Path) -> None:
+    clock = MutableClock()
+    repository = await _repo(tmp_path, clock)
+    for account_id in ("101", "102"):
+        await repository.upsert_account_quarantine(
+            AccountQuarantineRecord(
+                account_id=account_id,
+                reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+                group_ids=("36",),
+                threshold_ms=30_000,
+                observed_count=3,
+                quarantined_at=clock.now,
+            )
+        )
+    await repository.update_account_quarantine_probe(
+        "101",
+        probed_at=clock.now,
+        latency_ms=45_000,
+        result=QuarantineProbeResult.SLOW,
+    )
+    await repository.update_account_quarantine_probe(
+        "102",
+        probed_at=clock.now,
+        latency_ms=45_000,
+        result=QuarantineProbeResult.SLOW,
+    )
+    clock.now -= timedelta(hours=1)
+
+    updated = await repository.update_account_quarantine_probe(
+        "101",
+        probed_at=clock.now,
+        latency_ms=44_000,
+        result=QuarantineProbeResult.SLOW,
+    )
+    selected = await repository.list_account_quarantines_for_probe(limit=1)
+
+    assert updated.last_probe_at is not None
+    assert updated.last_probe_at > datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    assert [item.account_id for item in selected] == ["102"]
 
 
 @pytest.mark.asyncio
@@ -233,10 +487,16 @@ async def test_schema_v2_success_probe_state_migrates_to_recovered(tmp_path: Pat
         version = connection.execute(
             "SELECT value FROM service_metadata WHERE key = 'schema_version'"
         ).fetchone()
+        restore_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(account_quarantine_restore_intents)"
+        ).fetchall()
 
-    assert version == ("3",)
+    assert version == ("5",)
     assert marker is not None
     assert marker.last_probe_result is QuarantineProbeResult.RECOVERED
+    assert [row[2] for row in restore_foreign_keys] == ["account_quarantines"]
+    restore_intent = await repository.begin_account_quarantine_restore("997")
+    assert restore_intent.account_id == "997"
 
 
 @pytest.mark.asyncio
@@ -278,6 +538,20 @@ async def test_scheduler_lease_excludes_another_owner_until_expiry(tmp_path: Pat
     assert await repository.acquire_scheduler_lease("owner-b", lease_seconds=60) is False
     clock.now += timedelta(seconds=61)
     assert await repository.acquire_scheduler_lease("owner-b", lease_seconds=60) is True
+
+
+@pytest.mark.asyncio
+async def test_account_control_lease_serializes_recovery_and_maintenance(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock()
+    first = await _repo(tmp_path, clock)
+    second = SqliteRepository(first.path, clock=clock)
+
+    assert await first.acquire_account_control_lease("owner-a", lease_seconds=60)
+    assert not await second.acquire_account_control_lease("owner-b", lease_seconds=60)
+    await first.release_account_control_lease("owner-a")
+    assert await second.acquire_account_control_lease("owner-b", lease_seconds=60)
 
 
 @pytest.mark.asyncio

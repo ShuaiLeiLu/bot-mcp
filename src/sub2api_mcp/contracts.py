@@ -224,12 +224,52 @@ class AccountQuarantinePage(StrictModel):
     next_cursor: str | None = None
 
 
+class AccountQuarantineIntent(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    reason: AccountQuarantineReason
+    group_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+    threshold_ms: int = Field(ge=1, le=3_600_000)
+    observed_count: int = Field(ge=1, le=1_000_000)
+    previous_status: str = Field(pattern=r"^(active|error)$")
+    previous_schedulable: bool
+    created_at: datetime
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_intent_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("group IDs must be positive decimal identifiers")
+        if tuple(sorted(set(value), key=int)) != value:
+            raise ValueError("group IDs must be unique and numerically sorted")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_intent_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("quarantine intent timestamp must be timezone-aware")
+        return value
+
+
+class AccountQuarantineRestoreIntent(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_restore_intent_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("quarantine restore timestamp must be timezone-aware")
+        return value
+
 class MaintenanceOutcomeCode(StrEnum):
     QUARANTINED = "QUARANTINED"
-    MINIMUM_POOL_PROTECTED = "MINIMUM_POOL_PROTECTED"
+    MIN_POOL_PROTECTED = "MIN_POOL_PROTECTED"
+    MINIMUM_POOL_PROTECTED = "MIN_POOL_PROTECTED"
     NO_HEALTHY_ACCOUNT = "NO_HEALTHY_ACCOUNT"
     AMBIGUOUS_GROUP_MAPPING = "AMBIGUOUS_GROUP_MAPPING"
     SWEEP_LIMIT_REACHED = "SWEEP_LIMIT_REACHED"
+    MUTATION_STATE_UNCERTAIN = "MUTATION_STATE_UNCERTAIN"
 
 
 class MaintenanceOutcome(StrictModel):
@@ -242,6 +282,16 @@ class MaintenanceOutcome(StrictModel):
     group_name: str | None = Field(default=None, min_length=1, max_length=200)
     threshold_ms: int | None = Field(default=None, ge=1, le=3_600_000)
     observed_count: int | None = Field(default=None, ge=1, le=1_000_000)
+    protected_group_ids: tuple[str, ...] = Field(default=(), max_length=100)
+
+    @field_validator("protected_group_ids")
+    @classmethod
+    def validate_protected_group_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not re.fullmatch(r"[1-9][0-9]{0,19}", item) for item in value):
+            raise ValueError("protected group IDs must be positive decimal identifiers")
+        if tuple(sorted(set(value), key=int)) != value:
+            raise ValueError("protected group IDs must be unique and numerically sorted")
+        return value
 
     @field_validator("group_ids")
     @classmethod
@@ -265,7 +315,16 @@ class MaintenanceOutcome(StrictModel):
             raise ValueError("quarantined outcomes require complete marker fields")
         if self.outcome is not MaintenanceOutcomeCode.QUARANTINED and self.group_ids:
             raise ValueError("non-quarantine outcomes cannot create marker groups")
+        if (
+            self.protected_group_ids
+            and self.outcome is not MaintenanceOutcomeCode.MIN_POOL_PROTECTED
+        ):
+            raise ValueError("protected groups require a minimum-pool outcome")
         return self
+
+
+class MaintenanceOutcomeBatch(StrictModel):
+    items: list[MaintenanceOutcome] = Field(max_length=2000)
 
 
 class NotificationPayload(StrictModel):
