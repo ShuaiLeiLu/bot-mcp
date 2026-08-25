@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 from maintenance import (
     AccountDisableResult,
+    AccountDispatchState,
     AccountRestoreResult,
     AccountTestResult,
     MaintenancePolicy,
@@ -17,6 +18,7 @@ from probe import AccountGroupState, ChannelHealth, ChannelProbe, GroupAccountCo
 
 from sub2api_mcp.adapters.sub2api import LegacySub2APIAdapter
 from sub2api_mcp.contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
     QuarantineProbeResult,
@@ -59,6 +61,9 @@ class FakeClient:
 
 
 class MaintenanceFakeClient(FakeClient):
+    async def fetch_known_group_ids(self) -> frozenset[str]:
+        return frozenset({"7"})
+
     async def fetch_probe(self) -> list[ChannelProbe]:
         return [
             ChannelProbe(
@@ -96,7 +101,7 @@ class MaintenanceFakeClient(FakeClient):
                 bucket="error",
                 name="故障账号",
                 status="error",
-                schedulable=False,
+                schedulable=True,
             ),
         ]
 
@@ -131,6 +136,8 @@ class QuarantineFakeClient:
         definitive_failure: bool,
         first_event_ms: int | None,
         restore_success: bool = True,
+        dispatch_status: str = "inactive",
+        dispatch_schedulable: bool = False,
     ) -> None:
         self.result = AccountTestResult(
             "42",
@@ -139,10 +146,45 @@ class QuarantineFakeClient:
             first_event_ms=first_event_ms,
         )
         self.restore_success = restore_success
+        self.dispatch_status = dispatch_status
+        self.dispatch_schedulable = dispatch_schedulable
         self.restore_calls = 0
+        self.test_calls = 0
+        self.disable_calls = 0
+
+    async def fetch_account_dispatch_state(
+        self,
+        account_id: str,
+    ) -> AccountDispatchState:
+        return AccountDispatchState(
+            account_id,
+            success=True,
+            status=self.dispatch_status,
+            schedulable=self.dispatch_schedulable,
+        )
+
+    async def fetch_account_group_states(
+        self,
+        *,
+        now: datetime,
+    ) -> list[AccountGroupState]:
+        return [
+            AccountGroupState(
+                account_id="42",
+                group_ids=("7",),
+                bucket="closed" if self.dispatch_status == "inactive" else "available",
+                name="隔离账号",
+                status=self.dispatch_status,
+                schedulable=self.dispatch_schedulable,
+            )
+        ]
+
+    async def fetch_known_group_ids(self) -> frozenset[str]:
+        return frozenset({"7"})
 
     async def test_account_availability(self, account_id: str) -> AccountTestResult:
         assert account_id == "42"
+        self.test_calls += 1
         return self.result
 
     async def restore_account(
@@ -157,6 +199,12 @@ class QuarantineFakeClient:
         assert deadline is not None and deadline > now
         self.restore_calls += 1
         return AccountRestoreResult(account_id, success=self.restore_success)
+
+    async def disable_account(self, account_id: str) -> AccountDisableResult:
+        self.disable_calls += 1
+        self.dispatch_status = "inactive"
+        self.dispatch_schedulable = False
+        return AccountDisableResult(account_id, success=True)
 
 
 def _quarantine(reason: AccountQuarantineReason) -> AccountQuarantineRecord:
@@ -317,3 +365,91 @@ async def test_restore_verification_failure_stays_quarantined() -> None:
     assert outcome.result is QuarantineProbeResult.FAILED
     assert outcome.recovered is False
     assert fake.restore_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_state_change_keeps_marker_without_enabling() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=2_000,
+        dispatch_status="active",
+        dispatch_schedulable=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+
+    outcome = await adapter.probe_quarantined(
+        _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+    )
+
+    assert outcome.result is QuarantineProbeResult.INVALID
+    assert fake.test_calls == 0
+    assert fake.restore_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_unapplied_intent_is_cleared_during_reconciliation() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=2_000,
+        dispatch_status="active",
+        dispatch_schedulable=True,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+    intent = AccountQuarantineIntent(
+        account_id="42",
+        reason=AccountQuarantineReason.SLOW_FIRST_TOKEN,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=3,
+        previous_status="active",
+        previous_schedulable=True,
+        created_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+    )
+
+    assert await adapter.reconcile_quarantine_intent(intent) == "CLEAR"
+
+
+@pytest.mark.asyncio
+async def test_partial_disable_intent_is_promoted_during_reconciliation() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=2_000,
+        dispatch_status="inactive",
+        dispatch_schedulable=True,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+    intent = AccountQuarantineIntent(
+        account_id="42",
+        reason=AccountQuarantineReason.CHANNEL_TEST_FAILED,
+        group_ids=("7",),
+        threshold_ms=30_000,
+        observed_count=1,
+        previous_status="active",
+        previous_schedulable=True,
+        created_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+    )
+
+    assert await adapter.reconcile_quarantine_intent(intent) == "PROMOTE"
+    assert fake.disable_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_restore_intent_rechecks_latency_before_enabling() -> None:
+    fake = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=45_000,
+        dispatch_status="active",
+        dispatch_schedulable=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, fake))
+    marker = _quarantine(AccountQuarantineReason.SLOW_FIRST_TOKEN)
+
+    action = await adapter.reconcile_quarantine_restore(marker)
+
+    assert action == "KEEP"
+    assert fake.test_calls == 1
+    assert fake.restore_calls == 0

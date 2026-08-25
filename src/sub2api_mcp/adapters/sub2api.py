@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bindings import mask_email
-from maintenance import MaintenancePolicy, MaintenanceServiceFactory
+from maintenance import (
+    AccountDisableResult,
+    MaintenanceAdjustment,
+    MaintenanceMutationObserver,
+    MaintenancePolicy,
+    MaintenanceServiceFactory,
+)
 from monitor import Sub2APIClient
 from notification_image import render_status_report_image
 from probe import ChannelProbe, ProbeSnapshot, format_status_report
@@ -18,6 +25,7 @@ from recovery import active_recovery_window
 from ..actor_bridge import ActorAccount
 from ..config import Settings
 from ..contracts import (
+    AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
     MaintenanceOutcome,
@@ -29,6 +37,53 @@ from ..contracts import (
 from ..guardian.contracts import UpstreamProbeSnapshot
 
 _SNAPSHOT_ADAPTER = TypeAdapter(dict[str, Any])
+
+_REASON_MAP = {
+    "channel_test_failed": AccountQuarantineReason.CHANNEL_TEST_FAILED,
+    "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
+}
+
+BeforeQuarantine = Callable[[dict[str, object]], Awaitable[None]]
+AfterQuarantine = Callable[[str, bool, bool], Awaitable[None]]
+BeforeRestore = Callable[[str], Awaitable[None]]
+AfterRestore = Callable[[str, bool, bool], Awaitable[None]]
+
+
+class _MaintenanceObserver(MaintenanceMutationObserver):
+    def __init__(
+        self,
+        before_quarantine: BeforeQuarantine,
+        after_quarantine: AfterQuarantine,
+    ) -> None:
+        self._before_quarantine = before_quarantine
+        self._after_quarantine = after_quarantine
+
+    async def before_disable(self, adjustment: MaintenanceAdjustment) -> None:
+        reason = _REASON_MAP.get(adjustment.reason)
+        if reason is None:
+            raise ValueError("unsupported quarantine reason")
+        await self._before_quarantine(
+            {
+                "account_id": adjustment.account_id,
+                "reason": reason.value,
+                "group_ids": list(adjustment.group_ids),
+                "threshold_ms": adjustment.threshold_ms,
+                "observed_count": adjustment.observed_count,
+                "previous_status": adjustment.previous_status,
+                "previous_schedulable": adjustment.previous_schedulable,
+            }
+        )
+
+    async def after_disable(
+        self,
+        adjustment: MaintenanceAdjustment,
+        result: AccountDisableResult,
+    ) -> None:
+        await self._after_quarantine(
+            adjustment.account_id,
+            result.success,
+            result.state_uncertain,
+        )
 
 
 class LegacySub2APIAdapter:
@@ -164,6 +219,8 @@ class LegacySub2APIAdapter:
         probe: ProbeResult,
         *,
         excluded_account_ids: frozenset[str] = frozenset(),
+        before_quarantine: BeforeQuarantine | None = None,
+        after_quarantine: AfterQuarantine | None = None,
     ) -> list[dict[str, object]]:
         del probe
         if not (
@@ -172,27 +229,31 @@ class LegacySub2APIAdapter:
         ):
             return []
         probes = self._last_probes or await self._client.fetch_probe()
+        observer = (
+            _MaintenanceObserver(before_quarantine, after_quarantine)
+            if before_quarantine is not None and after_quarantine is not None
+            else None
+        )
+        if (before_quarantine is None) != (after_quarantine is None):
+            raise ValueError("both quarantine callbacks are required")
         report = await self._maintenance.run(
             probes,
             now=datetime.now(UTC),
             excluded_account_ids=excluded_account_ids,
+            observer=observer,
         )
-        reason_map = {
-            "channel_test_failed": AccountQuarantineReason.CHANNEL_TEST_FAILED,
-            "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
-        }
         outcomes = [
             MaintenanceOutcome(
                 outcome=MaintenanceOutcomeCode.QUARANTINED,
                 account_id=item.account_id,
                 account_name=item.account_name,
-                reason=reason_map[item.reason],
+                reason=_REASON_MAP[item.reason],
                 group_ids=item.group_ids,
                 threshold_ms=item.threshold_ms,
                 observed_count=item.observed_count,
             )
             for item in report.adjustments
-            if item.reason in reason_map
+            if item.reason in _REASON_MAP
         ]
         for notice in report.notices:
             outcomes.append(
@@ -200,9 +261,10 @@ class LegacySub2APIAdapter:
                     outcome=MaintenanceOutcomeCode(notice.code),
                     account_id=notice.account_id or None,
                     account_name=notice.account_name or None,
-                    reason=reason_map.get(notice.reason),
+                    reason=_REASON_MAP.get(notice.reason),
                     group_id=notice.group_id or None,
                     group_name=notice.group_name or None,
+                    protected_group_ids=notice.group_ids,
                 )
             )
         return [
@@ -210,10 +272,57 @@ class LegacySub2APIAdapter:
             for item in outcomes
         ]
 
+    async def reconcile_quarantine_intent(
+        self,
+        intent: AccountQuarantineIntent,
+    ) -> str:
+        state = await self._client.fetch_account_dispatch_state(intent.account_id)
+        if not state.success:
+            return "KEEP"
+        if (
+            state.status == intent.previous_status
+            and state.schedulable is intent.previous_schedulable
+        ):
+            return "CLEAR"
+        if state.status in {"inactive", "disabled"}:
+            accounts = await self._client.fetch_account_group_states(now=datetime.now(UTC))
+            current = next(
+                (item for item in accounts if item.account_id == intent.account_id),
+                None,
+            )
+            known_group_ids = await self._client.fetch_known_group_ids()
+            if (
+                current is None
+                or current.group_ids != intent.group_ids
+                or not set(current.group_ids) <= known_group_ids
+            ):
+                return "KEEP"
+            disabled = await self._client.disable_account(intent.account_id)
+            return "PROMOTE" if disabled.success else "KEEP"
+        if state.status == "active" and state.schedulable is False:
+            return "KEEP"
+        return "CLEAR"
+
     async def probe_quarantined(
         self,
         marker: AccountQuarantineRecord,
+        *,
+        before_restore: BeforeRestore | None = None,
+        after_restore: AfterRestore | None = None,
     ) -> QuarantineProbeAttempt:
+        if (before_restore is None) != (after_restore is None):
+            raise ValueError("both quarantine restore callbacks are required")
+        state = await self._client.fetch_account_dispatch_state(marker.account_id)
+        if not state.success:
+            return QuarantineProbeAttempt(
+                account_id=marker.account_id,
+                result=QuarantineProbeResult.INVALID,
+            )
+        if state.status not in {"inactive", "disabled"} or state.schedulable is not False:
+            return QuarantineProbeAttempt(
+                account_id=marker.account_id,
+                result=QuarantineProbeResult.INVALID,
+            )
         tested = await self._client.test_account_availability(marker.account_id)
         if not tested.success:
             return QuarantineProbeAttempt(
@@ -238,11 +347,19 @@ class LegacySub2APIAdapter:
                     latency_ms=tested.first_event_ms,
                 )
         restore_started = datetime.now(UTC)
+        if before_restore is not None:
+            await before_restore(marker.account_id)
         restored = await self._client.restore_account(
             marker.account_id,
             now=restore_started,
             deadline=restore_started + timedelta(seconds=30),
         )
+        if after_restore is not None:
+            await after_restore(
+                marker.account_id,
+                restored.success,
+                restored.state_uncertain,
+            )
         return QuarantineProbeAttempt(
             account_id=marker.account_id,
             result=(
@@ -253,6 +370,34 @@ class LegacySub2APIAdapter:
             latency_ms=tested.first_event_ms,
             recovered=restored.success,
         )
+
+    async def reconcile_quarantine_restore(
+        self,
+        marker: AccountQuarantineRecord,
+    ) -> str:
+        account_id = marker.account_id
+        state = await self._client.fetch_account_dispatch_state(account_id)
+        if not state.success:
+            return "KEEP"
+        if state.status == "active" and state.schedulable is True:
+            return "RECOVERED"
+        if state.status in {"inactive", "disabled"} and state.schedulable is False:
+            return "CANCEL"
+        tested = await self._client.test_account_availability(account_id)
+        if not tested.success:
+            return "KEEP"
+        if marker.reason is AccountQuarantineReason.SLOW_FIRST_TOKEN and (
+            tested.first_event_ms is None
+            or tested.first_event_ms > marker.threshold_ms
+        ):
+            return "KEEP"
+        restore_started = datetime.now(UTC)
+        restored = await self._client.restore_account(
+            account_id,
+            now=restore_started,
+            deadline=restore_started + timedelta(seconds=30),
+        )
+        return "RECOVERED" if restored.success else "KEEP"
 
     async def find_active_account(self, email: str) -> ActorAccount | None:
         account = await self._client.find_account_by_email(email)
