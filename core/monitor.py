@@ -5,9 +5,10 @@ import inspect
 import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -24,17 +25,19 @@ from probe import (
     AccountGroupState,
     ChannelHealth,
     ChannelProbe,
-    GroupDefinition,
     GroupAccountCounts,
+    GroupDefinition,
     MonitorDataError,
     ProbeUsageRecord,
     aggregate_group_account_counts,
     build_channel_probes,
     format_status_report,
-    parse_channel_monitor_page as _parse_channel_monitor_page,
     parse_group_definitions,
     parse_probe_usage_page,
     resolve_channel_group_ids,
+)
+from probe import (
+    parse_channel_monitor_page as _parse_channel_monitor_page,
 )
 from recovery import (
     RecoveryCandidate,
@@ -264,7 +267,8 @@ def _optional_number(value: Any, field: str, number_type: type[int | float]):
 
 def normalize_email(value: Any) -> str:
     email = str(value or "").strip().casefold()
-    if len(email) > 254 or not re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-z0-9.-]+\.[a-z]{2,63}", email):
+    pattern = r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-z0-9.-]+\.[a-z]{2,63}"
+    if len(email) > 254 or not re.fullmatch(pattern, email):
         raise ValueError("invalid email address")
     return email
 
@@ -342,6 +346,24 @@ def parse_account_usage(payload: Any, period: str) -> AccountUsage:
     )
 
 
+def _is_valid_sse_data_event(lines: list[bytes]) -> bool:
+    data_lines: list[str] = []
+    try:
+        for raw_line in lines:
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                return False
+            data_lines.append(line.removeprefix("data:").strip())
+        if len(data_lines) != 1:
+            return False
+        event = json.loads(data_lines[0])
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(event, dict) and isinstance(event.get("type"), str)
+
+
 class Sub2APIClient:
     """Small fixed-endpoint client that never exposes the Admin Key."""
 
@@ -383,6 +405,7 @@ class Sub2APIClient:
         opener: Callable[..., Any] | None = None,
         timeout_seconds: int = 10,
         now_provider: Callable[[], datetime] | None = None,
+        monotonic_provider: Callable[[], float] | None = None,
     ):
         if not admin_key.strip():
             raise ValueError("Sub2API Admin Key is required")
@@ -394,6 +417,7 @@ class Sub2APIClient:
         self._now_provider = now_provider or (
             lambda: datetime.now(ZoneInfo(self.USAGE_TIMEZONE))
         )
+        self._monotonic = monotonic_provider or time.monotonic
         self._maintenance_adapter = MaintenanceApiAdapterFactory.create(
             self,
             MaintenanceApiAdapterConfig(
@@ -478,6 +502,67 @@ class Sub2APIClient:
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise MonitorRequestError("Sub2API returned an invalid response") from exc
 
+    def _request_sse_body_with_first_event(
+        self,
+        url: str,
+        *,
+        method: str = "POST",
+        payload: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> tuple[bytes, int | None]:
+        headers = {"x-api-key": self._admin_key, "Accept": "text/event-stream"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+            headers["Content-Type"] = "application/json"
+        request = urllib_request.Request(url, data=body, headers=headers, method=method)
+        started = self._monotonic()
+        chunks: list[bytes] = []
+        event_lines: list[bytes] = []
+        first_event_ms: int | None = None
+        total = 0
+        try:
+            timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
+            with self._opener(request, timeout=timeout) as response:
+                response_headers = getattr(response, "headers", None)
+                raw_content_type = (
+                    response_headers.get("Content-Type", "")
+                    if response_headers is not None
+                    else ""
+                )
+                content_type = raw_content_type.split(";", 1)[0].strip().lower()
+                if content_type != "text/event-stream":
+                    raise MonitorRequestError(
+                        "Sub2API returned an unexpected content type"
+                    )
+                while True:
+                    line = response.readline(self.MAX_RESPONSE_BYTES + 1)
+                    if not line:
+                        break
+                    total += len(line)
+                    if total > self.MAX_RESPONSE_BYTES:
+                        raise MonitorRequestError("Sub2API response is too large")
+                    chunks.append(line)
+                    if line in {b"\n", b"\r\n"}:
+                        if (
+                            first_event_ms is None
+                            and _is_valid_sse_data_event(event_lines)
+                        ):
+                            first_event_ms = max(
+                                0,
+                                int((self._monotonic() - started) * 1000),
+                            )
+                        event_lines = []
+                    else:
+                        event_lines.append(line)
+            return b"".join(chunks), first_event_ms
+        except MonitorRequestError:
+            raise
+        except (urllib_error.HTTPError, urllib_error.URLError, TimeoutError, OSError) as exc:
+            raise MonitorRequestError("Sub2API request failed") from exc
+
     def fetch_sync(self) -> list[ChannelHealth]:
         try:
             channels, pages, page_size = _parse_channel_monitor_page(
@@ -553,6 +638,12 @@ class Sub2APIClient:
 
     async def disable_account(self, account_id: str):
         return await self._maintenance_adapter.disable_account(account_id)
+
+    def restore_account_sync(self, account_id: str, *, now: datetime):
+        return self._maintenance_adapter.restore_account_sync(account_id, now=now)
+
+    async def restore_account(self, account_id: str, *, now: datetime):
+        return await self._maintenance_adapter.restore_account(account_id, now=now)
 
     def fetch_recent_usage_logs_sync(self, *, start: datetime, end: datetime):
         return self._maintenance_adapter.fetch_recent_usage_logs_sync(
@@ -769,10 +860,10 @@ class Sub2APIClient:
             current = self._now_provider()
             if current.tzinfo is None:
                 raise MonitorDataError("Sub2API recovery clock is invalid")
-            return current.astimezone(timezone.utc)
+            return current.astimezone(UTC)
 
         normalized_deadline = (
-            deadline.astimezone(timezone.utc) if deadline is not None else None
+            deadline.astimezone(UTC) if deadline is not None else None
         )
 
         def may_write() -> bool:

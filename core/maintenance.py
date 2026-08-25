@@ -15,10 +15,18 @@ class AccountTestResult:
     success: bool
     definitive_failure: bool
     reason: str = ""
+    first_event_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class AccountDisableResult:
+    account_id: str
+    success: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AccountRestoreResult:
     account_id: str
     success: bool
     reason: str = ""

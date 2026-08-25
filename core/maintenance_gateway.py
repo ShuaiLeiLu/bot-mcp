@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib import parse as urllib_parse
 from zoneinfo import ZoneInfo
@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from client_errors import MonitorRequestError
 from maintenance import (
     AccountDisableResult,
+    AccountRestoreResult,
     AccountTestResult,
     RequestLogRecord,
     UsageLogRecord,
@@ -19,13 +20,38 @@ from probe import (
     MonitorDataError,
     parse_account_group_state_page,
 )
-from recovery import account_test_succeeded
+from recovery import account_test_succeeded, recovered_account_is_normal
 
 
 class MaintenanceRequestPort(Protocol):
-    def _request_body(self, url: str, **kwargs: Any) -> bytes: ...
+    def _request_body(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
+        expected_content_type: str | None = None,
+    ) -> bytes: ...
 
-    def _request_json(self, url: str, **kwargs: Any) -> Any: ...
+    def _request_sse_body_with_first_event(
+        self,
+        url: str,
+        *,
+        method: str = "POST",
+        payload: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> tuple[bytes, int | None]: ...
+
+    def _request_json(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +99,7 @@ def _parse_external_datetime(value: Any, field: str) -> datetime:
         raise MonitorDataError(f"invalid {field}") from exc
     if parsed.tzinfo is None:
         raise MonitorDataError(f"invalid {field}")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _parse_admin_items_page(
@@ -113,8 +139,8 @@ def _parse_admin_items_page(
 def _validate_time_range(start: datetime, end: datetime) -> tuple[datetime, datetime]:
     if start.tzinfo is None or end.tzinfo is None:
         raise ValueError("maintenance log times must be timezone-aware")
-    start_utc = start.astimezone(timezone.utc)
-    end_utc = end.astimezone(timezone.utc)
+    start_utc = start.astimezone(UTC)
+    end_utc = end.astimezone(UTC)
     if start_utc >= end_utc:
         raise ValueError("maintenance log start must precede end")
     return start_utc, end_utc
@@ -232,13 +258,11 @@ class MaintenanceApiAdapter:
     def test_account_availability_sync(self, account_id: str) -> AccountTestResult:
         normalized_id = _positive_id_text(account_id, "account id")
         try:
-            body = self._request_port._request_body(
+            body, first_event_ms = self._request_port._request_sse_body_with_first_event(
                 f"{self._config.accounts_url}/{normalized_id}/test",
                 method="POST",
                 payload={},
-                extra_headers={"Accept": "text/event-stream"},
                 timeout_seconds=self._config.account_test_timeout_seconds,
-                expected_content_type="text/event-stream",
             )
             succeeded = account_test_succeeded(body)
         except (MonitorRequestError, MonitorDataError, UnicodeDecodeError):
@@ -253,6 +277,7 @@ class MaintenanceApiAdapter:
             success=succeeded,
             definitive_failure=not succeeded,
             reason="" if succeeded else "test_failed",
+            first_event_ms=first_event_ms,
         )
 
     async def test_account_availability(self, account_id: str) -> AccountTestResult:
@@ -299,6 +324,59 @@ class MaintenanceApiAdapter:
 
     async def disable_account(self, account_id: str) -> AccountDisableResult:
         return await asyncio.to_thread(self.disable_account_sync, account_id)
+
+    def restore_account_sync(
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+    ) -> AccountRestoreResult:
+        normalized_id = _positive_id_text(account_id, "account id")
+        if now.tzinfo is None:
+            raise ValueError("account restore time must be timezone-aware")
+        account_url = f"{self._config.accounts_url}/{normalized_id}"
+        try:
+            activated = self._request_port._request_json(
+                account_url,
+                method="PUT",
+                payload={"status": "active"},
+            )
+            _require_success_envelope(activated)
+            scheduled = self._request_port._request_json(
+                f"{account_url}/schedulable",
+                method="POST",
+                payload={"schedulable": True},
+            )
+            _require_success_envelope(scheduled)
+            verified = self._request_port._request_json(account_url)
+            success = recovered_account_is_normal(
+                verified,
+                expected_account_id=normalized_id,
+                now=now,
+            )
+        except (MonitorRequestError, MonitorDataError, ValueError):
+            return AccountRestoreResult(
+                normalized_id,
+                success=False,
+                reason="restore_request_failed",
+            )
+        return AccountRestoreResult(
+            normalized_id,
+            success=success,
+            reason="" if success else "restore_verification_failed",
+        )
+
+    async def restore_account(
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+    ) -> AccountRestoreResult:
+        return await asyncio.to_thread(
+            self.restore_account_sync,
+            account_id,
+            now=now,
+        )
 
     def fetch_recent_usage_logs_sync(
         self,
