@@ -1,6 +1,6 @@
 # Spec: Account Latency Quarantine and Automatic Re-entry
 
-Status: Proposed for approval
+Status: Approved and implemented
 
 Date: 2026-08-24
 

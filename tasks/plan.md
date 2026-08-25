@@ -314,7 +314,7 @@ Final release additionally requires:
 # Approved Addendum Implementation Plan: Account Latency Quarantine
 
 Spec: `tasks/account-latency-quarantine-spec.md`  
-Status: **Plan proposed after PRD approval**
+Status: **Implementation complete; production rollout pending**
 
 ## Dependency Graph
 
@@ -479,3 +479,601 @@ Scope: operational.
 ## Addendum Approval Gate
 
 Implementation starts only after human approval of this plan and the AQ task checklist.
+
+---
+
+# Proposed Addendum Plan: Guardian Direct Scheduling and Conditional Account Recovery
+
+Spec: docs/prd-guardian-account-recovery-unification.md
+Status: Plan proposed for review
+Branch rule: finish on main; no long-lived feature branch
+Production target: direct scheduling, no observe/rollout mode
+
+## Overview
+
+Consolidate every account recovery execution path under Guardian while reusing the existing
+60-second channel/account inventory scan. Normal accounts are never periodically tested.
+Every new inventory snapshot tests only error/disabled/inactive accounts; a newly failed/error
+channel additionally tests every non-paused account in its uniquely mapped group. Guardian also
+becomes the real channel scheduler for load_factor, priority and schedulable fields.
+
+## Architecture Decisions
+
+1. Scheduler remains the sole inventory collector and publishes channel plus sanitized account
+   observations from the same upstream read.
+2. Guardian is the sole owner of RECOVERY jobs and real scheduling writes.
+3. active+schedulable=false means manual pause and is a hard no-test/no-write state.
+4. error, disabled and inactive accounts are conditionally tested once per canonical snapshot.
+5. A channel failed/error transition creates one durable episode and broadens the current
+   snapshot selection to every eligible group account.
+6. Explicit test success enables and verifies; definitive failure disables and verifies;
+   indeterminate results preserve state.
+7. Guardian has only enabled/disabled scheduling. Observe mode, rollout stages and partial
+   auto-apply switches are removed from operator controls.
+8. Every external mutation is current-read -> write -> exact read-back -> audit. One failed
+   verification stops the remaining run.
+
+## Dependency Graph
+
+~~~text
+Consolidate quarantine lifecycle on main
+        |
+        v
+Contracts + additive schema
+        |
+        +--> same-probe account inventory publication
+        |         |
+        |         v
+        |    conditional selection + episode idempotency
+        |         |
+        |         v
+        |    Guardian RECOVERY executor + MCP compatibility
+        |
+        +--> verify Sub2API channel mutation contract
+                  |
+                  v
+             verified channel writer
+                  |
+                  v
+             direct Guardian scheduling
+                  |
+                  v
+          API/MCP/UI + legacy removal
+                  |
+                  v
+          backup, deploy enabled, verify, rollback drill
+~~~
+
+## Phase 0 — Consolidate the active prerequisite
+
+### Task GR0A — Review the active quarantine core and adapter delta
+
+Description: Freeze and review the existing core maintenance/probe and Sub2API adapter changes
+without adding Guardian behavior.
+
+Acceptance:
+- Failed-channel, minimum-pool, SSE timing and verified restore invariants match the approved
+  quarantine spec.
+- Existing uncommitted changes are preserved byte-for-byte unless a reviewed defect requires a
+  focused fix.
+- Core/adapter focused tests pass.
+
+Verification:
+- uv run pytest tests/unit/test_maintenance_gateway.py
+  tests/unit/test_maintenance_min_pool.py tests/integration/test_sub2api_adapter.py -q
+
+Dependencies: None.
+Files likely touched: core/maintenance.py, core/maintenance_gateway.py, core/monitor.py,
+core/probe.py, src/sub2api_mcp/adapters/sub2api.py.
+Estimated scope: M (5 files).
+
+### Task GR0B — Review quarantine persistence and contracts
+
+Description: Review the existing additive schema, quarantine intent/marker transactions and
+strict public contracts as one persistence slice.
+
+Acceptance:
+- Empty/current/restart migrations are additive and idempotent.
+- Intent/marker lifecycle is durable and malformed persisted data fails closed.
+- Repository focused tests pass without deleting unrelated assertions.
+
+Verification:
+- uv run pytest tests/unit/test_repository.py -q
+- uv run ruff check src/sub2api_mcp/contracts.py src/sub2api_mcp/schema.py
+  src/sub2api_mcp/repository.py
+
+Dependencies: GR0A contract assumptions.
+Files likely touched: src/sub2api_mcp/contracts.py, src/sub2api_mcp/schema.py,
+src/sub2api_mcp/repository.py, tests/unit/test_repository.py.
+Estimated scope: M (4 files).
+
+### Task GR0C — Review quarantine runtime orchestration
+
+Description: Review scheduler/runtime/service wiring and its focused integration tests, keeping
+the existing feature behavior unchanged.
+
+Acceptance:
+- One control mutation path and lease protect quarantine disable/re-entry.
+- Notifications cannot authorize or roll back a mutation.
+- Runtime and scheduler focused tests pass.
+
+Verification:
+- uv run pytest tests/unit/test_scheduler.py tests/integration/test_app.py
+  tests/contract/test_mcp_tools.py -q
+
+Dependencies: GR0A, GR0B.
+Files likely touched: src/sub2api_mcp/scheduler.py, src/sub2api_mcp/app.py,
+src/sub2api_mcp/service.py, tests/unit/test_scheduler.py,
+tests/integration/test_app.py.
+Estimated scope: M (5 files).
+
+### Task GR0D — Consolidate the prerequisite on main
+
+Description: Run the complete gate, create focused save-point commits for reviewed outstanding
+changes, merge/fast-forward them into main and remove the feature branch.
+
+Acceptance:
+- Full tests, Ruff and Pyright pass before merge.
+- No unrelated user change or secret is included in staged diffs.
+- Local and remote feature branches are removed only after clean main contains every accepted
+  commit.
+
+Verification:
+- uv run pytest -q
+- uv run ruff check .
+- uv run pyright
+- git status --short --branch shows clean main
+
+Dependencies: GR0A-GR0C.
+Files likely touched: Git metadata only.
+Estimated scope: S.
+
+### Checkpoint GR-A — Clean foundation
+
+- [ ] GR0A-GR0D quarantine review, tests and quality gates pass.
+- [ ] Main is clean and contains the prerequisite.
+- [ ] Production is not changed by plan-only work.
+
+## Phase 1 — Contracts and durable identity
+
+### Task GR1 — Define direct scheduling and conditional recovery contracts
+
+Description: Add strict contracts for account observations, classifications, trigger source,
+channel-error episodes, recovery outcomes and the simplified enabled/disabled Guardian policy.
+Mark observe/rollout fields as deprecated migration input rather than executable controls.
+
+Acceptance:
+- V3 policies load without enabling writes during migration tests.
+- New policy has no executable observe or staged rollout path.
+- Invalid account states, triggers and oversized group observations fail closed.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_contracts.py tests/unit/test_config.py -q
+- uv run ruff check src/sub2api_mcp/contracts.py src/sub2api_mcp/guardian/contracts.py
+- uv run pyright
+
+Dependencies: GR0D.
+Files likely touched: src/sub2api_mcp/contracts.py,
+src/sub2api_mcp/guardian/contracts.py, tests/unit/guardian/test_contracts.py,
+tests/unit/test_config.py.
+Estimated scope: M (4 files).
+
+### Task GR2 — Persist account observations, episodes and result ledger
+
+Description: Add an additive Guardian schema migration for canonical account observations,
+channel-error episodes, per-snapshot account idempotency and recovery run/results.
+
+Acceptance:
+- Empty, current and interrupted databases migrate idempotently.
+- Unique keys prevent the same account being tested twice for one snapshot/episode.
+- Restart preserves open episodes and completed account results.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_guardian_repository.py -q
+- migration rollback/reopen tests
+- uv run ruff check src/sub2api_mcp/guardian/repository.py
+- uv run pyright
+
+Dependencies: GR1.
+Files likely touched: src/sub2api_mcp/guardian/repository.py,
+tests/unit/guardian/test_guardian_repository.py.
+Estimated scope: S (2 files).
+
+### Checkpoint GR-B — Durable contract
+
+- [ ] Policy compatibility and schema migration pass.
+- [ ] Duplicate snapshot/episode writes are impossible.
+- [ ] Defaults remain disabled until the direct cutover task.
+
+## Phase 2 — Reuse the existing 60-second inventory
+
+### Task GR3 — Expose sanitized account inventory from the existing probe
+
+Description: Extend the existing probe result with strict account observations collected during
+the same Sub2API inventory request already used for group counts. Do not add another list request
+or account test.
+
+Acceptance:
+- One scheduler probe still performs one account inventory traversal.
+- Observations contain only ID, groups, status, schedulable and bounded eligibility flags.
+- Credentials, API keys, provider payloads and raw account metadata are absent.
+
+Verification:
+- adapter call-count regression proves zero additional inventory requests
+- uv run pytest tests/unit/test_probe_enrichment.py
+  tests/integration/test_sub2api_adapter.py -q
+
+Dependencies: GR1.
+Files likely touched: core/probe.py, src/sub2api_mcp/contracts.py,
+src/sub2api_mcp/adapters/sub2api.py, tests/integration/test_sub2api_adapter.py.
+Estimated scope: M (4 files).
+
+### Task GR4 — Publish and consume account observations exactly once
+
+Description: Include account observations in the canonical shared snapshot and persist them when
+Guardian claims that snapshot. The scheduler remains unaware of recovery decisions.
+
+Acceptance:
+- Replayed publication is idempotent by canonical snapshot hash.
+- Guardian restart does not re-ingest or re-test the same snapshot.
+- A snapshot without valid account observations cannot trigger account tests.
+
+Verification:
+- uv run pytest tests/unit/test_scheduler.py tests/unit/guardian/test_engine.py -q
+- fake adapter proves no extra upstream call
+
+Dependencies: GR2, GR3.
+Files likely touched: src/sub2api_mcp/repository.py,
+src/sub2api_mcp/scheduler.py, src/sub2api_mcp/guardian/engine.py,
+tests/unit/guardian/test_engine.py.
+Estimated scope: M (4 files).
+
+### Checkpoint GR-C — Zero duplicate collection
+
+- [ ] One probe produces one channel+account snapshot.
+- [ ] Guardian consumes it exactly once.
+- [ ] No account test occurs in this phase.
+
+## Phase 3 — Conditional account selection and verified mutations
+
+### Task GR5 — Implement pure conditional account selection
+
+Description: Build deterministic selection for BAD_ACCOUNT_STATE and CHANNEL_ERROR using only
+validated observations and persisted snapshot/episode state.
+
+Acceptance:
+- active+schedulable=false is always MANUAL_PAUSE and never selected.
+- error/disabled/inactive are selected once per new snapshot unless excluded.
+- CHANNEL_ERROR selects all eligible mapped-group accounts once per episode.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_account_recovery.py -q
+- property matrix for statuses, temporary flags, expiry and duplicate snapshots
+
+Dependencies: GR2, GR4.
+Files likely touched: src/sub2api_mcp/guardian/account_recovery.py,
+src/sub2api_mcp/guardian/contracts.py,
+tests/unit/guardian/test_account_recovery.py.
+Estimated scope: M (3 files).
+
+### Task GR6 — Expose typed account test/enable/disable operations
+
+Description: Replace the monolithic legacy recover orchestration with thin typed adapter
+operations for current-state read, bounded test, verified enable and verified disable.
+
+Acceptance:
+- Success/definitive failure/indeterminate are distinct typed results.
+- Every enable/disable is preceded by eligibility re-check and followed by exact read-back.
+- Manual pause, expiry, temporary limits and malformed responses produce zero mutation.
+
+Verification:
+- uv run pytest tests/unit/test_maintenance_gateway.py
+  tests/integration/test_sub2api_adapter.py -q
+- request sequence and failure-injection tests
+
+Dependencies: GR1, GR5.
+Files likely touched: core/maintenance_gateway.py, core/monitor.py,
+src/sub2api_mcp/adapters/sub2api.py,
+tests/integration/test_sub2api_adapter.py.
+Estimated scope: M (4 files).
+
+### Task GR7 — Execute and persist one Guardian recovery run
+
+Description: Add the Guardian account recovery executor that claims one lease, applies the pure
+selection, executes typed account operations sequentially, persists every result and emits one
+durable RECOVERY_RESULT notification.
+
+Acceptance:
+- One account is tested at most once per snapshot/episode.
+- Explicit success enables; definitive failure disables; indeterminate preserves state.
+- Notification failure cannot roll back or replay verified account mutations.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_account_recovery.py
+  tests/integration/guardian/test_account_recovery.py -q
+- restart and notification-failure integration tests
+
+Dependencies: GR2, GR5, GR6.
+Files likely touched: src/sub2api_mcp/guardian/account_recovery.py,
+src/sub2api_mcp/guardian/service.py,
+src/sub2api_mcp/guardian/repository.py,
+tests/integration/guardian/test_account_recovery.py.
+Estimated scope: M (4 files).
+
+### Task GR8 — Transfer RECOVERY job and MCP ownership to Guardian
+
+Description: Register JobType.RECOVERY with Guardian, stop Scheduler from creating or handling
+it, and keep sub2api_submit_recovery compatible by processing only the latest abnormal snapshot
+or an open channel-error episode.
+
+Acceptance:
+- Scheduler publishes snapshots but never creates an automatic RECOVERY job.
+- Guardian creates at most one active RECOVERY job per snapshot/episode.
+- Existing MCP tool returns the same durable job envelope and cannot test normal accounts.
+
+Verification:
+- uv run pytest tests/unit/test_scheduler.py tests/contract/test_mcp_tools.py
+  tests/integration/test_app.py -q
+
+Dependencies: GR7.
+Files likely touched: src/sub2api_mcp/app.py, src/sub2api_mcp/scheduler.py,
+src/sub2api_mcp/service.py, src/sub2api_mcp/tools.py,
+tests/contract/test_mcp_tools.py.
+Estimated scope: M (5 files).
+
+### Checkpoint GR-D — One recovery owner
+
+- [ ] Normal accounts have zero periodic test calls.
+- [ ] Abnormal snapshot and channel-error matrices pass.
+- [ ] Scheduler has no recovery execution path.
+- [ ] Guardian recovery survives restart and notification failure.
+
+## Phase 4 — Real channel scheduling without observe mode
+
+### Task GR9 — Prove the Sub2API channel mutation contract
+
+Description: Verify the authoritative endpoints and field semantics for channel load_factor,
+priority and schedulable using official source/current API contracts, then encode strict
+request/response fakes before writing production adapter code.
+
+Acceptance:
+- Method, path, request body and success/read-back response are documented for all three fields.
+- Redirects, wrong IDs, wrong values and malformed responses fail closed.
+- No production mutation is performed during contract discovery.
+
+Verification:
+- focused adapter contract tests fail before implementation and pass after typed parsing exists
+- docs decision record captures the verified contract
+
+Dependencies: GR0D.
+Files likely touched: docs/adr-guardian-channel-writer.md,
+src/sub2api_mcp/adapters/sub2api.py,
+tests/integration/test_sub2api_adapter.py.
+Estimated scope: M (3 files).
+
+### Task GR10 — Implement verified Sub2API channel writer
+
+Description: Implement current-read, one-field write and exact read-back for load_factor,
+priority and schedulable behind GuardianFieldWriter.
+
+Acceptance:
+- Successful write returns the verified upstream value.
+- Any transport, validation or read-back mismatch returns FAILED and performs no follow-up field.
+- No credential or full upstream body enters logs/audits.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_writeback.py
+  tests/integration/test_sub2api_adapter.py -q
+
+Dependencies: GR9.
+Files likely touched: src/sub2api_mcp/adapters/sub2api.py,
+src/sub2api_mcp/guardian/writeback.py,
+tests/unit/guardian/test_writeback.py,
+tests/integration/test_sub2api_adapter.py.
+Estimated scope: M (4 files).
+
+### Task GR11 — Replace observe/rollout policy with direct start/stop
+
+Description: Remove executable observe, rollout-stage and per-field auto-apply gates. Keep
+backward parsing only for migration, and expose one enabled state plus emergency stop.
+
+Acceptance:
+- enabled=true authorizes all three Guardian-owned field types.
+- enabled=false blocks all new writes and conditional account mutations.
+- Legacy observe/rollout mutations return a stable deprecation error.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_contracts.py
+  tests/unit/guardian/test_writeback.py tests/integration/guardian/test_api.py -q
+
+Dependencies: GR1, GR10.
+Files likely touched: src/sub2api_mcp/guardian/contracts.py,
+src/sub2api_mcp/guardian/writeback.py,
+src/sub2api_mcp/guardian/service.py,
+tests/integration/guardian/test_api.py.
+Estimated scope: M (4 files).
+
+### Task GR12 — Apply scheduling proposals in the Guardian engine
+
+Description: Convert desired load factor, priority and schedulable values into bounded proposals,
+apply them through the verified writer and stop the remaining run on failed verification.
+
+Acceptance:
+- Human-owned fields, stale/low-confidence evidence and cooldown block writes.
+- Per-run channel cap, relative-step limits and idempotency remain enforced.
+- Run result reports proposed/applied/blocked/failed counts and exact safe reasons.
+
+Verification:
+- uv run pytest tests/unit/guardian/test_engine.py
+  tests/unit/guardian/test_writeback.py -q
+- invariant matrix across three field types
+
+Dependencies: GR10, GR11.
+Files likely touched: src/sub2api_mcp/guardian/engine.py,
+src/sub2api_mcp/guardian/writeback.py,
+src/sub2api_mcp/guardian/repository.py,
+tests/unit/guardian/test_engine.py.
+Estimated scope: M (4 files).
+
+### Checkpoint GR-E — Direct scheduling proven
+
+- [ ] No observe/rollout path remains executable.
+- [ ] All three channel fields use read-write-read verification.
+- [ ] Emergency stop blocks subsequent writes.
+- [ ] Human ownership and confidence/freshness gates pass.
+
+## Phase 5 — Operator interfaces and legacy contraction
+
+### Task GR13 — Add direct scheduling and account recovery APIs/MCP
+
+Description: Expose scheduling start/stop, recovery status, open episodes and manual pending-run
+submission with existing admin, revision, idempotency and audit controls.
+
+Acceptance:
+- Read endpoints are bounded and redact account identity outside admin contracts.
+- Start/stop and manual run require explicit confirmation and idempotency.
+- Removed rollout APIs return a documented deprecation error.
+
+Verification:
+- uv run pytest tests/integration/guardian/test_api.py
+  tests/contract/test_mcp_tools.py -q
+
+Dependencies: GR8, GR11, GR12.
+Files likely touched: src/sub2api_mcp/guardian/api.py,
+src/sub2api_mcp/guardian/service.py, src/sub2api_mcp/tools.py,
+tests/contract/test_mcp_tools.py.
+Estimated scope: M (4 files).
+
+### Task GR14 — Update Guardian UI for direct mode
+
+Description: Remove observe/rollout controls and show scheduling start/stop, writer health,
+conditional recovery counts, open channel episodes and latest account outcomes.
+
+Acceptance:
+- UI never claims scheduling is active when the writer is absent/unhealthy.
+- Dangerous start/stop/manual episode controls require explicit confirmation.
+- 390px and 1440px layouts have no page overflow or console errors.
+
+Verification:
+- node --check src/sub2api_mcp/guardian/static/app.js
+- Guardian static/API integration tests
+- real browser 390x844 and 1440x900 matrix
+
+Dependencies: GR13.
+Files likely touched: src/sub2api_mcp/guardian/static/index.html,
+src/sub2api_mcp/guardian/static/app.js,
+src/sub2api_mcp/guardian/static/app.css,
+tests/integration/guardian/test_api.py.
+Estimated scope: M (4 files).
+
+### Task GR15 — Remove legacy Scheduler recovery orchestration
+
+Description: After Guardian tests prove parity, delete Scheduler recovery handler/formatting,
+adapter recover() orchestration and old runtime registration. Retain legacy environment values
+only as one-time migration inputs.
+
+Acceptance:
+- rg finds no automatic Scheduler recovery creation or handler.
+- Existing MCP recovery tool is still present and Guardian-owned.
+- Old time-window/rotation behavior has no executable path.
+
+Verification:
+- full recovery, scheduler, MCP inventory and configuration compatibility tests
+- dead-code search and staged diff review
+
+Dependencies: GR8, GR13.
+Files likely touched: src/sub2api_mcp/scheduler.py,
+src/sub2api_mcp/adapters/sub2api.py, src/sub2api_mcp/app.py,
+src/sub2api_mcp/config.py, tests/unit/test_scheduler.py.
+Estimated scope: M (5 files).
+
+### Task GR16 — Notifications, metrics and operator documentation
+
+Description: Finalize structured Chinese recovery/scheduling notifications, bounded metrics,
+runbook guidance, changelog and environment migration notes.
+
+Acceptance:
+- Notifications contain Beijing time, trigger, channel/group, result counts and safe reasons.
+- Metrics use only bounded enum labels and expose writer/recovery failures.
+- Documentation clearly distinguishes inventory reads from account tests.
+
+Verification:
+- notification, observability and redaction tests
+- secret scan of staged diff
+
+Dependencies: GR13, GR15.
+Files likely touched: src/sub2api_mcp/metrics.py,
+src/sub2api_mcp/guardian/service.py, README.md, CHANGELOG.md,
+tests/unit/test_observability.py.
+Estimated scope: M (5 files).
+
+### Checkpoint GR-F — Feature complete
+
+- [ ] Full account and channel execution paths pass.
+- [ ] Scheduler only collects/publishes.
+- [ ] Guardian UI/API/MCP report the same owner and state.
+- [ ] No duplicate recovery/observe/rollout code remains.
+
+## Phase 6 — Quality gate and direct production cutover
+
+### Task GR17 — Replay and full quality verification
+
+Description: Replay healthy, abnormal-account and channel-error fixtures; run all static,
+security, migration and container gates before touching production.
+
+Acceptance:
+- Healthy active accounts produce zero account test calls.
+- Mixed abnormal/paused account fixtures produce exact expected actions.
+- Direct writer failure injection proves stop-on-first-unverified-write.
+
+Verification:
+- uv run pytest -q
+- uv run ruff check .
+- uv run pyright
+- uv run pip-audit
+- docker build --tag bot-mcp-ci:guardian-direct .
+- container health smoke test
+
+Dependencies: GR1-GR16.
+Files likely touched: tests/fixtures or replay tests only.
+Estimated scope: M.
+
+### Task GR18 — Back up, deploy enabled and verify rollback
+
+Description: Back up production SQLite/environment, deploy the tested release with Guardian
+direct scheduling enabled, verify real read-write-read behavior, conditional account testing,
+notifications and emergency stop/rollback.
+
+Acceptance:
+- Current release SHA, backup checksum and schema version are recorded.
+- Production starts enabled with a healthy writer and zero legacy Scheduler recovery jobs.
+- A failed health/write gate invokes emergency stop and restores the previous release/database.
+
+Verification:
+- container healthy and deployed SHA matches main
+- no account tests for active+schedulable accounts across normal snapshots
+- error/disabled/inactive and controlled channel-error paths produce expected verified results
+- notification queue and structured logs contain no secret/PII
+
+Dependencies: GR17 and explicit final deployment approval.
+Files likely touched: production configuration only; no committed secrets.
+Estimated scope: Operational.
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Active dirty quarantine work is overwritten | High | GR0 is mandatory; no overlapping edits before clean main |
+| Manual pause is mistaken for disabled | High | Exact status+schedulable classification with matrix tests |
+| Same scan calls account test twice | High | Snapshot/account unique ledger constraint |
+| Persistent channel error repeats full sweep | High | Durable channel-error episode identity |
+| Channel writer API assumption is wrong | High | GR9 contract proof before writer implementation |
+| Direct mode writes a wrong value | High | Current-read, one-field write, exact read-back, stop remainder |
+| No observe rollout increases production risk | High | Full replay, backup, emergency stop and release rollback |
+| Notification delivery fails | Medium | Durable outbox never participates in mutation transaction |
+| Large failing group creates a token burst | Medium | Sequential default, safety ceiling, visible run progress |
+
+## Plan Approval Gate
+
+Implementation begins only after this addendum plan and its checklist are approved. Planning work
+does not commit, merge, deploy, change production policy or enable scheduling.

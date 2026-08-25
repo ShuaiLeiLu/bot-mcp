@@ -14,7 +14,9 @@ server, domain, public port, or reverse proxy is assumed.
 - Channel/group-account probing with latency-only change suppression.
 - Scheduled error-account recovery that restores dispatch after a successful error probe while
   leaving non-error paused accounts untouched.
-- Unhealthy-channel and recent-log account protection using the existing rules.
+- Failed-channel full account sweeps plus durable slow-first-token/channel-failure quarantine.
+- Every group retains at least one usable account; quarantines rotate through five bounded
+  reason-specific probes and re-enter only after verified recovery.
 - Durable video jobs with user-selected length, steps, and resolution.
 - Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
 - Multi-target fan-out across different LangBot adapters.
@@ -90,7 +92,8 @@ errors retry the original representation.
 ## Tools
 
 - Status/read: `sub2api_get_status`, `sub2api_probe_channels`,
-  `sub2api_get_job`, `sub2api_list_jobs`, `sub2api_get_bound_account`.
+  `sub2api_get_job`, `sub2api_list_jobs`, `sub2api_get_bound_account`,
+  `sub2api_list_account_quarantines`.
 - Delivery: `sub2api_list_delivery_bots`, `sub2api_list_delivery_targets`,
   `sub2api_upsert_delivery_target`, `sub2api_delete_delivery_target`,
   `sub2api_test_delivery_target`.

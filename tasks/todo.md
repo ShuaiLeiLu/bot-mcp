@@ -101,28 +101,28 @@ Status: **Implementation active — final release verification**
 
 # Account Latency Quarantine Task Checklist
 
-Status: **Plan proposed after PRD approval**
+Status: **Implementation complete; production rollout pending**
 
-- [ ] AQ1: Add durable latency-quarantine schema and repository operations.
+- [x] AQ1: Add durable latency-quarantine schema and repository operations.
   - Acceptance: additive/idempotent migration; strict marker round-trip; restart durability.
   - Verify: repository focused tests, Ruff, Pyright.
   - Dependencies: approved spec.
-- [ ] AQ2: Add failed-channel full sweep and per-group minimum usable account protection.
+- [x] AQ2: Add failed-channel full sweep and per-group minimum usable account protection.
   - Acceptance: test all eligible group accounts first; require one success before disables;
     all-failed no-mutation alert; min 1 per group; multi-group safe; unknown mapping fail closed.
   - Verify: core RED/GREEN matrix and parent compatibility tests.
   - Dependencies: AQ1 contract.
-- [ ] AQ3: Persist only verified reason-specific quarantine mutations.
+- [x] AQ3: Persist only verified reason-specific quarantine mutations.
   - Acceptance: successful latency/channel disable creates marker; minimum-pool/all-failed/
     failed disable does not.
   - Verify: scheduler + fake Sub2API integration tests.
   - Dependencies: AQ1–AQ2.
-- [ ] AQ4: Add measured reason-specific quarantine probes and verified automatic re-entry.
+- [x] AQ4: Add measured reason-specific quarantine probes and verified automatic re-entry.
   - Acceptance: latency marker requires fast success; channel-test marker requires success;
     failure stays isolated; human pause untouched.
   - Verify: SSE timing, retry, restart, and re-entry integration tests.
   - Dependencies: AQ1 and AQ3.
-- [ ] AQ5: Expose quarantine status, MCP listing, notifications, and metrics.
+- [x] AQ5: Expose quarantine status, MCP listing, notifications, and metrics.
   - Acceptance: distinct state; bounded/redacted reads; structured Chinese action messages.
   - Verify: contract, redaction, notification, and metric tests.
   - Dependencies: AQ1–AQ4.
@@ -133,7 +133,46 @@ Status: **Plan proposed after PRD approval**
 
 ## Account Quarantine Checkpoints
 
-- [ ] AQ-A: persistence and minimum-pool behavior reviewed.
-- [ ] AQ-B: slow/stay and fast/re-entry lifecycle reviewed.
+- [x] AQ-A: persistence and minimum-pool behavior reviewed.
+- [x] AQ-B: slow/stay and fast/re-entry lifecycle reviewed.
 - [ ] AQ-C: full quality gate and parent compatibility pass.
 - [ ] AQ-D: product approves production enablement.
+
+---
+
+# Guardian Direct Scheduling and Conditional Account Recovery Checklist
+
+Status: Plan proposed for approval
+
+- [x] GR0A: Review active quarantine core and adapter changes.
+- [x] GR0B: Review quarantine persistence and contracts.
+- [x] GR0C: Review quarantine runtime orchestration.
+- [ ] GR0D: Pass the full gate and consolidate the prerequisite on clean main.
+- [ ] GR1: Add direct-scheduling and conditional-recovery contracts.
+- [ ] GR2: Add account observation, error-episode, run and ledger persistence.
+- [ ] GR3: Expose sanitized account inventory from the existing probe with zero extra list calls.
+- [ ] GR4: Publish/consume account observations exactly once.
+- [ ] GR5: Select bad-state accounts and channel-error groups with manual-pause protection.
+- [ ] GR6: Add typed account test, verified enable and verified disable operations.
+- [ ] GR7: Execute and persist one Guardian-owned account recovery run.
+- [ ] GR8: Transfer RECOVERY jobs and compatible MCP submission to Guardian.
+- [ ] GR9: Prove the Sub2API channel mutation contract without production writes.
+- [ ] GR10: Implement verified load_factor, priority and schedulable writer operations.
+- [ ] GR11: Replace observe/rollout controls with direct scheduling start/stop.
+- [ ] GR12: Apply bounded scheduling proposals in Guardian.
+- [ ] GR13: Add direct scheduling/recovery REST and MCP controls.
+- [ ] GR14: Update the light Guardian UI for direct mode.
+- [ ] GR15: Remove legacy Scheduler recovery orchestration and periodic window/rotation.
+- [ ] GR16: Complete notifications, metrics, runbook and changelog.
+- [ ] GR17: Pass replay, full tests, lint, types, audit, Docker and health gates.
+- [ ] GR18: Back up, deploy enabled, verify production and complete rollback drill.
+
+## Guardian Direct Scheduling Checkpoints
+
+- [ ] GR-A: Quarantine prerequisite is clean on main.
+- [ ] GR-B: Contracts/schema migration reviewed.
+- [ ] GR-C: Same-probe account inventory proven with zero extra list calls.
+- [ ] GR-D: Guardian is the only recovery owner.
+- [ ] GR-E: Real channel writer and emergency stop proven.
+- [ ] GR-F: API/MCP/UI and legacy removal complete.
+- [ ] GR-G: Product approves direct production cutover.
