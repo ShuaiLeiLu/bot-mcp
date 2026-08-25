@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bindings import mask_email
@@ -237,9 +237,11 @@ class LegacySub2APIAdapter:
                     result=QuarantineProbeResult.SLOW,
                     latency_ms=tested.first_event_ms,
                 )
+        restore_started = datetime.now(UTC)
         restored = await self._client.restore_account(
             marker.account_id,
-            now=datetime.now(UTC),
+            now=restore_started,
+            deadline=restore_started + timedelta(seconds=30),
         )
         return QuarantineProbeAttempt(
             account_id=marker.account_id,

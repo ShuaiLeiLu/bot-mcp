@@ -146,10 +146,15 @@ class QuarantineFakeClient:
         return self.result
 
     async def restore_account(
-        self, account_id: str, *, now: datetime
+        self,
+        account_id: str,
+        *,
+        now: datetime,
+        deadline: datetime | None = None,
     ) -> AccountRestoreResult:
         assert account_id == "42"
         assert now.tzinfo is not None
+        assert deadline is not None and deadline > now
         self.restore_calls += 1
         return AccountRestoreResult(account_id, success=self.restore_success)
 
