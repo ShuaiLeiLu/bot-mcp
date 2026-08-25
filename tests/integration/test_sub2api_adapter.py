@@ -24,6 +24,10 @@ from sub2api_mcp.contracts import (
     AccountQuarantineRecord,
     QuarantineProbeResult,
 )
+from sub2api_mcp.guardian.contracts import (
+    AccountMutationResult,
+    AccountTestExecutionResult,
+)
 
 
 class FakeClient:
@@ -155,6 +159,9 @@ class QuarantineFakeClient:
         restore_success: bool = True,
         dispatch_status: str = "inactive",
         dispatch_schedulable: bool = False,
+        dispatch_expired: bool = False,
+        dispatch_temporary: bool = False,
+        dispatch_state_success: bool = True,
     ) -> None:
         self.result = AccountTestResult(
             "42",
@@ -165,6 +172,9 @@ class QuarantineFakeClient:
         self.restore_success = restore_success
         self.dispatch_status = dispatch_status
         self.dispatch_schedulable = dispatch_schedulable
+        self.dispatch_expired = dispatch_expired
+        self.dispatch_temporary = dispatch_temporary
+        self.dispatch_state_success = dispatch_state_success
         self.restore_calls = 0
         self.test_calls = 0
         self.disable_calls = 0
@@ -175,9 +185,11 @@ class QuarantineFakeClient:
     ) -> AccountDispatchState:
         return AccountDispatchState(
             account_id,
-            success=True,
+            success=self.dispatch_state_success,
             status=self.dispatch_status,
             schedulable=self.dispatch_schedulable,
+            expired=self.dispatch_expired,
+            temporary_unavailable=self.dispatch_temporary,
         )
 
     async def fetch_account_group_states(
@@ -264,6 +276,107 @@ async def test_adapter_supports_all_provider_channel_values_without_branching() 
     assert result.guardian_snapshot["entries"][0]["latency_ms"] == 10  # type: ignore[index]
     assert result.captured_at is not None
     assert fake.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_guardian_account_test_never_touches_a_manual_pause() -> None:
+    client = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=100,
+        dispatch_status="active",
+        dispatch_schedulable=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, client))
+
+    outcome = await adapter.guardian_test_account("42")
+
+    assert outcome.result is AccountTestExecutionResult.SKIPPED
+    assert outcome.reason == "manual_pause"
+    assert client.test_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_guardian_account_success_is_verified_before_enable() -> None:
+    client = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=100,
+        dispatch_status="error",
+        dispatch_schedulable=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, client))
+
+    tested = await adapter.guardian_test_account("42")
+    enabled = await adapter.guardian_enable_account("42")
+
+    assert tested.result is AccountTestExecutionResult.SUCCESS
+    assert enabled.result is AccountMutationResult.APPLIED
+    assert client.test_calls == 1
+    assert client.restore_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_guardian_definitive_failure_can_be_verified_disabled() -> None:
+    client = QuarantineFakeClient(
+        success=False,
+        definitive_failure=True,
+        first_event_ms=None,
+        dispatch_status="error",
+        dispatch_schedulable=True,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, client))
+
+    tested = await adapter.guardian_test_account("42")
+    disabled = await adapter.guardian_disable_account("42")
+
+    assert tested.result is AccountTestExecutionResult.DEFINITIVE_FAILURE
+    assert disabled.result is AccountMutationResult.APPLIED
+    assert client.test_calls == 1
+    assert client.disable_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_guardian_account_test_skips_temporary_protection() -> None:
+    client = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=100,
+        dispatch_status="error",
+        dispatch_schedulable=False,
+        dispatch_temporary=True,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, client))
+
+    outcome = await adapter.guardian_test_account("42")
+
+    assert outcome.result is AccountTestExecutionResult.SKIPPED
+    assert outcome.reason == "temporary_unavailable"
+    assert client.test_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_guardian_account_state_failure_never_tests_or_mutates() -> None:
+    client = QuarantineFakeClient(
+        success=True,
+        definitive_failure=False,
+        first_event_ms=100,
+        dispatch_status="error",
+        dispatch_schedulable=False,
+        dispatch_state_success=False,
+    )
+    adapter = LegacySub2APIAdapter(cast(Sub2APIClient, client))
+
+    tested = await adapter.guardian_test_account("42")
+    enabled = await adapter.guardian_enable_account("42")
+    disabled = await adapter.guardian_disable_account("42")
+
+    assert tested.result is AccountTestExecutionResult.INDETERMINATE
+    assert enabled.result is AccountMutationResult.INDETERMINATE
+    assert disabled.result is AccountMutationResult.INDETERMINATE
+    assert client.test_calls == 0
+    assert client.restore_calls == 0
+    assert client.disable_calls == 0
 
 
 @pytest.mark.asyncio

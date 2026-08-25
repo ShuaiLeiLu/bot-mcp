@@ -11,6 +11,7 @@ from typing import Any
 from bindings import mask_email
 from maintenance import (
     AccountDisableResult,
+    AccountDispatchState,
     MaintenanceAdjustment,
     MaintenanceMutationObserver,
     MaintenancePolicy,
@@ -36,7 +37,13 @@ from ..contracts import (
     QuarantineProbeAttempt,
     QuarantineProbeResult,
 )
-from ..guardian.contracts import UpstreamProbeSnapshot
+from ..guardian.contracts import (
+    AccountMutationResult,
+    AccountTestExecutionResult,
+    GuardianAccountMutationOutcome,
+    GuardianAccountTestOutcome,
+    UpstreamProbeSnapshot,
+)
 
 _SNAPSHOT_ADAPTER = TypeAdapter(dict[str, Any])
 
@@ -151,6 +158,129 @@ class LegacySub2APIAdapter:
         probes = await self._client.fetch_probe()
         self._last_probes = probes
         return self._build_guardian_snapshot(probes)
+
+    @staticmethod
+    def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
+        if not state.success:
+            return "account_state_unavailable"
+        if state.status == "active" and state.schedulable is False:
+            return "manual_pause"
+        if state.expired:
+            return "expired"
+        if state.temporary_unavailable:
+            return "temporary_unavailable"
+        return None
+
+    async def guardian_test_account(
+        self,
+        account_id: str,
+    ) -> GuardianAccountTestOutcome:
+        state = await self._client.fetch_account_dispatch_state(account_id)
+        blocked = self._guardian_account_block_reason(state)
+        if blocked is not None:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=(
+                    AccountTestExecutionResult.INDETERMINATE
+                    if blocked == "account_state_unavailable"
+                    else AccountTestExecutionResult.SKIPPED
+                ),
+                reason=blocked,
+            )
+        tested = await self._client.test_account_availability(account_id)
+        if tested.account_id != account_id:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.INDETERMINATE,
+                reason="test_identity_mismatch",
+            )
+        if tested.success:
+            result = AccountTestExecutionResult.SUCCESS
+        elif tested.definitive_failure:
+            result = AccountTestExecutionResult.DEFINITIVE_FAILURE
+        else:
+            result = AccountTestExecutionResult.INDETERMINATE
+        return GuardianAccountTestOutcome(
+            account_id=account_id,
+            result=result,
+            reason=tested.reason,
+            first_event_ms=tested.first_event_ms,
+        )
+
+    async def guardian_enable_account(
+        self,
+        account_id: str,
+    ) -> GuardianAccountMutationOutcome:
+        state = await self._client.fetch_account_dispatch_state(account_id)
+        blocked = self._guardian_account_block_reason(state)
+        if blocked is not None:
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=(
+                    AccountMutationResult.INDETERMINATE
+                    if blocked == "account_state_unavailable"
+                    else AccountMutationResult.BLOCKED
+                ),
+                reason=blocked,
+            )
+        if state.status == "active" and state.schedulable is True:
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.NO_CHANGE,
+                reason="already_enabled",
+            )
+        started_at = datetime.now(UTC)
+        restored = await self._client.restore_account(
+            account_id,
+            now=started_at,
+            deadline=started_at + timedelta(seconds=30),
+        )
+        return GuardianAccountMutationOutcome(
+            account_id=account_id,
+            result=(
+                AccountMutationResult.APPLIED
+                if restored.success
+                else AccountMutationResult.INDETERMINATE
+                if restored.state_uncertain
+                else AccountMutationResult.BLOCKED
+            ),
+            reason=restored.reason,
+        )
+
+    async def guardian_disable_account(
+        self,
+        account_id: str,
+    ) -> GuardianAccountMutationOutcome:
+        state = await self._client.fetch_account_dispatch_state(account_id)
+        blocked = self._guardian_account_block_reason(state)
+        if blocked is not None:
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=(
+                    AccountMutationResult.INDETERMINATE
+                    if blocked == "account_state_unavailable"
+                    else AccountMutationResult.BLOCKED
+                ),
+                reason=blocked,
+            )
+        if state.status in {"inactive", "disabled"} and state.schedulable is False:
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.NO_CHANGE,
+                reason="already_disabled",
+            )
+        disabled = await self._client.disable_account(account_id)
+        return GuardianAccountMutationOutcome(
+            account_id=account_id,
+            result=(
+                AccountMutationResult.APPLIED
+                if disabled.success
+                else AccountMutationResult.INDETERMINATE
+                if disabled.state_uncertain
+                else AccountMutationResult.BLOCKED
+            ),
+            reason=disabled.reason,
+        )
 
     @staticmethod
     def _build_guardian_snapshot(probes: list[ChannelProbe]) -> dict[str, Any]:

@@ -190,6 +190,81 @@ def test_account_test_without_completion_is_indeterminate() -> None:
     assert result.reason == "test_incomplete"
 
 
+@pytest.mark.parametrize(
+    ("account_overrides", "expired", "temporary_unavailable"),
+    [
+        (
+            {
+                "auto_pause_on_expired": True,
+                "expires_at": datetime(2026, 8, 25, 1, tzinfo=UTC).timestamp(),
+            },
+            True,
+            False,
+        ),
+        (
+            {
+                "rate_limit_reset_at": datetime(2026, 8, 25, 3, tzinfo=UTC).timestamp(),
+            },
+            False,
+            True,
+        ),
+        (
+            {
+                "overload_until": datetime(2026, 8, 25, 3, tzinfo=UTC).timestamp(),
+            },
+            False,
+            True,
+        ),
+        (
+            {
+                "temp_unschedulable_until": datetime(
+                    2026, 8, 25, 3, tzinfo=UTC
+                ).timestamp(),
+            },
+            False,
+            True,
+        ),
+    ],
+)
+def test_dispatch_state_exposes_expiry_and_temporary_protection(
+    account_overrides: dict[str, object],
+    expired: bool,
+    temporary_unavailable: bool,
+) -> None:
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    port = AccountMutationPort()
+    account = {
+        "id": 42,
+        "status": "error",
+        "schedulable": False,
+        "auto_pause_on_expired": False,
+        "expires_at": None,
+        "rate_limit_reset_at": None,
+        "overload_until": None,
+        "temp_unschedulable_until": None,
+        **account_overrides,
+    }
+    port._request_json = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+        "code": 0,
+        "data": account,
+    }
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+        clock=lambda: now,
+    )
+
+    state = adapter.fetch_account_dispatch_state_sync("42")
+
+    assert state.success is True
+    assert state.expired is expired
+    assert state.temporary_unavailable is temporary_unavailable
+
+
 def test_quarantined_account_restore_requires_verified_active_dispatch() -> None:
     port = AccountMutationPort()
     adapter = MaintenanceApiAdapter(

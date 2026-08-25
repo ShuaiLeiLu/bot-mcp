@@ -72,6 +72,33 @@ class AccountRecoveryResult(StrEnum):
     SKIPPED = "SKIPPED"
 
 
+class AccountTestExecutionResult(StrEnum):
+    SUCCESS = "SUCCESS"
+    DEFINITIVE_FAILURE = "DEFINITIVE_FAILURE"
+    INDETERMINATE = "INDETERMINATE"
+    SKIPPED = "SKIPPED"
+
+
+class AccountMutationResult(StrEnum):
+    APPLIED = "APPLIED"
+    NO_CHANGE = "NO_CHANGE"
+    BLOCKED = "BLOCKED"
+    INDETERMINATE = "INDETERMINATE"
+
+
+class GuardianAccountTestOutcome(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    result: AccountTestExecutionResult
+    reason: str = Field(default="", max_length=200)
+    first_event_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+
+
+class GuardianAccountMutationOutcome(StrictModel):
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    result: AccountMutationResult
+    reason: str = Field(default="", max_length=200)
+
+
 class ChannelErrorEpisodeStatus(StrEnum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"

@@ -153,7 +153,7 @@ Status: Plan proposed for approval
 - [x] GR3: Expose sanitized account inventory from the existing probe with zero extra list calls.
 - [x] GR4: Publish/consume account observations exactly once.
 - [x] GR5: Select bad-state accounts and channel-error groups with manual-pause protection.
-- [ ] GR6: Add typed account test, verified enable and verified disable operations.
+- [x] GR6: Add typed account test, verified enable and verified disable operations.
 - [ ] GR7: Execute and persist one Guardian-owned account recovery run.
 - [ ] GR8: Transfer RECOVERY jobs and compatible MCP submission to Guardian.
 - [ ] GR9: Prove the Sub2API channel mutation contract without production writes.

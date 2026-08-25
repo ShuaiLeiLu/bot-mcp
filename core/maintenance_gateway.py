@@ -86,6 +86,14 @@ def _optional_non_negative_int(value: Any, field: str) -> int | None:
     return value
 
 
+def _future_epoch(value: Any, field: str, now: datetime) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise MonitorDataError(f"invalid {field}")
+    return value > now.timestamp()
+
+
 def _non_negative_int(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise MonitorDataError(f"invalid {field}")
@@ -389,6 +397,30 @@ class MaintenanceApiAdapter:
                 raise MonitorDataError("account state identity mismatch")
             status = data.get("status")
             schedulable = data.get("schedulable")
+            auto_pause = data.get("auto_pause_on_expired", False)
+            if not isinstance(auto_pause, bool):
+                raise MonitorDataError("account auto-pause state is invalid")
+            expires_at = data.get("expires_at")
+            if expires_at is not None and (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or expires_at < 0
+            ):
+                raise MonitorDataError("account expiry is invalid")
+            now = self._clock().astimezone(UTC)
+            expired = bool(
+                auto_pause
+                and expires_at is not None
+                and expires_at <= now.timestamp()
+            )
+            temporary_unavailable = any(
+                _future_epoch(data.get(field), field, now)
+                for field in (
+                    "rate_limit_reset_at",
+                    "overload_until",
+                    "temp_unschedulable_until",
+                )
+            )
             if status not in {"active", "error", "inactive", "disabled"} or not isinstance(
                 schedulable, bool
             ):
@@ -400,6 +432,8 @@ class MaintenanceApiAdapter:
             success=True,
             status=status,
             schedulable=schedulable,
+            expired=expired,
+            temporary_unavailable=temporary_unavailable,
         )
 
     async def fetch_account_dispatch_state(

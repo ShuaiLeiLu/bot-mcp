@@ -40,6 +40,8 @@ class AccountDispatchState:
     success: bool
     status: str = ""
     schedulable: bool | None = None
+    expired: bool = False
+    temporary_unavailable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
