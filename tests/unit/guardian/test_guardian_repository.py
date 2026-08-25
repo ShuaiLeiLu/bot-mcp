@@ -117,8 +117,6 @@ async def test_repository_initializes_safe_policy_and_revision_updates(
     updated = policy.model_copy(update={"scan_interval_seconds": 30})
     saved = await repository.update_policy(updated, expected_revision=1)
 
-    assert policy.observe_only is True
-    assert policy.auto_apply.schedulable is False
     assert saved.revision == 2
     assert saved.scan_interval_seconds == 30
     with pytest.raises(ServiceError, match="modified") as conflict:
@@ -185,7 +183,6 @@ async def test_v1_database_migrates_without_losing_policy_or_channels(tmp_path: 
         ).fetchone()
 
     assert version == str(repository.SCHEMA_VERSION)
-    assert policy.observe_only is True
     assert policy.sampling.mode.value == "SHARED"
     assert channel is not None
     assert channel["score"] == 91.5

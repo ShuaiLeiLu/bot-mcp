@@ -235,13 +235,6 @@ class GuardianFreshness(StrEnum):
     EXPIRED = "EXPIRED"
 
 
-class GuardianRolloutStage(StrEnum):
-    OBSERVE = "OBSERVE"
-    LOAD_FACTOR = "LOAD_FACTOR"
-    PRIORITY = "PRIORITY"
-    SCHEDULABLE = "SCHEDULABLE"
-
-
 class GuardianFieldName(StrEnum):
     LOAD_FACTOR = "LOAD_FACTOR"
     PRIORITY = "PRIORITY"
@@ -291,12 +284,6 @@ class GuardianStrategy(StrEnum):
 
 class GuardianSchedulingMode(StrEnum):
     DIRECT = "DIRECT"
-
-
-class AutoApplyPolicy(StrictModel):
-    schedulable: bool = False
-    priority: bool = False
-    load_factor: bool = False
 
 
 class ScoringPolicy(StrictModel):
@@ -510,10 +497,6 @@ class RecoveryProbeSelection(StrictModel):
     global_block_reason: str | None = None
 
 
-class RolloutPolicy(StrictModel):
-    stage: GuardianRolloutStage = GuardianRolloutStage.OBSERVE
-
-
 class ScopePolicy(StrictModel):
     managed_group_mode: str = Field(default="all", pattern=r"^(all|selected)$")
     managed_group_ids: frozenset[str] = frozenset()
@@ -528,10 +511,8 @@ class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
     enabled: bool = False
     scheduling_mode: GuardianSchedulingMode = GuardianSchedulingMode.DIRECT
-    observe_only: bool = Field(default=True, exclude=True)
     scan_interval_seconds: int = Field(default=15, ge=5, le=3600)
     strategy: GuardianStrategy = GuardianStrategy.PRICE
-    auto_apply: AutoApplyPolicy = Field(default_factory=AutoApplyPolicy, exclude=True)
     scoring: ScoringPolicy = Field(default_factory=ScoringPolicy)
     breaker: BreakerPolicy = Field(default_factory=BreakerPolicy)
     degrade: DegradePolicy = Field(default_factory=DegradePolicy)
@@ -548,7 +529,6 @@ class GuardianPolicy(StrictModel):
     account_recovery: AccountRecoveryPolicy = Field(
         default_factory=AccountRecoveryPolicy
     )
-    rollout: RolloutPolicy = Field(default_factory=RolloutPolicy, exclude=True)
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
 
     @model_validator(mode="before")
@@ -557,6 +537,8 @@ class GuardianPolicy(StrictModel):
         if not isinstance(value, dict):
             return value
         migrated: dict[str, object] = dict(cast(dict[str, object], value))
+        for deprecated in ("observe_only", "auto_apply", "rollout"):
+            migrated.pop(deprecated, None)
         migrated["scheduling_mode"] = GuardianSchedulingMode.DIRECT.value
         raw_recovery = migrated.get("account_recovery")
         account_recovery: dict[str, object] = (
