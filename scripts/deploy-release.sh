@@ -51,6 +51,26 @@ ln -sfn -- "${shared_dir}/.env" "${release_dir}/.env"
 printf 'SUB2API_MCP_IMAGE_TAG=%s\n' "${release_sha}" > "${release_dir}/.release.env"
 
 previous_release=$(readlink -f -- "${base_dir}/current" 2>/dev/null || true)
+previous_sha=
+if [[ -n ${previous_release} ]]; then
+    previous_sha=$(basename -- "${previous_release}")
+    printf '%s\n' "${previous_sha}" > "${release_dir}/previous-sha"
+fi
+
+data_volume=bot-mcp_sub2api_mcp_data
+backup_file=/data/predeploy-${release_sha}.db
+backup_created=false
+current_image=$(docker inspect --format '{{.Config.Image}}' sub2api-scheduler-mcp 2>/dev/null || true)
+if [[ -n ${current_image} ]]; then
+    docker volume inspect "${data_volume}" >/dev/null
+    docker run --rm \
+        --volume "${data_volume}:/data" \
+        --entrypoint /opt/sub2api-mcp/venv/bin/python \
+        "${current_image}" \
+        -c 'import os,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; assert os.path.isfile(src), src; os.path.exists(dst) and os.remove(dst); source=sqlite3.connect(src); backup=sqlite3.connect(dst); source.backup(backup); backup.close(); source.close()' \
+        /data/sub2api-mcp.db "${backup_file}"
+    backup_created=true
+fi
 
 compose() {
     docker compose \
@@ -64,6 +84,18 @@ compose() {
 
 rollback() {
     if [[ -n ${previous_release} && -d ${previous_release} && -f ${previous_release}/.release.env ]]; then
+        compose stop || true
+        if [[ ${backup_created} == true ]]; then
+            if ! docker run --rm \
+                --volume "${data_volume}:/data" \
+                --entrypoint /opt/sub2api-mcp/venv/bin/python \
+                "${current_image}" \
+                -c 'import os,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; assert os.path.isfile(src), src; [os.remove(dst+s) for s in ("-wal","-shm") if os.path.exists(dst+s)]; backup=sqlite3.connect(src); target=sqlite3.connect(dst); backup.backup(target); target.close(); backup.close()' \
+                "${backup_file}" /data/sub2api-mcp.db; then
+                echo "database restore failed; previous release was not restarted" >&2
+                return
+            fi
+        fi
         docker compose \
             --project-name bot-mcp \
             --env-file "${shared_dir}/.env" \

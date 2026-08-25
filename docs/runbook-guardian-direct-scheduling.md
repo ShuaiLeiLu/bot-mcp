@@ -82,3 +82,15 @@ is loaded. Requests that try to mutate them return `DEPRECATED_GUARDIAN_CONTROL`
 6. Do not manually flip `active+schedulable=false` accounts unless intentionally changing human
    ownership.
 7. After correcting the cause, start with the current policy revision and a new idempotency key.
+
+## Deployment and rollback
+
+The deploy script creates an online SQLite backup inside the named data volume before starting a
+new release. If health verification fails, it stops the new container, restores that backup with
+SQLite's backup API, and only then restarts the previous release. The manual rollback workflow is
+intentionally limited to the immediately previous release and performs the same database restore;
+this prevents an older binary from opening a newer Guardian schema.
+
+Do not bypass the release scripts for a schema-changing deployment. Confirm that
+`/data/predeploy-<release-sha>.db` exists before a manual rollback and retain the prior release
+directory until the new release has passed its monitoring window.
