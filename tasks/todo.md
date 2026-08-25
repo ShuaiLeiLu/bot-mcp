@@ -154,7 +154,7 @@ Status: Plan proposed for approval
 - [x] GR4: Publish/consume account observations exactly once.
 - [x] GR5: Select bad-state accounts and channel-error groups with manual-pause protection.
 - [x] GR6: Add typed account test, verified enable and verified disable operations.
-- [ ] GR7: Execute and persist one Guardian-owned account recovery run.
+- [x] GR7: Execute and persist one Guardian-owned account recovery run.
 - [ ] GR8: Transfer RECOVERY jobs and compatible MCP submission to Guardian.
 - [ ] GR9: Prove the Sub2API channel mutation contract without production writes.
 - [ ] GR10: Implement verified load_factor, priority and schedulable writer operations.
