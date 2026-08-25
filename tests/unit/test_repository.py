@@ -184,6 +184,62 @@ async def test_quarantine_invalid_persisted_groups_fail_closed(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_schema_v2_success_probe_state_migrates_to_recovered(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    quarantined_at = datetime(2026, 8, 25, 2, tzinfo=UTC).isoformat()
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE service_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO service_metadata(key, value) VALUES('schema_version', '2');
+            CREATE TABLE account_quarantines (
+                account_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                group_ids_json TEXT NOT NULL,
+                threshold_ms INTEGER NOT NULL,
+                observed_count INTEGER NOT NULL,
+                quarantined_at TEXT NOT NULL,
+                last_probe_at TEXT,
+                last_probe_latency_ms INTEGER,
+                last_probe_result TEXT NOT NULL CHECK (
+                    last_probe_result IN ('NEVER', 'SUCCESS', 'FAILED', 'SLOW', 'INVALID')
+                ),
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_account_quarantines_probe
+                ON account_quarantines(last_probe_at, quarantined_at, account_id);
+            """
+        )
+        connection.execute(
+            "INSERT INTO account_quarantines VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "997",
+                "SLOW_FIRST_TOKEN",
+                '["7"]',
+                30_000,
+                3,
+                quarantined_at,
+                quarantined_at,
+                2_000,
+                "SUCCESS",
+                quarantined_at,
+            ),
+        )
+
+    repository = SqliteRepository(path)
+    await repository.initialize()
+    marker = await repository.get_account_quarantine("997")
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM service_metadata WHERE key = 'schema_version'"
+        ).fetchone()
+
+    assert version == ("3",)
+    assert marker is not None
+    assert marker.last_probe_result is QuarantineProbeResult.RECOVERED
+
+
+@pytest.mark.asyncio
 async def test_only_one_worker_can_claim_a_job(tmp_path: Path) -> None:
     clock = MutableClock()
     repository = await _repo(tmp_path, clock)

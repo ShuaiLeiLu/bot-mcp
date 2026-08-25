@@ -1,8 +1,36 @@
 """SQLite schema for the Sub2API MCP service."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-SCHEMA_SQL = """
+ACCOUNT_QUARANTINE_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS account_quarantines (
+    account_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK (
+        reason IN ('SLOW_FIRST_TOKEN', 'CHANNEL_TEST_FAILED')
+    ),
+    group_ids_json TEXT NOT NULL,
+    threshold_ms INTEGER NOT NULL CHECK (threshold_ms > 0),
+    observed_count INTEGER NOT NULL CHECK (observed_count > 0),
+    quarantined_at TEXT NOT NULL,
+    last_probe_at TEXT,
+    last_probe_latency_ms INTEGER CHECK (
+        last_probe_latency_ms IS NULL OR last_probe_latency_ms >= 0
+    ),
+    last_probe_result TEXT NOT NULL CHECK (
+        last_probe_result IN ('NEVER', 'RECOVERED', 'FAILED', 'SLOW', 'INVALID')
+    ),
+    updated_at TEXT NOT NULL
+)
+"""
+ACCOUNT_QUARANTINE_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_account_quarantines_probe
+    ON account_quarantines(last_probe_at, quarantined_at, account_id)
+"""
+ACCOUNT_QUARANTINE_TABLE_SQL = (
+    f"{ACCOUNT_QUARANTINE_TABLE_DDL};{ACCOUNT_QUARANTINE_INDEX_DDL};"
+)
+
+SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS service_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -76,26 +104,7 @@ CREATE TABLE IF NOT EXISTS account_bindings (
     masked_email TEXT NOT NULL,
     bound_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS account_quarantines (
-    account_id TEXT PRIMARY KEY,
-    reason TEXT NOT NULL CHECK (
-        reason IN ('SLOW_FIRST_TOKEN', 'CHANNEL_TEST_FAILED')
-    ),
-    group_ids_json TEXT NOT NULL,
-    threshold_ms INTEGER NOT NULL CHECK (threshold_ms > 0),
-    observed_count INTEGER NOT NULL CHECK (observed_count > 0),
-    quarantined_at TEXT NOT NULL,
-    last_probe_at TEXT,
-    last_probe_latency_ms INTEGER CHECK (
-        last_probe_latency_ms IS NULL OR last_probe_latency_ms >= 0
-    ),
-    last_probe_result TEXT NOT NULL CHECK (
-        last_probe_result IN ('NEVER', 'RECOVERED', 'FAILED', 'SLOW', 'INVALID')
-    ),
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_account_quarantines_probe
-    ON account_quarantines(last_probe_at, quarantined_at, account_id);
+{ACCOUNT_QUARANTINE_TABLE_SQL}
 CREATE TABLE IF NOT EXISTS actor_nonces (
     nonce TEXT PRIMARY KEY,
     expires_at TEXT NOT NULL

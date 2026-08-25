@@ -34,7 +34,11 @@ from .contracts import (
     QuarantineProbeResult,
 )
 from .errors import ServiceError
-from .schema import SCHEMA_SQL
+from .schema import (
+    ACCOUNT_QUARANTINE_INDEX_DDL,
+    ACCOUNT_QUARANTINE_TABLE_DDL,
+    SCHEMA_SQL,
+)
 from .schema import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
 
 
@@ -80,7 +84,12 @@ class SqliteRepository:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         now = _iso(self._clock())
         with self._connect() as connection:
+            current_version = self._current_schema_version(connection)
+            if current_version > self.SCHEMA_VERSION:
+                raise RuntimeError("database schema is newer than this service")
             connection.executescript(SCHEMA_SQL)
+            if current_version == 2:
+                self._migrate_quarantine_probe_result(connection)
             connection.execute(
                 "INSERT INTO service_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -99,6 +108,60 @@ class SqliteRepository:
                     JobStatus.RUNNING.value,
                 ),
             )
+
+    @staticmethod
+    def _current_schema_version(connection: sqlite3.Connection) -> int:
+        metadata_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("service_metadata",),
+        ).fetchone()
+        if metadata_exists is None:
+            return 0
+        row = connection.execute(
+            "SELECT value FROM service_metadata WHERE key = ?",
+            ("schema_version",),
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            version = int(row["value"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("database schema version is invalid") from exc
+        if version < 0:
+            raise RuntimeError("database schema version is invalid")
+        return version
+
+    @staticmethod
+    def _migrate_quarantine_probe_result(connection: sqlite3.Connection) -> None:
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("account_quarantines",),
+        ).fetchone()
+        if table_exists is None:
+            return
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DROP INDEX IF EXISTS idx_account_quarantines_probe")
+            connection.execute(
+                "ALTER TABLE account_quarantines RENAME TO account_quarantines_v2"
+            )
+            connection.execute(ACCOUNT_QUARANTINE_TABLE_DDL)
+            connection.execute(ACCOUNT_QUARANTINE_INDEX_DDL)
+            connection.execute(
+                "INSERT INTO account_quarantines("
+                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+                "quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "last_probe_result, updated_at"
+                ") SELECT account_id, reason, group_ids_json, threshold_ms, "
+                "observed_count, quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "CASE WHEN last_probe_result = 'SUCCESS' THEN 'RECOVERED' "
+                "ELSE last_probe_result END, updated_at FROM account_quarantines_v2"
+            )
+            connection.execute("DROP TABLE account_quarantines_v2")
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
     async def create_job(self, job_type: JobType, payload: dict[str, Any]) -> JobRecord:
         return await asyncio.to_thread(self._create_job_sync, job_type, payload)
