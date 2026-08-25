@@ -868,6 +868,24 @@ class GuardianRepository:
             ).fetchall()
         return [self._account_observation_from_row(row) for row in rows]
 
+    async def latest_abnormal_account_snapshot(self) -> str | None:
+        return await asyncio.to_thread(self._latest_abnormal_account_snapshot_sync)
+
+    def _latest_abnormal_account_snapshot_sync(self) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "WITH latest AS ("
+                "SELECT snapshot_id FROM guardian_account_observations "
+                "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1"
+                ") SELECT observations.snapshot_id "
+                "FROM guardian_account_observations AS observations "
+                "JOIN latest ON latest.snapshot_id = observations.snapshot_id "
+                "WHERE observations.status IN ('error', 'disabled', 'inactive') "
+                "AND observations.expired = 0 "
+                "AND observations.temporary_unavailable = 0 LIMIT 1"
+            ).fetchone()
+        return cast(str, row["snapshot_id"]) if row is not None else None
+
     async def open_channel_error_episode(
         self,
         *,
@@ -955,6 +973,22 @@ class GuardianRepository:
             self._get_open_channel_error_episode_sync,
             channel_id,
         )
+
+    async def latest_open_channel_error_episode(
+        self,
+    ) -> GuardianChannelErrorEpisode | None:
+        return await asyncio.to_thread(self._latest_open_channel_error_episode_sync)
+
+    def _latest_open_channel_error_episode_sync(
+        self,
+    ) -> GuardianChannelErrorEpisode | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE status = 'OPEN' "
+                "ORDER BY opened_at DESC, episode_id DESC LIMIT 1"
+            ).fetchone()
+        return self._channel_error_episode_from_row(row) if row is not None else None
 
     def _get_open_channel_error_episode_sync(
         self,

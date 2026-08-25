@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from ..contracts import DeliveryPurpose, NotificationPayload, OutboxEventType
+from ..contracts import DeliveryPurpose, JobRecord, JobType, NotificationPayload, OutboxEventType
 from ..errors import ServiceError
 from ..metrics import Metrics
 from ..repository import SqliteRepository
@@ -237,6 +237,101 @@ class GuardianService:
         if run.status is not AccountRecoveryRunStatus.RUNNING:
             await self._notify_account_recovery(run, records)
         return run
+
+    async def prepare_recovery_job(self) -> dict[str, Any]:
+        policy = await self.repository.get_policy()
+        if (
+            not policy.account_recovery.enabled
+            or policy.account_recovery.owner is not AccountRecoveryOwner.GUARDIAN
+        ):
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_NOT_GUARDIAN_OWNED",
+                "Guardian account recovery is not enabled and owned by Guardian",
+            )
+        await self._require_recovery_admin_target()
+        snapshot_id = await self.repository.latest_abnormal_account_snapshot()
+        if snapshot_id is not None:
+            return {
+                "snapshot_id": snapshot_id,
+                "trigger": AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE.value,
+            }
+        episode = await self.repository.latest_open_channel_error_episode()
+        if episode is not None and episode.group_id is not None:
+            return {
+                "snapshot_id": episode.opened_snapshot_id,
+                "trigger": AccountRecoveryRunTrigger.CHANNEL_ERROR.value,
+                "episode_id": episode.episode_id,
+                "channel_id": episode.channel_id,
+                "group_id": episode.group_id,
+            }
+        raise ServiceError(
+            "NO_ABNORMAL_ACCOUNT_SNAPSHOT",
+            "The latest account snapshot has no recoverable abnormal accounts",
+        )
+
+    async def handle_recovery(self, job: JobRecord) -> dict[str, Any]:
+        if job.job_type is not JobType.RECOVERY:
+            raise ValueError("Guardian can only handle recovery jobs")
+        await self._require_recovery_admin_target()
+        payload = job.payload
+        raw_snapshot_id = payload.get("snapshot_id")
+        raw_trigger = payload.get("trigger")
+        if (
+            not isinstance(raw_snapshot_id, str)
+            or len(raw_snapshot_id) != 64
+            or any(character not in "0123456789abcdef" for character in raw_snapshot_id)
+            or not isinstance(raw_trigger, str)
+        ):
+            raise ServiceError("INVALID_RECOVERY_JOB", "The recovery job payload is invalid")
+        try:
+            trigger = AccountRecoveryRunTrigger(raw_trigger)
+        except ValueError as exc:
+            raise ServiceError(
+                "INVALID_RECOVERY_JOB",
+                "The recovery job trigger is invalid",
+            ) from exc
+        if trigger is AccountRecoveryRunTrigger.MANUAL:
+            raise ServiceError(
+                "INVALID_RECOVERY_JOB",
+                "Manual recovery jobs must resolve to conditional evidence first",
+            )
+        episode_id = payload.get("episode_id")
+        channel_id = payload.get("channel_id")
+        group_id = payload.get("group_id")
+        if trigger is AccountRecoveryRunTrigger.CHANNEL_ERROR and not all(
+            isinstance(value, str) and value
+            for value in (episode_id, channel_id, group_id)
+        ):
+            raise ServiceError(
+                "INVALID_RECOVERY_JOB",
+                "The channel-error recovery job is incomplete",
+            )
+        run = await self.execute_account_recovery(
+            snapshot_id=raw_snapshot_id,
+            trigger=trigger,
+            episode_id=cast(str | None, episode_id),
+            channel_id=cast(str | None, channel_id),
+            group_id=cast(str | None, group_id),
+        )
+        return {"recovery_run": run.model_dump(mode="json")}
+
+    async def _require_recovery_admin_target(self) -> list[str]:
+        if self._notification_repository is None:
+            raise ServiceError(
+                "RECOVERY_ADMIN_TARGET_REQUIRED",
+                "A personal administrator delivery target is required",
+            )
+        targets = [
+            target.delivery_target_id
+            for target in await self._notification_repository.list_delivery_targets()
+            if target.enabled and DeliveryPurpose.RECOVERY_ADMIN in target.purposes
+        ]
+        if not targets:
+            raise ServiceError(
+                "RECOVERY_ADMIN_TARGET_REQUIRED",
+                "A personal administrator delivery target is required",
+            )
+        return targets
 
     async def _run_conditional_account_recovery(
         self,

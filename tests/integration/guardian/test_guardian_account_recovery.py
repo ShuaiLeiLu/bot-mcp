@@ -12,6 +12,7 @@ from sub2api_mcp.contracts import (
     AccountObservationStatus,
     DeliveryPurpose,
     DeliveryTargetCreate,
+    JobType,
     MediaPolicy,
     ProbeResult,
     TargetType,
@@ -394,3 +395,62 @@ async def test_new_channel_error_broadens_once_then_returns_to_bad_state_only(
     assert episode.opened_snapshot_id == first["result"]["snapshot_id"]
     assert operations.test_calls == ["1", "2", "2"]
     assert "3" not in operations.test_calls
+
+
+@pytest.mark.asyncio
+async def test_guardian_handles_durable_recovery_job_without_testing_normal_accounts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    snapshot_id = "f" * 64
+    root_repository = SqliteRepository(path)
+    repository = GuardianRepository(path)
+    await root_repository.initialize()
+    await repository.initialize()
+    await _enable_guardian_account_recovery(repository)
+    await repository.upsert_account_observations(
+        snapshot_id=snapshot_id,
+        observed_at=datetime(2026, 8, 25, 4, tzinfo=UTC),
+        observations=[
+            AccountObservation(
+                account_id="1",
+                group_ids=("36",),
+                status=AccountObservationStatus.ERROR,
+                schedulable=False,
+            ),
+            AccountObservation(
+                account_id="2",
+                group_ids=("36",),
+                status=AccountObservationStatus.ACTIVE,
+                schedulable=True,
+            ),
+        ],
+    )
+    await root_repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery-admin",
+            bot_uuid="bot-1",
+            target_type=TargetType.PERSON,
+            target_id="admin-1",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+        )
+    )
+    operations = ScriptedAccountOperations({"1": AccountTestExecutionResult.SUCCESS})
+    service = GuardianService(
+        repository,
+        GuardianEngine(repository, operations),
+        notification_repository=root_repository,
+        account_operations=operations,
+    )
+    job = await root_repository.create_job(
+        JobType.RECOVERY,
+        {"snapshot_id": snapshot_id, "trigger": "BAD_ACCOUNT_STATE"},
+    )
+
+    result = await service.handle_recovery(job)
+
+    assert result["recovery_run"]["status"] == "SUCCEEDED"
+    assert operations.test_calls == ["1"]
+    assert operations.enable_calls == ["1"]
+    assert "2" not in operations.test_calls
