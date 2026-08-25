@@ -47,12 +47,6 @@ from .tools import Sub2APIMCPServer
 
 
 class RuntimeOperations(ServiceOperations, Protocol):
-    async def recover(
-        self,
-        *,
-        excluded_account_ids: frozenset[str] = frozenset(),
-    ) -> list[dict[str, object]]: ...
-
     async def maintain(
         self,
         probe: ProbeResult,
@@ -126,7 +120,6 @@ def build_runtime(
         enabled=settings.scheduler_enabled,
         interval_seconds=settings.probe_interval_seconds,
         lease_seconds=settings.scheduler_lease_seconds,
-        recovery_enabled=settings.recovery_enabled,
         maintenance_enabled=(
             settings.channel_account_sweep_enabled or settings.log_account_guard_enabled
         ),

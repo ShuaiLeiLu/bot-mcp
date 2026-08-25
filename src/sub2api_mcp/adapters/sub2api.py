@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -21,7 +20,6 @@ from monitor import Sub2APIClient
 from notification_image import render_status_report_image
 from probe import ChannelProbe, ProbeSnapshot, format_status_report
 from pydantic import TypeAdapter
-from recovery import active_recovery_window
 
 from ..actor_bridge import ActorAccount
 from ..config import Settings
@@ -104,21 +102,12 @@ class LegacySub2APIAdapter:
         self,
         client: Sub2APIClient,
         *,
-        recovery_enabled: bool = False,
-        recovery_window_start: str = "02:00",
-        recovery_window_end: str = "05:00",
-        recovery_max_accounts: int = 5,
         maintenance_policy: MaintenancePolicy | None = None,
     ) -> None:
         self._client = client
-        self._recovery_enabled = recovery_enabled
-        self._recovery_window_start = recovery_window_start
-        self._recovery_window_end = recovery_window_end
-        self._recovery_max_accounts = recovery_max_accounts
         self._maintenance_policy = maintenance_policy or MaintenancePolicy()
         self._maintenance = MaintenanceServiceFactory.create(client, self._maintenance_policy)
         self._last_probes: list[ChannelProbe] = []
-        self._recovery_rotation: list[str] = []
 
     async def probe(self) -> ProbeResult:
         triggered_at = datetime.now(UTC)
@@ -361,52 +350,6 @@ class LegacySub2APIAdapter:
         )
         return snapshot.model_dump(mode="json")
 
-    async def recover(
-        self,
-        *,
-        excluded_account_ids: frozenset[str] = frozenset(),
-    ) -> list[dict[str, object]]:
-        if not self._recovery_enabled:
-            return []
-        current = datetime.now(UTC)
-        window = active_recovery_window(
-            current,
-            self._recovery_window_start,
-            self._recovery_window_end,
-        )
-        if window is None:
-            return []
-        candidates = [
-            candidate
-            for candidate in await self._client.fetch_recovery_candidates(now=current)
-            if candidate.account_id not in excluded_account_ids
-        ]
-        candidates.sort(key=lambda item: int(item.account_id))
-        by_id = {item.account_id: item for item in candidates}
-        current_ids = set(by_id)
-        rotation = [item for item in self._recovery_rotation if item in current_ids]
-        rotation.extend(item.account_id for item in candidates if item.account_id not in rotation)
-        self._recovery_rotation = rotation
-        selected = rotation[: self._recovery_max_accounts]
-        outcomes: list[dict[str, object]] = []
-        for account_id in selected:
-            now = datetime.now(UTC)
-            active_window = active_recovery_window(
-                now,
-                self._recovery_window_start,
-                self._recovery_window_end,
-            )
-            if active_window is None or active_window.window_id != window.window_id:
-                break
-            outcome = await self._client.test_and_recover_account(
-                by_id[account_id], now=now, deadline=window.ends_at
-            )
-            if outcome.result != "test_failed":
-                outcomes.append(asdict(outcome))
-            if self._recovery_rotation and self._recovery_rotation[0] == account_id:
-                self._recovery_rotation = self._recovery_rotation[1:] + [account_id]
-        return outcomes
-
     async def maintain(
         self,
         probe: ProbeResult,
@@ -647,9 +590,5 @@ def build_sub2api_adapter(settings: Settings) -> LegacySub2APIAdapter:
     )
     return LegacySub2APIAdapter(
         client,
-        recovery_enabled=settings.recovery_enabled,
-        recovery_window_start=settings.recovery_window_start,
-        recovery_window_end=settings.recovery_window_end,
-        recovery_max_accounts=settings.recovery_max_accounts_per_run,
         maintenance_policy=policy,
     )

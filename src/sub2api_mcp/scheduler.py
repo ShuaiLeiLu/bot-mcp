@@ -77,7 +77,6 @@ class SchedulerPolicy:
     enabled: bool = False
     interval_seconds: int = 60
     lease_seconds: int = 120
-    recovery_enabled: bool = False
     maintenance_enabled: bool = False
     quiet_hours_enabled: bool = False
     quiet_hours_start: str = "23:00"

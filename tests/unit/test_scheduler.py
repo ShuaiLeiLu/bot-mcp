@@ -51,15 +51,12 @@ def _empty_intent_actions() -> dict[str, str]:
 class FakeSub2APIAdapter:
     results: list[ProbeResult]
     calls: int = 0
-    recovery_results: list[dict[str, object]] = field(default_factory=_empty_results)
     maintenance_results: list[dict[str, object]] = field(default_factory=_empty_results)
     quarantine_results: dict[str, QuarantineProbeAttempt] = field(
         default_factory=_empty_quarantine_results
     )
     intent_actions: dict[str, str] = field(default_factory=_empty_intent_actions)
     restore_actions: dict[str, str] = field(default_factory=_empty_intent_actions)
-    recovery_calls: int = 0
-    recovery_excluded_ids: frozenset[str] = frozenset()
     maintenance_calls: int = 0
     maintenance_excluded_ids: frozenset[str] = frozenset()
     quarantine_calls: list[str] = field(default_factory=lambda: list[str]())
@@ -70,15 +67,6 @@ class FakeSub2APIAdapter:
         result = self.results[min(self.calls, len(self.results) - 1)]
         self.calls += 1
         return result
-
-    async def recover(
-        self,
-        *,
-        excluded_account_ids: frozenset[str] = frozenset(),
-    ) -> list[dict[str, object]]:
-        self.recovery_calls += 1
-        self.recovery_excluded_ids = excluded_account_ids
-        return self.recovery_results
 
     async def maintain(
         self,
@@ -433,14 +421,13 @@ async def test_scheduler_never_queues_or_executes_recovery(
         repository,
         adapter,
         Metrics.create(),
-        SchedulerPolicy(enabled=True, recovery_enabled=True),
+        SchedulerPolicy(enabled=True),
     )
     probe_job = await repository.create_job(JobType.PROBE, {})
 
     await service.handle_probe(probe_job)
 
     assert await repository.active_job_count(JobType.RECOVERY) == 0
-    assert adapter.recovery_calls == 0
     assert not hasattr(service, "handle_recovery")
 
 
