@@ -43,6 +43,26 @@ class GuardianAPI:
             Route("/guardian/assets/{name:str}", self.asset, methods=["GET"]),
             Route("/api/guardian/v1/overview", self.overview, methods=["GET"]),
             Route("/api/guardian/v1/status", self.status, methods=["GET"]),
+            Route(
+                "/api/guardian/v1/scheduling/start",
+                self.start_scheduling,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/guardian/v1/scheduling/stop",
+                self.stop_scheduling,
+                methods=["POST"],
+            ),
+            Route(
+                "/api/guardian/v1/recovery/status",
+                self.recovery_status,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/guardian/v1/recovery/runs",
+                self.submit_recovery,
+                methods=["POST"],
+            ),
             Route("/api/guardian/v1/policy", self.policy, methods=["GET", "PATCH"]),
             Route("/api/guardian/v1/runs", self.runs, methods=["POST"]),
             Route(
@@ -116,6 +136,61 @@ class GuardianAPI:
     async def status(self, request: Request) -> Response:
         return await self._execute(request, "sub2api:read", self.service.status)
 
+    async def start_scheduling(self, request: Request) -> Response:
+        return await self._scheduling_control(request, enabled=True)
+
+    async def stop_scheduling(self, request: Request) -> Response:
+        return await self._scheduling_control(request, enabled=False)
+
+    async def _scheduling_control(self, request: Request, *, enabled: bool) -> Response:
+        async def control() -> dict[str, Any]:
+            body = await self._body(request)
+            confirm = body.get("confirm", False)
+            if not isinstance(confirm, bool):
+                raise ServiceError("VALIDATION_ERROR", "confirm must be a boolean")
+            key = self._idempotency_key(request, required=True)
+            assert key is not None
+            return await self.service.set_scheduling_enabled(
+                enabled=enabled,
+                confirm=confirm,
+                expected_revision=self._revision(request),
+                idempotency_key=key,
+            )
+
+        return await self._execute(
+            request,
+            "sub2api:admin",
+            control,
+            mutation="guardian_set_scheduling",
+        )
+
+    async def recovery_status(self, request: Request) -> Response:
+        return await self._execute(
+            request,
+            "sub2api:read",
+            lambda: self.service.recovery_status(limit=self._limit(request, default=20)),
+        )
+
+    async def submit_recovery(self, request: Request) -> Response:
+        async def submit() -> dict[str, Any]:
+            body = await self._body(request)
+            confirm = body.get("confirm", False)
+            if not isinstance(confirm, bool):
+                raise ServiceError("VALIDATION_ERROR", "confirm must be a boolean")
+            key = self._idempotency_key(request, required=True)
+            assert key is not None
+            return await self.service.submit_pending_recovery(
+                confirm=confirm,
+                idempotency_key=key,
+            )
+
+        return await self._execute(
+            request,
+            "sub2api:admin",
+            submit,
+            mutation="guardian_submit_recovery",
+        )
+
     async def policy(self, request: Request) -> Response:
         if request.method == "GET":
             return await self._execute(request, "sub2api:read", self.service.get_policy)
@@ -135,9 +210,17 @@ class GuardianAPI:
             dry_run = body.get("dry_run", True)
             if not isinstance(dry_run, bool):
                 raise ServiceError("VALIDATION_ERROR", "dry_run must be a boolean")
+            if not dry_run and body.get("confirm") is not True:
+                raise ServiceError(
+                    "CONFIRMATION_REQUIRED",
+                    "A direct scheduling run requires confirm=true",
+                )
             return await self.service.run_once(
                 dry_run=dry_run,
-                idempotency_key=self._idempotency_key(request, required=False),
+                idempotency_key=self._idempotency_key(
+                    request,
+                    required=not dry_run,
+                ),
             )
 
         return await self._execute(request, "sub2api:admin", run, mutation="guardian_run_once")

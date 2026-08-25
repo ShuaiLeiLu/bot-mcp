@@ -224,11 +224,17 @@ class Sub2APIMCPServer:
             )
 
         @mcp.tool(description="Submit one evidence-gated Guardian account recovery job.")
-        async def sub2api_submit_recovery() -> str:
+        async def sub2api_submit_recovery(
+            confirm: bool = False,
+            idempotency_key: str = "",
+        ) -> str:
             return await self._execute(
                 "sub2api_submit_recovery",
                 "sub2api:admin",
-                lambda: self.service.submit_control_job(JobType.RECOVERY),
+                lambda: self._guardian().submit_pending_recovery(
+                    confirm=confirm,
+                    idempotency_key=idempotency_key,
+                ),
                 mutation=True,
             )
 
@@ -342,6 +348,41 @@ class Sub2APIMCPServer:
                 self._guardian().get_policy,
             )
 
+        @mcp.tool(description="Get direct scheduling runtime status.")
+        async def guardian_get_status() -> str:
+            return await self._execute(
+                "guardian_get_status",
+                "sub2api:read",
+                self._guardian().status,
+            )
+
+        @mcp.tool(description="Start or stop direct scheduling with explicit confirmation.")
+        async def guardian_set_scheduling_enabled(
+            enabled: bool,
+            expected_revision: int,
+            confirm: bool = False,
+            idempotency_key: str = "",
+        ) -> str:
+            return await self._execute(
+                "guardian_set_scheduling_enabled",
+                "sub2api:admin",
+                lambda: self._guardian().set_scheduling_enabled(
+                    enabled=enabled,
+                    confirm=confirm,
+                    expected_revision=expected_revision,
+                    idempotency_key=idempotency_key,
+                ),
+                mutation=True,
+            )
+
+        @mcp.tool(description="Get conditional recovery status and open error episodes.")
+        async def guardian_get_recovery_status(limit: int = 20) -> str:
+            return await self._execute(
+                "guardian_get_recovery_status",
+                "sub2api:read",
+                lambda: self._guardian().recovery_status(limit=limit),
+            )
+
         @mcp.tool(description="Update Guardian policy with optimistic revision locking.")
         async def guardian_update_policy(
             expected_revision: int,
@@ -403,11 +444,28 @@ class Sub2APIMCPServer:
         async def guardian_run_once(
             dry_run: bool = True,
             idempotency_key: str | None = None,
+            confirm: bool = False,
         ) -> str:
+            async def run() -> dict[str, Any]:
+                if not dry_run and not confirm:
+                    raise ServiceError(
+                        "CONFIRMATION_REQUIRED",
+                        "A direct scheduling run requires confirm=true",
+                    )
+                if not dry_run and not idempotency_key:
+                    raise ServiceError(
+                        "IDEMPOTENCY_KEY_REQUIRED",
+                        "A direct scheduling run requires an idempotency key",
+                    )
+                return await self._guardian().run_once(
+                    dry_run=dry_run,
+                    idempotency_key=idempotency_key,
+                )
+
             return await self._execute(
                 "guardian_run_once",
                 "sub2api:admin",
-                lambda: self._guardian().run_once(dry_run=dry_run, idempotency_key=idempotency_key),
+                run,
                 mutation=True,
             )
 

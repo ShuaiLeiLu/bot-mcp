@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +14,8 @@ from starlette.testclient import TestClient
 from sub2api_mcp.app import build_runtime, create_app
 from sub2api_mcp.config import AccessTokenConfig, Scope, Settings
 from sub2api_mcp.contracts import (
+    AccountObservation,
+    AccountObservationStatus,
     AccountQuarantineIntent,
     AccountQuarantineRecord,
     DeliveryPurpose,
@@ -232,7 +236,7 @@ def test_dry_run_populates_groups_channels_events_and_manual_pause(
     admin = {"X-API-Key": "a" * 32, "Idempotency-Key": "test-cycle"}
 
     with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
-        run = client.post("/api/guardian/v1/runs", headers=admin, json={"dry_run": False})
+        run = client.post("/api/guardian/v1/runs", headers=admin, json={"dry_run": True})
         groups = client.get("/api/guardian/v1/groups", headers={"X-API-Key": "r" * 32})
         channels = client.get("/api/guardian/v1/channels", headers={"X-API-Key": "r" * 32})
         paused = client.post(
@@ -479,6 +483,126 @@ def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> N
     assert advanced.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
     assert stopped.status_code == 409
     assert stopped.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
+
+
+def test_direct_scheduling_controls_require_confirmation_revision_and_idempotency(
+    tmp_path: Path,
+) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+    admin = {"X-API-Key": "a" * 32}
+
+    with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
+        unconfirmed = client.post(
+            "/api/guardian/v1/scheduling/start",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "start-1"},
+            json={"confirm": False},
+        )
+        started = client.post(
+            "/api/guardian/v1/scheduling/start",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "start-1"},
+            json={"confirm": True},
+        )
+        replayed = client.post(
+            "/api/guardian/v1/scheduling/start",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "start-1"},
+            json={"confirm": True},
+        )
+        status = client.get("/api/guardian/v1/status", headers=admin)
+        stopped = client.post(
+            "/api/guardian/v1/scheduling/stop",
+            headers={**admin, "If-Match": "2", "Idempotency-Key": "stop-1"},
+            json={"confirm": True},
+        )
+
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert started.status_code == 200
+    assert started.json()["data"] == {
+        "enabled": True,
+        "scheduling_mode": "DIRECT",
+        "policy_revision": 2,
+    }
+    assert replayed.json()["data"] == started.json()["data"]
+    assert status.json()["data"]["enabled"] is True
+    assert stopped.status_code == 200
+    assert stopped.json()["data"]["enabled"] is False
+    assert stopped.json()["data"]["policy_revision"] == 3
+
+
+def test_recovery_status_is_bounded_and_manual_submission_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    runtime = build_runtime(
+        _settings(tmp_path),
+        operations=FakeOperations(),
+        video_generator=FakeVideoGenerator(),
+    )
+    admin = {"X-API-Key": "a" * 32}
+    now = datetime(2026, 8, 25, 4, tzinfo=UTC)
+    asyncio.run(runtime.repository.initialize())
+    asyncio.run(runtime.guardian_repository.initialize())
+    asyncio.run(
+        runtime.guardian_repository.upsert_account_observations(
+            snapshot_id="f" * 64,
+            observed_at=now,
+            observations=[
+                AccountObservation(
+                    account_id="42",
+                    group_ids=("36",),
+                    status=AccountObservationStatus.ERROR,
+                    schedulable=False,
+                )
+            ],
+        )
+    )
+    asyncio.run(
+        runtime.repository.upsert_delivery_target(
+            DeliveryTargetCreate(
+                name="recovery-admin",
+                bot_uuid="bot-1",
+                target_type=TargetType.PERSON,
+                target_id="admin-1",
+                purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+                media_policy=MediaPolicy.TEXT_ONLY,
+            )
+        )
+    )
+
+    with TestClient(create_app(runtime), base_url="http://127.0.0.1") as client:
+        client.post(
+            "/api/guardian/v1/scheduling/start",
+            headers={**admin, "If-Match": "1", "Idempotency-Key": "start-recovery"},
+            json={"confirm": True},
+        )
+        status = client.get("/api/guardian/v1/recovery/status?limit=10", headers=admin)
+        unconfirmed = client.post(
+            "/api/guardian/v1/recovery/runs",
+            headers={**admin, "Idempotency-Key": "recovery-1"},
+            json={"confirm": False},
+        )
+        submitted = client.post(
+            "/api/guardian/v1/recovery/runs",
+            headers={**admin, "Idempotency-Key": "recovery-1"},
+            json={"confirm": True},
+        )
+        replayed = client.post(
+            "/api/guardian/v1/recovery/runs",
+            headers={**admin, "Idempotency-Key": "recovery-1"},
+            json={"confirm": True},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["data"]["latest_abnormal_snapshot"] == "f" * 64
+    assert "account_id" not in json.dumps(status.json()["data"])
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert submitted.status_code == 200
+    assert submitted.json()["data"]["job"]["job_type"] == "RECOVERY"
+    assert replayed.json()["data"] == submitted.json()["data"]
 
 
 def test_field_ownership_can_be_explicitly_transferred_with_audit_guards(

@@ -168,6 +168,9 @@ async def test_tool_inventory_is_curated_and_deterministic(tmp_path: Path) -> No
         "sub2api_delete_delivery_target",
         "sub2api_test_delivery_target",
         "guardian_get_policy",
+        "guardian_get_status",
+        "guardian_set_scheduling_enabled",
+        "guardian_get_recovery_status",
         "guardian_update_policy",
         "guardian_get_overview",
         "guardian_list_groups",
@@ -365,7 +368,11 @@ async def test_recovery_tool_keeps_job_envelope_but_uses_guardian_snapshot(
     principal = Principal("admin", frozenset({"sub2api:admin"}))
 
     with bind_principal(principal, "request-recovery"):
-        result = await _call_json(server, "sub2api_submit_recovery", {})
+        result = await _call_json(
+            server,
+            "sub2api_submit_recovery",
+            {"confirm": True, "idempotency_key": "mcp-recovery"},
+        )
 
     assert result["ok"] is True
     assert result["data"]["job"]["job_type"] == "RECOVERY"
@@ -419,7 +426,11 @@ async def test_recovery_tool_rejects_a_latest_snapshot_with_only_normal_accounts
     principal = Principal("admin", frozenset({"sub2api:admin"}))
 
     with bind_principal(principal, "request-no-recovery"):
-        result = await _call_json(server, "sub2api_submit_recovery", {})
+        result = await _call_json(
+            server,
+            "sub2api_submit_recovery",
+            {"confirm": True, "idempotency_key": "mcp-no-recovery"},
+        )
 
     assert result["ok"] is False
     assert result["error"]["code"] == "NO_ABNORMAL_ACCOUNT_SNAPSHOT"
@@ -468,9 +479,60 @@ async def test_guardian_tool_reports_direct_mode_without_unplanned_writes(
         run = await _call_json(
             server,
             "guardian_run_once",
-            {"dry_run": False, "idempotency_key": "mcp-cycle"},
+            {
+                "dry_run": False,
+                "idempotency_key": "mcp-cycle",
+                "confirm": True,
+            },
         )
 
     assert run["ok"] is True
     assert run["data"]["result"]["writes_applied"] == 0
     assert run["data"]["result"]["scheduling_mode"] == "DIRECT"
+
+
+@pytest.mark.asyncio
+async def test_guardian_mcp_start_stop_requires_confirmation_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    server = await _server(tmp_path)
+    principal = Principal("admin", frozenset({"sub2api:admin"}))
+
+    with bind_principal(principal, "request-scheduling"):
+        denied = await _call_json(
+            server,
+            "guardian_set_scheduling_enabled",
+            {
+                "enabled": True,
+                "expected_revision": 1,
+                "confirm": False,
+                "idempotency_key": "mcp-start",
+            },
+        )
+        started = await _call_json(
+            server,
+            "guardian_set_scheduling_enabled",
+            {
+                "enabled": True,
+                "expected_revision": 1,
+                "confirm": True,
+                "idempotency_key": "mcp-start",
+            },
+        )
+        replayed = await _call_json(
+            server,
+            "guardian_set_scheduling_enabled",
+            {
+                "enabled": True,
+                "expected_revision": 1,
+                "confirm": True,
+                "idempotency_key": "mcp-start",
+            },
+        )
+        status = await _call_json(server, "guardian_get_status", {})
+
+    assert denied["error"]["code"] == "CONFIRMATION_REQUIRED"
+    assert started["ok"] is True
+    assert started["data"]["enabled"] is True
+    assert replayed["data"] == started["data"]
+    assert status["data"]["enabled"] is True
