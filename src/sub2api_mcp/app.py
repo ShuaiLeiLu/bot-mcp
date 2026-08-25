@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -32,6 +32,7 @@ from .contracts import (
 )
 from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
+from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
 from .guardian.engine import GuardianEngine
 from .guardian.repository import GuardianRepository
@@ -149,6 +150,13 @@ def build_runtime(
         )
     delivery = DeliveryService(langbot) if langbot is not None else None
     outbox = OutboxWorker(repository, delivery, metrics) if delivery is not None else None
+    guardian = GuardianService(
+        guardian_repository,
+        GuardianEngine(guardian_repository, operations),
+        metrics,
+        repository,
+        account_operations=cast(AccountRecoveryOperations, operations),
+    )
     service = Sub2APIService(
         repository=repository,
         operations=operations,
@@ -157,18 +165,13 @@ def build_runtime(
         langbot=langbot,
         delivery=delivery,
         video_enabled=settings.video_enabled,
+        recovery_owner=guardian,
     )
     jobs = JobManager(repository, metrics)
     jobs.register(JobType.VIDEO, video.handle)
     jobs.register(JobType.PROBE, scheduler.handle_probe)
-    jobs.register(JobType.RECOVERY, scheduler.handle_recovery)
+    jobs.register(JobType.RECOVERY, guardian.handle_recovery)
     jobs.register(JobType.MAINTENANCE, scheduler.handle_maintenance)
-    guardian = GuardianService(
-        guardian_repository,
-        GuardianEngine(guardian_repository, operations),
-        metrics,
-        repository,
-    )
     mcp = Sub2APIMCPServer(
         service,
         metrics,

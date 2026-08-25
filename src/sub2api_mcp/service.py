@@ -34,6 +34,10 @@ class ServiceOperations(Protocol):
     async def account_report(self, user_id: str) -> str: ...
 
 
+class RecoveryJobOwner(Protocol):
+    async def prepare_recovery_job(self) -> dict[str, Any]: ...
+
+
 class Sub2APIService:
     def __init__(
         self,
@@ -45,6 +49,7 @@ class Sub2APIService:
         langbot: LangBotClient | None,
         delivery: DeliveryService | None,
         video_enabled: bool = True,
+        recovery_owner: RecoveryJobOwner | None = None,
     ) -> None:
         self.repository = repository
         self._operations = operations
@@ -53,6 +58,7 @@ class Sub2APIService:
         self._langbot = langbot
         self._delivery = delivery
         self._video_enabled = video_enabled
+        self._recovery_owner = recovery_owner
 
     async def get_status(self) -> dict[str, Any]:
         job_counts = {
@@ -152,9 +158,18 @@ class Sub2APIService:
     async def submit_control_job(self, job_type: JobType) -> dict[str, Any]:
         if job_type not in {JobType.RECOVERY, JobType.MAINTENANCE}:
             raise ValueError("unsupported control job type")
-        await self._scheduler.require_control_target(job_type)
+        if job_type is JobType.RECOVERY:
+            if self._recovery_owner is None:
+                raise ServiceError(
+                    "ACCOUNT_RECOVERY_ADAPTER_UNAVAILABLE",
+                    "Guardian account recovery is unavailable",
+                )
+            payload = await self._recovery_owner.prepare_recovery_job()
+        else:
+            await self._scheduler.require_control_target(job_type)
+            payload = {}
         created = await self.repository.create_job_with_capacity(
-            job_type, {}, max_active=1
+            job_type, payload, max_active=1
         )
         if created is None:
             raise ServiceError("JOB_ALREADY_ACTIVE", "A job of this type is already active")

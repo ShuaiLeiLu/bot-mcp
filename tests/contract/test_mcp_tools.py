@@ -12,6 +12,8 @@ from mcp.types import TextContent
 
 from sub2api_mcp.auth import Principal, bind_principal
 from sub2api_mcp.contracts import (
+    AccountObservation,
+    AccountObservationStatus,
     AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
@@ -25,6 +27,7 @@ from sub2api_mcp.contracts import (
     TargetType,
     VideoOutput,
 )
+from sub2api_mcp.guardian.contracts import AccountRecoveryOwner
 from sub2api_mcp.guardian.engine import GuardianEngine
 from sub2api_mcp.guardian.repository import GuardianRepository
 from sub2api_mcp.guardian.service import GuardianService
@@ -107,6 +110,13 @@ async def _server(tmp_path: Path) -> Sub2APIMCPServer:
         SchedulerPolicy(enabled=False),
     )
     video = VideoJobService(repository, FakeVideoGenerator(), max_pending=20)
+    guardian_repository = GuardianRepository(tmp_path / "state.db")
+    await guardian_repository.initialize()
+    guardian = GuardianService(
+        guardian_repository,
+        GuardianEngine(guardian_repository, operations),
+        notification_repository=repository,
+    )
     service = Sub2APIService(
         repository=repository,
         operations=operations,
@@ -114,12 +124,7 @@ async def _server(tmp_path: Path) -> Sub2APIMCPServer:
         video=video,
         langbot=None,
         delivery=None,
-    )
-    guardian_repository = GuardianRepository(tmp_path / "state.db")
-    await guardian_repository.initialize()
-    guardian = GuardianService(
-        guardian_repository,
-        GuardianEngine(guardian_repository, operations),
+        recovery_owner=guardian,
     )
     return Sub2APIMCPServer(service, metrics, guardian=guardian)
 
@@ -314,6 +319,108 @@ async def test_authorization_happens_before_business_parameter_validation(
         )
 
     assert result["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_recovery_tool_keeps_job_envelope_but_uses_guardian_snapshot(
+    tmp_path: Path,
+) -> None:
+    server = await _server(tmp_path)
+    assert server.guardian is not None
+    policy = await server.guardian.repository.get_policy()
+    await server.guardian.repository.update_policy(
+        policy.model_copy(
+            update={
+                "account_recovery": policy.account_recovery.model_copy(
+                    update={"enabled": True, "owner": AccountRecoveryOwner.GUARDIAN}
+                )
+            }
+        ),
+        expected_revision=policy.revision,
+    )
+    snapshot_id = "d" * 64
+    await server.guardian.repository.upsert_account_observations(
+        snapshot_id=snapshot_id,
+        observed_at=datetime(2026, 8, 25, 4, tzinfo=UTC),
+        observations=[
+            AccountObservation(
+                account_id="42",
+                group_ids=("36",),
+                status=AccountObservationStatus.ERROR,
+                schedulable=False,
+            )
+        ],
+    )
+    await server.service.repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery-admin",
+            bot_uuid="bot-1",
+            target_type=TargetType.PERSON,
+            target_id="admin-1",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+        )
+    )
+    principal = Principal("admin", frozenset({"sub2api:admin"}))
+
+    with bind_principal(principal, "request-recovery"):
+        result = await _call_json(server, "sub2api_submit_recovery", {})
+
+    assert result["ok"] is True
+    assert result["data"]["job"]["job_type"] == "RECOVERY"
+    assert result["data"]["job"]["payload"] == {
+        "snapshot_id": snapshot_id,
+        "trigger": "BAD_ACCOUNT_STATE",
+    }
+    assert result["data"]["queue_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_tool_rejects_a_latest_snapshot_with_only_normal_accounts(
+    tmp_path: Path,
+) -> None:
+    server = await _server(tmp_path)
+    assert server.guardian is not None
+    policy = await server.guardian.repository.get_policy()
+    await server.guardian.repository.update_policy(
+        policy.model_copy(
+            update={
+                "account_recovery": policy.account_recovery.model_copy(
+                    update={"enabled": True, "owner": AccountRecoveryOwner.GUARDIAN}
+                )
+            }
+        ),
+        expected_revision=policy.revision,
+    )
+    await server.guardian.repository.upsert_account_observations(
+        snapshot_id="e" * 64,
+        observed_at=datetime(2026, 8, 25, 4, tzinfo=UTC),
+        observations=[
+            AccountObservation(
+                account_id="42",
+                group_ids=("36",),
+                status=AccountObservationStatus.ACTIVE,
+                schedulable=True,
+            )
+        ],
+    )
+    await server.service.repository.upsert_delivery_target(
+        DeliveryTargetCreate(
+            name="recovery-admin",
+            bot_uuid="bot-1",
+            target_type=TargetType.PERSON,
+            target_id="admin-1",
+            purposes=frozenset({DeliveryPurpose.RECOVERY_ADMIN}),
+            media_policy=MediaPolicy.TEXT_ONLY,
+        )
+    )
+    principal = Principal("admin", frozenset({"sub2api:admin"}))
+
+    with bind_principal(principal, "request-no-recovery"):
+        result = await _call_json(server, "sub2api_submit_recovery", {})
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "NO_ABNORMAL_ACCOUNT_SNAPSHOT"
 
 
 @pytest.mark.asyncio

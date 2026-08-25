@@ -223,7 +223,7 @@ class Sub2APIMCPServer:
                 mutation=True,
             )
 
-        @mcp.tool(description="Submit one bounded account recovery job.")
+        @mcp.tool(description="Submit one evidence-gated Guardian account recovery job.")
         async def sub2api_submit_recovery() -> str:
             return await self._execute(
                 "sub2api_submit_recovery",
