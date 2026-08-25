@@ -8,6 +8,7 @@ from maintenance import (
     AccountDisableResult,
     AccountDispatchState,
     AccountRestoreResult,
+    AccountSchedulingWriteResult,
     AccountTestResult,
     MaintenancePolicy,
     RequestLogRecord,
@@ -27,6 +28,7 @@ from sub2api_mcp.contracts import (
 from sub2api_mcp.guardian.contracts import (
     AccountMutationResult,
     AccountTestExecutionResult,
+    GuardianFieldName,
 )
 
 
@@ -236,6 +238,27 @@ class QuarantineFakeClient:
         return AccountDisableResult(account_id, success=True)
 
 
+class SchedulingWriterFakeClient:
+    def __init__(self, *, success: bool) -> None:
+        self.success = success
+        self.calls: list[tuple[str, str, object]] = []
+
+    async def write_account_scheduling_field(
+        self,
+        account_id: str,
+        field_name: str,
+        value: object,
+    ) -> AccountSchedulingWriteResult:
+        self.calls.append((account_id, field_name, value))
+        return AccountSchedulingWriteResult(
+            account_id=account_id,
+            field_name=field_name,
+            success=self.success,
+            verified_value=value if self.success and isinstance(value, (bool, int)) else None,
+            reason="verified" if self.success else "scheduling_write_verification_failed",
+        )
+
+
 def _quarantine(reason: AccountQuarantineReason) -> AccountQuarantineRecord:
     return AccountQuarantineRecord(
         account_id="42",
@@ -377,6 +400,22 @@ async def test_guardian_account_state_failure_never_tests_or_mutates() -> None:
     assert client.test_calls == 0
     assert client.restore_calls == 0
     assert client.disable_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_guardian_field_writer_accepts_only_verified_account_write() -> None:
+    successful = SchedulingWriterFakeClient(success=True)
+    failed = SchedulingWriterFakeClient(success=False)
+    successful_adapter = LegacySub2APIAdapter(cast(Sub2APIClient, successful))
+    failed_adapter = LegacySub2APIAdapter(cast(Sub2APIClient, failed))
+
+    verified = await successful_adapter.write_field("42", GuardianFieldName.PRIORITY, 52)
+    with pytest.raises(RuntimeError, match="scheduling field write failed"):
+        await failed_adapter.write_field("42", GuardianFieldName.LOAD_FACTOR, 20)
+
+    assert successful.calls == [("42", "priority", 52)]
+    assert verified == 52
+    assert failed.calls == [("42", "load_factor", 20)]
 
 
 @pytest.mark.asyncio

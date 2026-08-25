@@ -42,6 +42,7 @@ from ..guardian.contracts import (
     AccountTestExecutionResult,
     GuardianAccountMutationOutcome,
     GuardianAccountTestOutcome,
+    GuardianFieldName,
     UpstreamProbeSnapshot,
 )
 
@@ -284,6 +285,29 @@ class LegacySub2APIAdapter:
             reason=disabled.reason,
             attempted=True,
         )
+
+    async def write_field(
+        self,
+        account_id: str,
+        field_name: GuardianFieldName,
+        value: object,
+    ) -> int | bool:
+        """Write one verified Sub2API account field.
+
+        ``account_id`` is deliberately account-scoped. Callers must resolve Guardian monitor and
+        group identities before entering this boundary.
+        """
+        result = await self._client.write_account_scheduling_field(
+            account_id,
+            field_name.value.casefold(),
+            value,
+        )
+        if not result.success:
+            raise RuntimeError("Guardian account scheduling field write failed")
+        verified = result.verified_value
+        if isinstance(verified, (bool, int)):
+            return verified
+        raise RuntimeError("Guardian account scheduling verification is missing")
 
     @staticmethod
     def _build_guardian_snapshot(probes: list[ChannelProbe]) -> dict[str, Any]:

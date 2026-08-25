@@ -639,6 +639,7 @@ class GuardianFieldOwnership(StrictModel):
 
 class GuardianWriteProposal(StrictModel):
     channel_id: str = Field(min_length=1, max_length=128)
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     field_name: GuardianFieldName
     current_value: int | float | bool | str
     desired_value: int | float | bool | str
@@ -648,6 +649,7 @@ class GuardianWriteProposal(StrictModel):
 
 class GuardianWriteDecision(StrictModel):
     channel_id: str
+    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     field_name: GuardianFieldName
     outcome: GuardianWriteOutcome
     current_value: int | float | bool | str

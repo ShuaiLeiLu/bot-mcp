@@ -32,11 +32,25 @@ class FakeWriter:
 
     async def write_field(
         self,
-        channel_id: str,
+        account_id: str,
         field_name: GuardianFieldName,
         value: object,
-    ) -> None:
-        self.calls.append((channel_id, field_name, value))
+    ) -> int | bool:
+        self.calls.append((account_id, field_name, value))
+        if isinstance(value, (bool, int)):
+            return value
+        raise TypeError("unsupported fake write value")
+
+
+class MismatchedWriter(FakeWriter):
+    async def write_field(
+        self,
+        account_id: str,
+        field_name: GuardianFieldName,
+        value: object,
+    ) -> int | bool:
+        await super().write_field(account_id, field_name, value)
+        return 79
 
 
 async def _repository(tmp_path: Path) -> GuardianRepository:
@@ -53,6 +67,7 @@ def _proposal(
 ) -> GuardianWriteProposal:
     return GuardianWriteProposal(
         channel_id="channel-1",
+        account_id="42",
         field_name=GuardianFieldName.LOAD_FACTOR,
         current_value=current,
         desired_value=desired,
@@ -141,7 +156,35 @@ async def test_enabled_write_is_applied_once_and_is_idempotent(tmp_path: Path) -
 
     assert first.outcome is GuardianWriteOutcome.APPLIED
     assert repeated == first
-    assert writer.calls == [("channel-1", GuardianFieldName.LOAD_FACTOR, 80)]
+    assert writer.calls == [("42", GuardianFieldName.LOAD_FACTOR, 80)]
     assert ownership is not None
     assert ownership.owner is GuardianFieldOwner.GUARDIAN
     assert ownership.last_guardian_value == 80
+
+
+@pytest.mark.asyncio
+async def test_writer_verification_mismatch_fails_without_claiming_ownership(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    writer = MismatchedWriter()
+    service = GuardianWritebackService(repository, writer)
+    policy = GuardianPolicy.model_validate(
+        {
+            "observe_only": False,
+            "rollout": {"stage": GuardianRolloutStage.LOAD_FACTOR},
+            "auto_apply": AutoApplyPolicy(load_factor=True).model_dump(),
+        }
+    )
+
+    decision = await service.apply(_proposal(), policy=policy)
+    ownership = await repository.get_field_ownership(
+        "channel-1",
+        GuardianFieldName.LOAD_FACTOR,
+    )
+
+    assert decision.outcome is GuardianWriteOutcome.FAILED
+    assert decision.reason == "writeback_verification_mismatch"
+    assert writer.calls == [("42", GuardianFieldName.LOAD_FACTOR, 80)]
+    assert ownership is not None
+    assert ownership.owner is GuardianFieldOwner.UPSTREAM

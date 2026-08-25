@@ -21,10 +21,10 @@ from .repository import GuardianRepository
 class GuardianFieldWriter(Protocol):
     async def write_field(
         self,
-        channel_id: str,
+        account_id: str,
         field_name: GuardianFieldName,
         value: object,
-    ) -> None: ...
+    ) -> int | bool: ...
 
 
 _STAGE_RANK = {
@@ -55,10 +55,13 @@ class GuardianWritebackService:
         *,
         policy: GuardianPolicy,
     ) -> GuardianWriteDecision:
+        operation_subject = (
+            f"{proposal.channel_id}:{proposal.account_id}:{proposal.field_name.value}"
+        )
         saved = await self.repository.get_idempotent_result(
             proposal.idempotency_key,
             "guardian_write_field",
-            f"{proposal.channel_id}:{proposal.field_name.value}",
+            operation_subject,
         )
         if saved is not None:
             return GuardianWriteDecision.model_validate(saved)
@@ -104,8 +107,8 @@ class GuardianWritebackService:
                 "writeback_adapter_disabled",
             )
         try:
-            await self._writer.write_field(
-                proposal.channel_id,
+            verified_value = await self._writer.write_field(
+                proposal.account_id,
                 proposal.field_name,
                 proposal.desired_value,
             )
@@ -114,6 +117,12 @@ class GuardianWritebackService:
                 proposal,
                 GuardianWriteOutcome.FAILED,
                 "writeback_failed",
+            )
+        if verified_value != proposal.desired_value:
+            return await self._finish(
+                proposal,
+                GuardianWriteOutcome.FAILED,
+                "writeback_verification_mismatch",
             )
         await self.repository.save_field_ownership(
             ownership.model_copy(
@@ -148,6 +157,7 @@ class GuardianWritebackService:
     ) -> GuardianWriteDecision:
         decision = GuardianWriteDecision(
             channel_id=proposal.channel_id,
+            account_id=proposal.account_id,
             field_name=proposal.field_name,
             outcome=outcome,
             current_value=proposal.current_value,
@@ -166,7 +176,7 @@ class GuardianWritebackService:
         await self.repository.save_idempotent_result(
             proposal.idempotency_key,
             "guardian_write_field",
-            proposal.channel_id + ":" + proposal.field_name.value,
+            f"{proposal.channel_id}:{proposal.account_id}:{proposal.field_name.value}",
             decision.model_dump(mode="json"),
         )
         return decision
