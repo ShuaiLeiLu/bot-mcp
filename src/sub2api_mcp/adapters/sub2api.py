@@ -205,6 +205,7 @@ class LegacySub2APIAdapter:
             result=result,
             reason=tested.reason,
             first_event_ms=tested.first_event_ms,
+            attempted=True,
         )
 
     async def guardian_enable_account(
@@ -245,6 +246,7 @@ class LegacySub2APIAdapter:
                 else AccountMutationResult.BLOCKED
             ),
             reason=restored.reason,
+            attempted=True,
         )
 
     async def guardian_disable_account(
@@ -280,6 +282,7 @@ class LegacySub2APIAdapter:
                 else AccountMutationResult.BLOCKED
             ),
             reason=disabled.reason,
+            attempted=True,
         )
 
     @staticmethod

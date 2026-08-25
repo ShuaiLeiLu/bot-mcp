@@ -91,12 +91,14 @@ class GuardianAccountTestOutcome(StrictModel):
     result: AccountTestExecutionResult
     reason: str = Field(default="", max_length=200)
     first_event_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    attempted: bool = False
 
 
 class GuardianAccountMutationOutcome(StrictModel):
     account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
     result: AccountMutationResult
     reason: str = Field(default="", max_length=200)
+    attempted: bool = False
 
 
 class ChannelErrorEpisodeStatus(StrEnum):
