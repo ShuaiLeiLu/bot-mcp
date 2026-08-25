@@ -7,10 +7,10 @@ Date: 2026-08-24
 ## Objective
 
 Protect channel quality without exhausting a channel's usable account pool. Accounts with
-repeated high first-token latency enter a durable, system-owned latency quarantine. They do not
-become ordinary error-recovery candidates and cannot receive traffic while quarantined. The
-service continues bounded probes and restores traffic only after latency returns below the
-configured threshold.
+repeated high first-token latency or a definitive failed test during a failed-channel sweep enter
+a durable, system-owned quarantine. They do not become ordinary error-recovery candidates and
+cannot receive traffic while quarantined. The service continues bounded reason-specific probes
+and restores traffic only after the corresponding health condition recovers.
 
 ## Confirmed Requirements
 
@@ -24,6 +24,11 @@ configured threshold.
 6. A successful probe whose measured first-token latency is at most `30,000 ms` restores both
    active status and scheduling. A failed or still-slow probe leaves the account quarantined.
 7. Human-paused accounts are never added to or removed from system quarantine automatically.
+8. When a mapped channel enters `failed` or `error`, test every non-human-paused account in its
+   account group before applying any disable mutation.
+9. If at least one account test succeeds, definitively failed accounts may be quarantined while
+   preserving every successful account. If no account succeeds, make no automatic disable change
+   and emit `NO_HEALTHY_ACCOUNT` because software cannot guarantee a usable account without one.
 
 ## Assumptions
 
@@ -63,7 +68,7 @@ Add a versioned SQLite table for system-owned quarantines:
 | Field | Purpose |
 |---|---|
 | `account_id` | Validated Sub2API account identifier; primary key. |
-| `reason` | Stable value `SLOW_FIRST_TOKEN`. |
+| `reason` | Stable value `SLOW_FIRST_TOKEN` or `CHANNEL_TEST_FAILED`. |
 | `group_ids_json` | Canonical group membership captured at quarantine time. |
 | `threshold_ms` | Threshold used for the decision. |
 | `observed_count` | Slow observations that triggered quarantine. |
@@ -75,9 +80,21 @@ Add a versioned SQLite table for system-owned quarantines:
 The marker is written only after Sub2API disable verification succeeds. It is removed only after
 active status plus scheduling-on read-back verification succeeds.
 
-## Minimum-Pool Decision
+## Failed-Channel Sweep and Minimum-Pool Decision
 
-Before each quarantine mutation:
+For each mapped channel in `failed` or `error`:
+
+1. Resolve its unique account group; ambiguous or missing mapping fails closed.
+2. Select every account in that group except human-paused, expired, and already quarantined
+   accounts.
+3. Test every selected account within the configured sweep cap before making mutations.
+4. Classify explicit successes, definitive failures, and indeterminate failures separately.
+5. If there are no explicit successes, perform no disable mutation and emit
+   `NO_HEALTHY_ACCOUNT`.
+6. If at least one account succeeds, quarantine definitive failures subject to the minimum-pool
+   rules below.
+
+Before every latency- or channel-failure quarantine mutation:
 
 1. Build the currently usable account count for every group.
 2. Process candidates deterministically by account ID.
@@ -91,8 +108,12 @@ Before each quarantine mutation:
 - The test endpoint is read as bounded SSE. Time to the first valid `data:` event is the
   first-token measurement.
 - The full test must explicitly report success; a fast error event is still a failed probe.
-- Re-entry writes are deadline-checked, set account status to active, set scheduling to true,
-  and read back both fields.
+- `SLOW_FIRST_TOKEN` re-entry requires explicit success and first-token latency at or below the
+  configured threshold.
+- `CHANNEL_TEST_FAILED` re-entry requires explicit success; latency is recorded but is not its
+  recovery gate.
+- Re-entry writes are deadline-checked, set account status to active, set scheduling to true, and
+  read back both fields.
 - Probe selection is bounded, deterministic, and rotates across quarantined accounts.
 
 ## Operator Visibility
@@ -100,8 +121,8 @@ Before each quarantine mutation:
 - `sub2api_get_status` includes the current latency-quarantine count.
 - A read-only MCP tool lists quarantines with account IDs, group IDs, timestamps, and last probe
   result; credentials and upstream response bodies remain excluded.
-- Administrator notifications distinguish `系统延迟隔离`, `最小池保护`, `继续隔离`, and
-  `延迟恢复回池` from ordinary account errors.
+- Administrator notifications distinguish `系统延迟隔离`, `渠道失败隔离`, `最小池保护`,
+  `渠道无健康账号`, `继续隔离`, and `恢复回池` from ordinary account errors.
 
 ## Commands
 
@@ -115,7 +136,7 @@ Audit:         .\.venv\Scripts\python.exe -m pip_audit
 
 ## Project Structure
 
-- `core/maintenance.py`: minimum-pool quarantine decision.
+- `core/maintenance.py`: failed-channel full sweep and minimum-pool quarantine decision.
 - `core/maintenance_gateway.py`: measured test and verified disable/enable operations.
 - `src/sub2api_mcp/schema.py`: quarantine persistence schema.
 - `src/sub2api_mcp/repository.py`: quarantine transactions and bounded listing.
@@ -125,8 +146,9 @@ Audit:         .\.venv\Scripts\python.exe -m pip_audit
 
 ## Testing Strategy
 
-- Unit: minimum one usable account per group; multi-group protection; human pause exclusion;
-  threshold and re-entry decisions; SSE first-event timing.
+- Unit: failed-channel full sweep; all-failed no-mutation; minimum one usable account per group;
+  multi-group protection; human pause exclusion; threshold and re-entry decisions; SSE
+  first-event timing.
 - Repository: restart durability; idempotent marker writes; verified removal; bounded pagination.
 - Integration: high-latency quarantine, continued slow probe, below-threshold re-entry, and no
   interaction with ordinary error recovery.
@@ -164,6 +186,9 @@ Audit:         .\.venv\Scripts\python.exe -m pip_audit
 6. Human pauses remain unchanged across quarantine and re-entry cycles.
 7. Quarantine state and probe history survive process restarts.
 8. Focused, full, static, audit, compatibility, and production smoke checks pass.
+9. A failed channel tests all eligible group accounts before mutation; one success permits
+   definitive failures to be quarantined, while zero successes emits `NO_HEALTHY_ACCOUNT` and
+   performs no disable mutation.
 
 ## Open Questions
 
