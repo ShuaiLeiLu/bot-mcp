@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Sequence, Set
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -366,6 +366,7 @@ class MaintenanceCoordinator:
         probes: Sequence[ChannelProbe],
         *,
         now: datetime | None = None,
+        excluded_account_ids: Set[str] = frozenset(),
     ) -> MaintenanceReport:
         if not (
             self._policy.channel_account_sweep_enabled
@@ -383,7 +384,7 @@ class MaintenanceCoordinator:
                 if account.bucket == "closed"
             }
             self._disabled_ids.intersection_update(current_closed_ids)
-            adjusted_ids = set(self._disabled_ids)
+            adjusted_ids = set(self._disabled_ids) | set(excluded_account_ids)
             pool = _MinimumUsablePool(accounts)
             adjustments, notices = await self._channel_sweep.run(
                 probes,

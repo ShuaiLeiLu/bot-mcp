@@ -296,3 +296,31 @@ async def test_failed_channel_without_a_unique_group_mapping_fails_closed() -> N
     assert gateway.tested == []
     assert gateway.disabled == []
     assert [notice.code for notice in report.notices] == ["AMBIGUOUS_GROUP_MAPPING"]
+
+
+@pytest.mark.asyncio
+async def test_durable_quarantine_ids_are_excluded_even_if_upstream_state_drifts() -> None:
+    gateway = Gateway(
+        accounts=[
+            _account("1"),
+            _account("2", bucket="error", status="error"),
+        ],
+        tests={
+            "1": AccountTestResult("1", success=True, definitive_failure=False),
+            "2": AccountTestResult("2", success=False, definitive_failure=True),
+        },
+    )
+    coordinator = MaintenanceServiceFactory.create(
+        gateway,
+        MaintenancePolicy(channel_account_sweep_enabled=True),
+    )
+
+    report = await coordinator.run(
+        [_probe(available_count=1)],
+        now=datetime(2026, 8, 25, 2, tzinfo=UTC),
+        excluded_account_ids=frozenset({"2"}),
+    )
+
+    assert gateway.tested == ["1"]
+    assert gateway.disabled == []
+    assert report.adjustments == ()
