@@ -162,7 +162,7 @@ Status: Plan proposed for approval
 - [x] GR12: Apply bounded scheduling proposals in Guardian.
 - [x] GR13: Add direct scheduling/recovery REST and MCP controls.
 - [x] GR14: Update the light Guardian UI for direct mode.
-- [ ] GR15: Remove legacy Scheduler recovery orchestration and periodic window/rotation.
+- [x] GR15: Remove legacy Scheduler recovery orchestration and periodic window/rotation.
 - [ ] GR16: Complete notifications, metrics, runbook and changelog.
 - [ ] GR17: Pass replay, full tests, lint, types, audit, Docker and health gates.
 - [ ] GR18: Back up, deploy enabled, verify production and complete rollback drill.
