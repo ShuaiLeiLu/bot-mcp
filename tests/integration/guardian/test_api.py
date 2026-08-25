@@ -146,7 +146,8 @@ def test_guardian_ui_and_read_api_authentication(tmp_path: Path) -> None:
     assert unauthorized.status_code == 401
     assert unauthorized.json()["ok"] is False
     assert overview.status_code == 200
-    assert overview.json()["data"]["observe_only"] is True
+    assert overview.json()["data"]["enabled"] is False
+    assert overview.json()["data"]["scheduling_mode"] == "DIRECT"
 
 
 def test_guardian_ui_uses_the_persisted_light_design_system(tmp_path: Path) -> None:
@@ -217,7 +218,7 @@ def test_policy_revision_and_writeback_safety_gate(tmp_path: Path) -> None:
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "POLICY_REVISION_CONFLICT"
     assert unsafe.status_code == 409
-    assert unsafe.json()["error"]["code"] == "WRITEBACK_NOT_APPROVED"
+    assert unsafe.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
 
 
 def test_dry_run_populates_groups_channels_events_and_manual_pause(
@@ -472,12 +473,12 @@ def test_v2_sampling_reads_and_rollout_controls_are_guarded(tmp_path: Path) -> N
     assert missing_key.status_code == 422
     assert missing_key.json()["error"]["code"] == "VALIDATION_ERROR"
     assert denied.status_code == 409
-    assert denied.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
-    assert advanced.status_code == 200
-    assert advanced.json()["data"]["policy"]["rollout"]["stage"] == "LOAD_FACTOR"
-    assert stopped.status_code == 200
-    assert stopped.json()["data"]["policy"]["rollout"]["stage"] == "OBSERVE"
-    assert stopped.json()["data"]["policy"]["observe_only"] is True
+    assert denied.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
+    assert advanced.status_code == 409
+    assert advanced.json()["ok"] is False
+    assert advanced.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
+    assert stopped.status_code == 409
+    assert stopped.json()["error"]["code"] == "DEPRECATED_GUARDIAN_CONTROL"
 
 
 def test_field_ownership_can_be_explicitly_transferred_with_audit_guards(

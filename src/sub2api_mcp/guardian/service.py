@@ -20,7 +20,6 @@ from .contracts import (
     AccountRecoveryOwner,
     AccountRecoveryRunStatus,
     AccountRecoveryRunTrigger,
-    AutoApplyPolicy,
     ChannelPolicyOverride,
     GroupPolicyOverride,
     GuardianAccountRecoveryRecord,
@@ -29,7 +28,6 @@ from .contracts import (
     GuardianFieldOwner,
     GuardianFieldOwnership,
     GuardianPolicy,
-    GuardianRolloutStage,
     ManualControl,
 )
 from .engine import GuardianEngine
@@ -129,12 +127,18 @@ class GuardianService:
         return {
             "policy": policy.model_dump(mode="json"),
             "defaults": GuardianPolicy().model_dump(mode="json"),
-            "writeback_approved": False,
+            "scheduling_enabled": policy.enabled,
         }
 
     async def update_policy(
         self, patch: dict[str, Any], *, expected_revision: int
     ) -> dict[str, Any]:
+        deprecated = {"observe_only", "auto_apply", "rollout"}.intersection(patch)
+        if deprecated:
+            raise ServiceError(
+                "DEPRECATED_GUARDIAN_CONTROL",
+                "Observe mode and rollout controls were removed; update enabled instead",
+            )
         current = await self.repository.get_policy()
         merged = _merge_dict(current.model_dump(mode="json"), patch)
         merged["revision"] = current.revision
@@ -142,17 +146,6 @@ class GuardianService:
             candidate = GuardianPolicy.model_validate(merged)
         except ValidationError:
             raise
-        if not candidate.observe_only or any(
-            (
-                candidate.auto_apply.schedulable,
-                candidate.auto_apply.priority,
-                candidate.auto_apply.load_factor,
-            )
-        ):
-            raise ServiceError(
-                "WRITEBACK_NOT_APPROVED",
-                "Production writeback has not been explicitly approved",
-            )
         saved = await self.repository.update_policy(candidate, expected_revision=expected_revision)
         await self.repository.add_event(
             event_type="POLICY_UPDATED",
@@ -162,7 +155,7 @@ class GuardianService:
         )
         return {
             "policy": saved.model_dump(mode="json"),
-            "writeback_approved": False,
+            "scheduling_enabled": saved.enabled,
         }
 
     async def overview(self) -> dict[str, Any]:
@@ -173,11 +166,11 @@ class GuardianService:
         runs = await self.repository.list_runs(limit=1)
         return {
             "enabled": policy.enabled,
-            "observe_only": policy.observe_only,
+            "scheduling_mode": policy.scheduling_mode.value,
             "background_task_running": self._task is not None and not self._task.done(),
             "scan_interval_seconds": policy.scan_interval_seconds,
             "last_run": runs[0] if runs else None,
-            "writeback_adapter": "disabled",
+            "writeback_adapter": "verified_account_fields",
         }
 
     async def run_once(
@@ -222,6 +215,11 @@ class GuardianService:
                 "Guardian account recovery operations are unavailable",
             )
         policy = await self.repository.get_policy()
+        if not policy.enabled:
+            raise ServiceError(
+                "GUARDIAN_DISABLED",
+                "Guardian scheduling is disabled",
+            )
         run = await self._account_recovery.execute(
             snapshot_id=snapshot_id,
             trigger=trigger,
@@ -241,7 +239,8 @@ class GuardianService:
     async def prepare_recovery_job(self) -> dict[str, Any]:
         policy = await self.repository.get_policy()
         if (
-            not policy.account_recovery.enabled
+            not policy.enabled
+            or not policy.account_recovery.enabled
             or policy.account_recovery.owner is not AccountRecoveryOwner.GUARDIAN
         ):
             raise ServiceError(
@@ -345,7 +344,8 @@ class GuardianService:
             return
         policy = await self.repository.get_policy()
         if (
-            not policy.account_recovery.enabled
+            not policy.enabled
+            or not policy.account_recovery.enabled
             or policy.account_recovery.owner is not AccountRecoveryOwner.GUARDIAN
         ):
             return
@@ -645,7 +645,7 @@ class GuardianService:
                         f"评估渠道：{result.get('channels_evaluated', 0)}",
                         f"状态变化：{result.get('state_transitions', 0)}",
                         f"预期差异：{result.get('expected_changes', 0)}",
-                        f"实际写入：{result.get('writes_applied', 0)}（观察模式）",
+                        f"实际写入：{result.get('writes_applied', 0)}",
                         *detail_lines,
                     ]
                 )
@@ -1022,70 +1022,18 @@ class GuardianService:
         confirm: bool,
         expected_revision: int,
     ) -> dict[str, Any]:
-        if not confirm:
-            raise ServiceError("CONFIRMATION_REQUIRED", "Rollout advance requires confirm=true")
-        current = await self.repository.get_policy()
-        stages = list(GuardianRolloutStage)
-        index = stages.index(current.rollout.stage)
-        if index >= len(stages) - 1:
-            raise ServiceError("ROLLOUT_COMPLETE", "Guardian rollout is already at the final stage")
-        updated = current.model_copy(
-            update={
-                "rollout": current.rollout.model_copy(update={"stage": stages[index + 1]})
-            }
+        del confirm, expected_revision
+        raise ServiceError(
+            "DEPRECATED_GUARDIAN_CONTROL",
+            "Rollout controls were removed; update policy.enabled instead",
         )
-        saved = await self.repository.update_policy(
-            updated,
-            expected_revision=expected_revision,
-        )
-        await self.repository.add_event(
-            event_type="ROLLOUT_ADVANCED",
-            severity="WARNING",
-            message=f"Guardian rollout advanced to {saved.rollout.stage.value}",
-            details={"stage": saved.rollout.stage.value},
-        )
-        await self._notify_control_event(
-            "Guardian 灰度阶段已变更",
-            [
-                f"阶段：{current.rollout.stage.value} → {saved.rollout.stage.value}",
-                "实际写回：否（生产写回适配器仍未批准）",
-                "原因：管理员确认推进灰度阶段",
-            ],
-            coalesce_key="guardian:rollout",
-        )
-        return {"policy": saved.model_dump(mode="json")}
 
     async def stop_writeback(self, *, expected_revision: int) -> dict[str, Any]:
-        current = await self.repository.get_policy()
-        updated = current.model_copy(
-            update={
-                "observe_only": True,
-                "auto_apply": AutoApplyPolicy(),
-                "rollout": current.rollout.model_copy(
-                    update={"stage": GuardianRolloutStage.OBSERVE}
-                ),
-            }
+        del expected_revision
+        raise ServiceError(
+            "DEPRECATED_GUARDIAN_CONTROL",
+            "Observe-mode stop was removed; update policy.enabled to false instead",
         )
-        saved = await self.repository.update_policy(
-            updated,
-            expected_revision=expected_revision,
-        )
-        await self.repository.add_event(
-            event_type="ROLLOUT_STOPPED",
-            severity="WARNING",
-            message="Guardian writeback stopped and returned to observe mode",
-            details={"stage": GuardianRolloutStage.OBSERVE.value},
-        )
-        await self._notify_control_event(
-            "Guardian 写回已停止",
-            [
-                f"阶段：{current.rollout.stage.value} → {GuardianRolloutStage.OBSERVE.value}",
-                "实际写回：否",
-                "原因：管理员触发紧急停止",
-            ],
-            coalesce_key="guardian:rollout",
-        )
-        return {"policy": saved.model_dump(mode="json")}
 
     async def restore_preview(self) -> dict[str, Any]:
         return await self.repository.restore_preview()

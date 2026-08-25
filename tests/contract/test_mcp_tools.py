@@ -331,6 +331,7 @@ async def test_recovery_tool_keeps_job_envelope_but_uses_guardian_snapshot(
     await server.guardian.repository.update_policy(
         policy.model_copy(
             update={
+                "enabled": True,
                 "account_recovery": policy.account_recovery.model_copy(
                     update={"enabled": True, "owner": AccountRecoveryOwner.GUARDIAN}
                 )
@@ -385,6 +386,7 @@ async def test_recovery_tool_rejects_a_latest_snapshot_with_only_normal_accounts
     await server.guardian.repository.update_policy(
         policy.model_copy(
             update={
+                "enabled": True,
                 "account_recovery": policy.account_recovery.model_copy(
                     update={"enabled": True, "owner": AccountRecoveryOwner.GUARDIAN}
                 )
@@ -456,7 +458,9 @@ async def test_read_tools_redact_internal_account_and_platform_ids(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_guardian_tools_keep_writeback_disabled(tmp_path: Path) -> None:
+async def test_guardian_tool_reports_direct_mode_without_unplanned_writes(
+    tmp_path: Path,
+) -> None:
     server = await _server(tmp_path)
     principal = Principal("admin", frozenset({"sub2api:admin"}))
 
@@ -469,4 +473,4 @@ async def test_guardian_tools_keep_writeback_disabled(tmp_path: Path) -> None:
 
     assert run["ok"] is True
     assert run["data"]["result"]["writes_applied"] == 0
-    assert run["data"]["result"]["observe_only"] is True
+    assert run["data"]["result"]["scheduling_mode"] == "DIRECT"
