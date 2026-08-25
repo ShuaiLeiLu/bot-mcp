@@ -157,6 +157,30 @@ async def test_enabled_write_is_applied_once_and_is_idempotent(tmp_path: Path) -
     assert ownership.last_guardian_value == 80
 
 
+@pytest.mark.asyncio
+async def test_emergency_stop_blocks_new_write_but_replays_completed_result(
+    tmp_path: Path,
+) -> None:
+    repository = await _repository(tmp_path)
+    writer = FakeWriter()
+    service = GuardianWritebackService(repository, writer)
+    await _set_enabled(repository)
+    proposal = _proposal()
+
+    applied = await service.apply(proposal, policy=GuardianPolicy(enabled=True))
+    await _set_enabled(repository, False)
+    replayed = await service.apply(proposal, policy=GuardianPolicy(enabled=True))
+    blocked = await service.apply(
+        _proposal(key="after-stop", desired=60),
+        policy=GuardianPolicy(enabled=True),
+    )
+
+    assert replayed == applied
+    assert blocked.outcome is GuardianWriteOutcome.BLOCKED
+    assert blocked.reason == "guardian_disabled"
+    assert writer.calls == [("42", GuardianFieldName.LOAD_FACTOR, 80)]
+
+
 @pytest.mark.parametrize(
     ("field_name", "current", "desired"),
     [

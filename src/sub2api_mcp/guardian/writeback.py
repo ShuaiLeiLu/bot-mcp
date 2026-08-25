@@ -45,13 +45,6 @@ class GuardianWritebackService:
         *,
         policy: GuardianPolicy,
     ) -> GuardianWriteDecision:
-        live_policy = await self.repository.get_policy()
-        if not live_policy.enabled:
-            return await self._finish(
-                proposal,
-                GuardianWriteOutcome.BLOCKED,
-                "guardian_disabled",
-            )
         operation_subject = (
             f"{proposal.channel_id}:{proposal.account_id}:{proposal.field_name.value}"
         )
@@ -62,6 +55,13 @@ class GuardianWritebackService:
         )
         if saved is not None:
             return GuardianWriteDecision.model_validate(saved)
+        live_policy = await self.repository.get_policy()
+        if not live_policy.enabled:
+            return await self._finish(
+                proposal,
+                GuardianWriteOutcome.BLOCKED,
+                "guardian_disabled",
+            )
 
         ownership = observe_field_value(
             await self.repository.get_field_ownership(
