@@ -9,7 +9,6 @@ from .contracts import (
     GuardianFieldName,
     GuardianFieldOwner,
     GuardianPolicy,
-    GuardianRolloutStage,
     GuardianWriteDecision,
     GuardianWriteOutcome,
     GuardianWriteProposal,
@@ -25,19 +24,6 @@ class GuardianFieldWriter(Protocol):
         field_name: GuardianFieldName,
         value: object,
     ) -> int | bool: ...
-
-
-_STAGE_RANK = {
-    GuardianRolloutStage.OBSERVE: 0,
-    GuardianRolloutStage.LOAD_FACTOR: 1,
-    GuardianRolloutStage.PRIORITY: 2,
-    GuardianRolloutStage.SCHEDULABLE: 3,
-}
-_FIELD_RANK = {
-    GuardianFieldName.LOAD_FACTOR: 1,
-    GuardianFieldName.PRIORITY: 2,
-    GuardianFieldName.SCHEDULABLE: 3,
-}
 
 
 class GuardianWritebackService:
@@ -88,17 +74,11 @@ class GuardianWritebackService:
                 GuardianWriteOutcome.NO_CHANGE,
                 "already_at_target",
             )
-        if policy.observe_only:
-            return await self._finish(
-                proposal,
-                GuardianWriteOutcome.DRY_RUN,
-                "observe_only",
-            )
-        if not self._field_is_enabled(proposal.field_name, policy):
+        if not policy.enabled:
             return await self._finish(
                 proposal,
                 GuardianWriteOutcome.BLOCKED,
-                "field_write_not_approved",
+                "guardian_disabled",
             )
         if self._writer is None:
             return await self._finish(
@@ -138,16 +118,6 @@ class GuardianWritebackService:
             GuardianWriteOutcome.APPLIED,
             proposal.reason,
         )
-
-    @staticmethod
-    def _field_is_enabled(field_name: GuardianFieldName, policy: GuardianPolicy) -> bool:
-        if _STAGE_RANK[policy.rollout.stage] < _FIELD_RANK[field_name]:
-            return False
-        return {
-            GuardianFieldName.LOAD_FACTOR: policy.auto_apply.load_factor,
-            GuardianFieldName.PRIORITY: policy.auto_apply.priority,
-            GuardianFieldName.SCHEDULABLE: policy.auto_apply.schedulable,
-        }[field_name]
 
     async def _finish(
         self,

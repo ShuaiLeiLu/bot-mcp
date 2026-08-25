@@ -19,7 +19,6 @@ from sub2api_mcp.guardian.contracts import (
     GuardianFieldOwnership,
     GuardianFreshness,
     GuardianPolicy,
-    GuardianRolloutStage,
     GuardianSampleSource,
     GuardianSchedulingMode,
     GuardianScoreV2,
@@ -27,13 +26,14 @@ from sub2api_mcp.guardian.contracts import (
 )
 
 
-def test_policy_defaults_to_observe_only_and_safe_limits() -> None:
+def test_policy_defaults_to_direct_mode_with_deprecated_controls_hidden() -> None:
     policy = GuardianPolicy()
 
-    assert policy.observe_only is True
-    assert policy.auto_apply.schedulable is False
-    assert policy.auto_apply.priority is False
-    assert policy.auto_apply.load_factor is False
+    dumped = policy.model_dump(mode="json")
+    assert policy.enabled is False
+    assert "observe_only" not in dumped
+    assert "auto_apply" not in dumped
+    assert "rollout" not in dumped
     assert policy.breaker.max_switch_per_round == 1
     assert policy.breaker.min_pool_size == 1
     assert policy.probe.concurrency == 4
@@ -45,7 +45,6 @@ def test_policy_defaults_to_observe_only_and_safe_limits() -> None:
     assert policy.confidence.degrade_min == 0.60
     assert policy.confidence.weight_min == 0.75
     assert policy.confidence.fuse_min == 0.85
-    assert policy.rollout.stage is GuardianRolloutStage.OBSERVE
     assert policy.recovery_budget.enabled is False
     assert policy.scheduling_mode is GuardianSchedulingMode.DIRECT
 
@@ -78,16 +77,12 @@ def test_v1_policy_payload_loads_with_safe_v2_defaults() -> None:
 
     assert policy.revision == 3
     assert policy.enabled is True
-    assert policy.observe_only is True
     assert policy.probe.enabled is True
     assert policy.sampling.mode is SamplingMode.SHARED
-    assert policy.rollout.stage is GuardianRolloutStage.OBSERVE
-    assert policy.auto_apply.load_factor is False
-    assert policy.auto_apply.priority is False
-    assert policy.auto_apply.schedulable is False
-    assert policy.account_recovery.enabled is False
-    assert policy.account_recovery.owner is AccountRecoveryOwner.SCHEDULER
+    assert policy.account_recovery.enabled is True
+    assert policy.account_recovery.owner is AccountRecoveryOwner.GUARDIAN
     assert policy.scheduling_mode is GuardianSchedulingMode.DIRECT
+    assert "observe_only" not in policy.model_dump(mode="json")
 
 
 def test_conditional_account_recovery_contracts_are_strict() -> None:
@@ -111,8 +106,8 @@ def test_conditional_account_recovery_contracts_are_strict() -> None:
         schedulable=False,
     )
 
-    assert policy.enabled is False
-    assert policy.owner is AccountRecoveryOwner.SCHEDULER
+    assert policy.enabled is True
+    assert policy.owner is AccountRecoveryOwner.GUARDIAN
     assert policy.trigger is AccountRecoveryTrigger.CONDITIONAL
     assert policy.max_concurrency == 1
     assert policy.max_accounts_per_episode == 1000
@@ -146,8 +141,8 @@ def test_conditional_account_recovery_contracts_are_strict() -> None:
         AccountRecoveryPolicy.model_validate({"trigger": "PERIODIC_ALL"})
     with pytest.raises(ValidationError):
         AccountRecoveryPolicy.model_validate({"max_concurrency": 0})
-    with pytest.raises(ValidationError):
-        GuardianPolicy.model_validate({"scheduling_mode": "OBSERVE"})
+    migrated = GuardianPolicy.model_validate({"scheduling_mode": "OBSERVE"})
+    assert migrated.scheduling_mode is GuardianSchedulingMode.DIRECT
 
 
 def test_v2_evidence_and_field_ownership_contracts_are_strict() -> None:

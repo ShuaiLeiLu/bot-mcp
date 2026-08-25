@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -455,8 +456,8 @@ class RecoveryProbeBudgetPolicy(StrictModel):
 
 
 class AccountRecoveryPolicy(StrictModel):
-    enabled: bool = False
-    owner: AccountRecoveryOwner = AccountRecoveryOwner.SCHEDULER
+    enabled: bool = True
+    owner: AccountRecoveryOwner = AccountRecoveryOwner.GUARDIAN
     trigger: AccountRecoveryTrigger = AccountRecoveryTrigger.CONDITIONAL
     max_concurrency: int = Field(default=1, ge=1, le=8)
     max_accounts_per_episode: int = Field(default=1000, ge=1, le=10_000)
@@ -501,10 +502,10 @@ class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
     enabled: bool = False
     scheduling_mode: GuardianSchedulingMode = GuardianSchedulingMode.DIRECT
-    observe_only: bool = True
+    observe_only: bool = Field(default=True, exclude=True)
     scan_interval_seconds: int = Field(default=15, ge=5, le=3600)
     strategy: GuardianStrategy = GuardianStrategy.PRICE
-    auto_apply: AutoApplyPolicy = Field(default_factory=AutoApplyPolicy)
+    auto_apply: AutoApplyPolicy = Field(default_factory=AutoApplyPolicy, exclude=True)
     scoring: ScoringPolicy = Field(default_factory=ScoringPolicy)
     breaker: BreakerPolicy = Field(default_factory=BreakerPolicy)
     degrade: DegradePolicy = Field(default_factory=DegradePolicy)
@@ -521,8 +522,31 @@ class GuardianPolicy(StrictModel):
     account_recovery: AccountRecoveryPolicy = Field(
         default_factory=AccountRecoveryPolicy
     )
-    rollout: RolloutPolicy = Field(default_factory=RolloutPolicy)
+    rollout: RolloutPolicy = Field(default_factory=RolloutPolicy, exclude=True)
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_controls(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        migrated: dict[str, object] = dict(cast(dict[str, object], value))
+        migrated["scheduling_mode"] = GuardianSchedulingMode.DIRECT.value
+        raw_recovery = migrated.get("account_recovery")
+        account_recovery: dict[str, object] = (
+            dict(cast(dict[str, object], raw_recovery))
+            if isinstance(raw_recovery, dict)
+            else {}
+        )
+        account_recovery.update(
+            {
+                "enabled": True,
+                "owner": AccountRecoveryOwner.GUARDIAN.value,
+                "trigger": AccountRecoveryTrigger.CONDITIONAL.value,
+            }
+        )
+        migrated["account_recovery"] = account_recovery
+        return migrated
 
 
 class GuardianSample(StrictModel):
