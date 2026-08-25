@@ -169,8 +169,15 @@ class SchedulerService:
         self._latest_probe = result
         if result.guardian_snapshot is not None and result.captured_at is not None:
             try:
+                guardian_payload = {
+                    **result.guardian_snapshot,
+                    "accounts": [
+                        item.model_dump(mode="json")
+                        for item in result.account_observations
+                    ],
+                }
                 await self._repository.publish_guardian_snapshot(
-                    result.guardian_snapshot,
+                    guardian_payload,
                     captured_at=result.captured_at,
                 )
             except Exception:

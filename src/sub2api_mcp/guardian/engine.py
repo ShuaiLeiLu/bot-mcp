@@ -211,10 +211,18 @@ class GuardianEngine:
             snapshot = UpstreamProbeSnapshot.model_validate(raw_snapshot)
             snapshot_id = None
             captured_at = None
+            account_observations_ingested = 0
             if claimed_snapshot is not None:
                 snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
                 captured_at = datetime.fromisoformat(
                     cast(str, claimed_snapshot["captured_at"]).replace("Z", "+00:00")
+                )
+                account_observations_ingested = (
+                    await self.repository.upsert_account_observations(
+                        snapshot_id=snapshot_id,
+                        observed_at=captured_at,
+                        observations=list(snapshot.accounts),
+                    )
                 )
             result = await self._evaluate(
                 snapshot,
@@ -229,6 +237,7 @@ class GuardianEngine:
             result["snapshot_id"] = (
                 claimed_snapshot["snapshot_id"] if claimed_snapshot is not None else None
             )
+            result["account_observations_ingested"] = account_observations_ingested
             if claimed_snapshot is not None:
                 snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
                 if cancelled:

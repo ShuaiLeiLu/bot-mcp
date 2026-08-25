@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from sub2api_mcp.contracts import (
+    AccountObservation,
+    AccountObservationStatus,
     AccountQuarantineIntent,
     AccountQuarantineReason,
     AccountQuarantineRecord,
@@ -250,6 +252,14 @@ async def test_scheduler_publishes_one_canonical_guardian_snapshot_without_extra
                 }
             ],
         },
+        account_observations=(
+            AccountObservation(
+                account_id="997",
+                group_ids=("3",),
+                status=AccountObservationStatus.ERROR,
+                schedulable=False,
+            ),
+        ),
         captured_at=captured_at,
     )
     adapter = FakeSub2APIAdapter([result, result])
@@ -270,6 +280,12 @@ async def test_scheduler_publishes_one_canonical_guardian_snapshot_without_extra
 
     assert adapter.calls == 2
     assert await guardian_repository.pending_input_snapshot_count() == 1
+    claimed = await guardian_repository.claim_input_snapshot(
+        "scheduler-test",
+        lease_seconds=30,
+    )
+    assert claimed is not None
+    assert claimed["payload"]["accounts"][0]["account_id"] == "997"
 
 
 @pytest.mark.asyncio

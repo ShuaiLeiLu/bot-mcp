@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from sub2api_mcp.contracts import ProbeResult
+from sub2api_mcp.contracts import AccountObservation, AccountObservationStatus, ProbeResult
 from sub2api_mcp.guardian.contracts import GuardianEvidenceBucket, GuardianSampleSource
 from sub2api_mcp.guardian.engine import GuardianEngine
 from sub2api_mcp.guardian.repository import GuardianRepository
@@ -101,8 +101,19 @@ async def test_shared_snapshot_is_consumed_once_without_guardian_upstream_calls(
     await repository.initialize()
     seed = await FakeOperations().probe()
     captured_at = datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+    shared_payload = {
+        **seed.snapshot,
+        "accounts": [
+            AccountObservation(
+                account_id="997",
+                group_ids=("3",),
+                status=AccountObservationStatus.ERROR,
+                schedulable=False,
+            ).model_dump(mode="json")
+        ],
+    }
     await scheduler_repository.publish_guardian_snapshot(
-        seed.snapshot,
+        shared_payload,
         captured_at=captured_at,
     )
     operations = FakeOperations()
@@ -120,12 +131,19 @@ async def test_shared_snapshot_is_consumed_once_without_guardian_upstream_calls(
 
     assert first["result"]["channels_evaluated"] == 2
     assert first["result"]["snapshot_id"]
+    assert first["result"]["account_observations_ingested"] == 1
     assert channel is not None
     assert channel["score"] == 100
     assert channel["confidence"] == pytest.approx(0.46, abs=1e-12)
     assert channel["freshness_state"] == "FRESH"
     assert channel["warmup_buckets"] == 1
     assert channel["details"]["evidence_sources"] == ["SHARED_MONITOR"]
+    assert [
+        item.account_id
+        for item in await reopened.list_account_observations(
+            first["result"]["snapshot_id"]
+        )
+    ] == ["997"]
     assert second["result"]["no_new_evidence"] is True
     assert third["result"]["no_new_evidence"] is True
     assert operations.calls == 0

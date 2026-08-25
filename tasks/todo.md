@@ -151,7 +151,7 @@ Status: Plan proposed for approval
 - [x] GR1: Add direct-scheduling and conditional-recovery contracts.
 - [x] GR2: Add account observation, error-episode, run and ledger persistence.
 - [x] GR3: Expose sanitized account inventory from the existing probe with zero extra list calls.
-- [ ] GR4: Publish/consume account observations exactly once.
+- [x] GR4: Publish/consume account observations exactly once.
 - [ ] GR5: Select bad-state accounts and channel-error groups with manual-pause protection.
 - [ ] GR6: Add typed account test, verified enable and verified disable operations.
 - [ ] GR7: Execute and persist one Guardian-owned account recovery run.

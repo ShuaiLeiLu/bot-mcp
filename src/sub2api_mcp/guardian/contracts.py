@@ -688,6 +688,10 @@ class UpstreamProbeEntry(StrictModel):
 class UpstreamProbeSnapshot(StrictModel):
     version: int = Field(default=1, ge=1, le=1)
     entries: tuple[UpstreamProbeEntry, ...] = Field(max_length=10_000)
+    accounts: tuple[GuardianAccountObservation, ...] = Field(
+        default=(),
+        max_length=10_000,
+    )
 
 
 class GroupPolicyOverride(StrictModel):
