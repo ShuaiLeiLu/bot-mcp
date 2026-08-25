@@ -48,3 +48,31 @@ def classify_sample(
         score=policy.event_scores[event],
         safe_message=safe,
     )
+
+
+def classify_monitor_status(
+    *,
+    status: str,
+    latency_ms: int | None,
+    available_count: int | None,
+    policy: ScoringPolicy,
+) -> GuardianEventType:
+    """Classify one aggregate monitor without confusing slow timeout with pool outage."""
+    if status == "operational":
+        return (
+            GuardianEventType.SLOW_TTFB
+            if latency_ms is not None and latency_ms > policy.slow_ttfb_ms
+            else GuardianEventType.PERFECT
+        )
+    if status == "degraded":
+        return GuardianEventType.SLOW_TTFB
+    if status in {"failed", "error"}:
+        if (
+            latency_ms is not None
+            and latency_ms >= policy.slow_ttfb_ms
+            and available_count is not None
+            and available_count > 0
+        ):
+            return GuardianEventType.SLOW_TTFB
+        return GuardianEventType.PROBE_FAIL
+    return GuardianEventType.UPSTREAM_UNKNOWN

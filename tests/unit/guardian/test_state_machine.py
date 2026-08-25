@@ -199,3 +199,19 @@ def test_fused_channel_cannot_recover_before_cooldown_expires() -> None:
 
     assert decision.health is GuardianHealth.FUSED
     assert decision.reason == "fused_cooldown"
+
+
+def test_fused_slow_channel_with_usable_pool_returns_to_degraded_after_cooldown() -> None:
+    decision = decide_channel_state(
+        _input(
+            current_health=GuardianHealth.FUSED,
+            score=20,
+            recent_events=[GuardianEventType.SLOW_TTFB],
+            group_available_count=3,
+            fused_until=NOW - timedelta(seconds=1),
+        )
+    )
+
+    assert decision.health is GuardianHealth.DEGRADED
+    assert decision.should_schedule is True
+    assert decision.reason == "usable_pool_slow_response"

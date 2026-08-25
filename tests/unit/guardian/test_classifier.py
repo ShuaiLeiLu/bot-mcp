@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sub2api_mcp.guardian.classifier import classify_sample
+from sub2api_mcp.guardian.classifier import classify_monitor_status, classify_sample
 from sub2api_mcp.guardian.contracts import GuardianEventType, ScoringPolicy
 
 
@@ -75,3 +75,30 @@ def test_success_text_cannot_be_misclassified_by_error_keywords() -> None:
     )
 
     assert result.event_type is GuardianEventType.PERFECT
+
+
+def test_slow_monitor_error_with_usable_accounts_is_degraded_not_failed() -> None:
+    policy = ScoringPolicy(slow_ttfb_ms=30_000)
+
+    slow_usable = classify_monitor_status(
+        status="error",
+        latency_ms=30_001,
+        available_count=3,
+        policy=policy,
+    )
+    fast_error = classify_monitor_status(
+        status="error",
+        latency_ms=500,
+        available_count=3,
+        policy=policy,
+    )
+    empty_pool = classify_monitor_status(
+        status="error",
+        latency_ms=30_001,
+        available_count=0,
+        policy=policy,
+    )
+
+    assert slow_usable is GuardianEventType.SLOW_TTFB
+    assert fast_error is GuardianEventType.PROBE_FAIL
+    assert empty_pool is GuardianEventType.PROBE_FAIL

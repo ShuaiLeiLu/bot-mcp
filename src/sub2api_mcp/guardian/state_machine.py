@@ -112,6 +112,17 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
                 can_auto_recover=value.recovery.enabled,
                 reason="fused_cooldown",
             )
+        if (
+            value.recent_events[:1] == (GuardianEventType.SLOW_TTFB,)
+            and value.group_available_count > value.breaker.min_pool_size
+        ):
+            return ChannelDecision(
+                health=GuardianHealth.DEGRADED,
+                should_schedule=True,
+                should_probe=False,
+                can_auto_recover=True,
+                reason="usable_pool_slow_response",
+            )
         held_long_enough = bool(
             value.healthy_since is not None
             and (value.now - value.healthy_since).total_seconds() >= value.recovery.hold_seconds

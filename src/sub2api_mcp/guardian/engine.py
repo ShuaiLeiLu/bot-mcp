@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast, runtime_checkable
 
 from ..contracts import ProbeResult
+from .classifier import classify_monitor_status
 from .contracts import (
     AccountRecoveryOwner,
     BreakerPolicy,
@@ -59,18 +60,6 @@ class GuardianSchedulingOperations(GuardianFieldWriter, Protocol):
 @runtime_checkable
 class GuardianSnapshotOperations(Protocol):
     async def guardian_snapshot(self) -> dict[str, Any]: ...
-
-
-def _event_for(entry: UpstreamProbeEntry, policy: GuardianPolicy) -> GuardianEventType:
-    if entry.status == "operational":
-        if entry.latency_ms is not None and entry.latency_ms > policy.scoring.slow_ttfb_ms:
-            return GuardianEventType.SLOW_TTFB
-        return GuardianEventType.PERFECT
-    if entry.status == "degraded":
-        return GuardianEventType.SLOW_TTFB
-    if entry.status in {"failed", "error"}:
-        return GuardianEventType.PROBE_FAIL
-    return GuardianEventType.UPSTREAM_UNKNOWN
 
 
 def _stored_datetime(details: dict[str, Any], key: str) -> datetime | None:
@@ -397,7 +386,12 @@ class GuardianEngine:
             should_monitor = manual_control is not ManualControl.EXCLUDED and not (
                 scope_decision is not None and scope_decision.health is GuardianHealth.EXCLUDED
             )
-            event_type = _event_for(entry, policy)
+            event_type = classify_monitor_status(
+                status=entry.status,
+                latency_ms=entry.latency_ms,
+                available_count=entry.available_count,
+                policy=policy.scoring,
+            )
             if should_monitor:
                 if snapshot_id is not None and captured_at is not None:
                     bucket_timestamp = int(captured_at.timestamp())
