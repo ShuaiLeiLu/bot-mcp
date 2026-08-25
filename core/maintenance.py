@@ -286,22 +286,13 @@ class _AccountLogGuardService:
             raise ValueError("maintenance time must be timezone-aware")
         end = now.astimezone(UTC)
         start = end - timedelta(minutes=self._policy.log_window_minutes)
-        usage_logs, request_logs = await asyncio.gather(
-            self._gateway.fetch_recent_usage_logs(start=start, end=end),
-            self._gateway.fetch_recent_request_logs(start=start, end=end),
-        )
+        usage_logs = await self._gateway.fetch_recent_usage_logs(start=start, end=end)
         account_by_id = {
             account.account_id: account
             for account in accounts
             if account.bucket != "closed"
         }
-        error_counts: dict[str, int] = {}
         slow_counts: dict[str, int] = {}
-        for record in request_logs:
-            if not self._is_account_error(record, start=start, end=end):
-                continue
-            if record.account_id in account_by_id:
-                error_counts[record.account_id] = error_counts.get(record.account_id, 0) + 1
         for record in usage_logs:
             if (
                 record.account_id in account_by_id
@@ -313,17 +304,14 @@ class _AccountLogGuardService:
 
         adjustments: list[MaintenanceAdjustment] = []
         notices: list[MaintenanceNotice] = []
-        for account_id in sorted(set(error_counts) | set(slow_counts), key=int):
-            reason: str | None = None
-            if error_counts.get(account_id, 0) >= self._policy.log_error_threshold:
-                reason = "repeated_errors"
-            elif (
-                slow_counts.get(account_id, 0)
-                >= self._policy.log_slow_first_token_threshold
+        for account_id in sorted(slow_counts, key=int):
+            if (
+                slow_counts[account_id]
+                < self._policy.log_slow_first_token_threshold
+                or account_id in already_adjusted
             ):
-                reason = "slow_first_token"
-            if reason is None or account_id in already_adjusted:
                 continue
+            reason = "slow_first_token"
             account = account_by_id[account_id]
             if not pool.can_disable(account):
                 notices.append(
@@ -346,34 +334,10 @@ class _AccountLogGuardService:
                         reason=reason,
                         group_ids=account.group_ids,
                         threshold_ms=self._policy.slow_first_token_ms,
-                        observed_count=(
-                            error_counts.get(account_id, 0)
-                            if reason == "repeated_errors"
-                            else slow_counts.get(account_id, 0)
-                        ),
+                        observed_count=slow_counts[account_id],
                     )
                 )
         return adjustments, notices
-
-    @staticmethod
-    def _is_account_error(
-        record: RequestLogRecord,
-        *,
-        start: datetime,
-        end: datetime,
-    ) -> bool:
-        if (
-            record.kind != "error"
-            or record.account_id is None
-            or not start <= record.created_at.astimezone(UTC) < end
-        ):
-            return False
-        status_code = record.status_code or 0
-        if status_code in {429, 529}:
-            return False
-        if record.phase in {"upstream", "account_auth"}:
-            return True
-        return status_code >= 500
 
 
 class MaintenanceCoordinator:

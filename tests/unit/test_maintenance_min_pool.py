@@ -24,6 +24,9 @@ class Gateway:
     usage_logs: list[UsageLogRecord] = field(
         default_factory=lambda: list[UsageLogRecord]()
     )
+    request_logs: list[RequestLogRecord] = field(
+        default_factory=lambda: list[RequestLogRecord]()
+    )
     tested: list[str] = field(default_factory=lambda: list[str]())
     disabled: list[str] = field(default_factory=lambda: list[str]())
 
@@ -51,7 +54,7 @@ class Gateway:
         self, *, start: datetime, end: datetime
     ) -> list[RequestLogRecord]:
         del start, end
-        return []
+        return self.request_logs
 
 
 def _account(
@@ -246,6 +249,33 @@ async def test_slow_log_guard_obeys_the_same_minimum_pool() -> None:
     assert gateway.disabled == []
     assert report.adjustments == ()
     assert [notice.code for notice in report.notices] == ["MINIMUM_POOL_PROTECTED"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_request_errors_do_not_create_an_unowned_disable() -> None:
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    gateway = Gateway(
+        accounts=[_account("1"), _account("2")],
+        request_logs=[
+            RequestLogRecord(
+                account_id="1",
+                created_at=now - timedelta(minutes=minute),
+                kind="error",
+                status_code=502,
+                phase="upstream",
+            )
+            for minute in (1, 2, 3)
+        ],
+    )
+    coordinator = MaintenanceServiceFactory.create(
+        gateway,
+        MaintenancePolicy(log_account_guard_enabled=True),
+    )
+
+    report = await coordinator.run([_probe()], now=now)
+
+    assert gateway.disabled == []
+    assert report.adjustments == ()
 
 
 @pytest.mark.asyncio
