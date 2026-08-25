@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from probe import (
     ChannelHealth,
     GroupAccountCounts,
+    MonitorDataError,
     ProbeUsageRecord,
     build_channel_probes,
+    parse_account_group_state_page,
     resolve_channel_group_ids,
 )
 
@@ -81,3 +84,44 @@ def test_build_channel_probes_prefers_api_key_group_id_over_display_names() -> N
     )
 
     assert probes[0].accounts == expected
+
+
+def _account_page(group_ids: list[object]) -> dict[str, object]:
+    return {
+        "code": 0,
+        "data": {
+            "items": [
+                {
+                    "id": 1,
+                    "name": "account",
+                    "status": "active",
+                    "schedulable": True,
+                    "auto_pause_on_expired": False,
+                    "expires_at": None,
+                    "group_ids": group_ids,
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 100,
+            "pages": 1,
+        },
+    }
+
+
+def test_account_membership_rejects_more_than_persistable_group_ids() -> None:
+    with pytest.raises(MonitorDataError, match="group_ids"):
+        parse_account_group_state_page(
+            _account_page(list(range(1, 102))),
+            expected_page=1,
+            now=CHECKED_AT,
+        )
+
+
+def test_account_membership_rejects_noncanonical_decimal_ids() -> None:
+    with pytest.raises(MonitorDataError, match="group id"):
+        parse_account_group_state_page(
+            _account_page(["07"]),
+            expected_page=1,
+            now=CHECKED_AT,
+        )

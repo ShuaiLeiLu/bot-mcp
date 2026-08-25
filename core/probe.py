@@ -71,7 +71,12 @@ def _positive_id_text(value: Any, field: str) -> str:
     if isinstance(value, bool):
         raise MonitorDataError(f"invalid {field}")
     text = str(value).strip()
-    if not text.isdigit() or len(text) > 20 or int(text) <= 0:
+    if (
+        not text.isdigit()
+        or len(text) > 20
+        or int(text) <= 0
+        or text != str(int(text))
+    ):
         raise MonitorDataError(f"invalid {field}")
     return text
 
@@ -511,7 +516,7 @@ def parse_account_group_state_page(
         raw_group_ids = item.get("group_ids", [])
         if raw_group_ids is None:
             raw_group_ids = []
-        if not isinstance(raw_group_ids, list) or len(raw_group_ids) > 10_000:
+        if not isinstance(raw_group_ids, list) or len(raw_group_ids) > 100:
             raise MonitorDataError("invalid account snapshot group_ids")
         group_ids = tuple(
             sorted(

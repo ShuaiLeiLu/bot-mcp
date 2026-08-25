@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -23,6 +23,7 @@ class AccountDisableResult:
     account_id: str
     success: bool
     reason: str = ""
+    state_uncertain: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,15 @@ class AccountRestoreResult:
     account_id: str
     success: bool
     reason: str = ""
+    state_uncertain: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AccountDispatchState:
+    account_id: str
+    success: bool
+    status: str = ""
+    schedulable: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +90,8 @@ class MaintenanceAdjustment:
     group_ids: tuple[str, ...] = ()
     threshold_ms: int = 30_000
     observed_count: int = 1
+    previous_status: str = "active"
+    previous_schedulable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +102,7 @@ class MaintenanceNotice:
     account_id: str = ""
     account_name: str = ""
     reason: str = ""
+    group_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,12 +112,20 @@ class MaintenanceReport:
 
 
 class _MinimumUsablePool:
-    def __init__(self, accounts: Sequence[AccountGroupState]) -> None:
+    def __init__(
+        self,
+        accounts: Sequence[AccountGroupState],
+        *,
+        excluded_account_ids: Set[str] = frozenset(),
+    ) -> None:
         self._counts: dict[str, int] = {}
         for account in accounts:
             for group_id in account.group_ids:
                 self._counts.setdefault(group_id, 0)
-                if self._is_usable(account):
+                if (
+                    account.account_id not in excluded_account_ids
+                    and self._is_usable(account)
+                ):
                     self._counts[group_id] += 1
 
     @staticmethod
@@ -127,14 +148,20 @@ class _MinimumUsablePool:
             for group_id in account.group_ids
         )
 
-    def record_disable(self, account: AccountGroupState) -> None:
-        if not self._is_usable(account):
-            return
-        for group_id in account.group_ids:
-            self._counts[group_id] -= 1
-
+    def blocking_group_ids(self, account: AccountGroupState) -> tuple[str, ...]:
+        if not account.group_ids:
+            return ()
+        decrement = 1 if self._is_usable(account) else 0
+        return tuple(
+            group_id
+            for group_id in account.group_ids
+            if group_id not in self._counts
+            or self._counts[group_id] - decrement < 1
+        )
 
 class MaintenanceGateway(Protocol):
+    async def fetch_known_group_ids(self) -> frozenset[str]: ...
+
     async def fetch_account_group_states(
         self,
         *,
@@ -163,6 +190,16 @@ class MaintenanceGateway(Protocol):
     ) -> list[RequestLogRecord]: ...
 
 
+class MaintenanceMutationObserver(Protocol):
+    async def before_disable(self, adjustment: MaintenanceAdjustment) -> None: ...
+
+    async def after_disable(
+        self,
+        adjustment: MaintenanceAdjustment,
+        result: AccountDisableResult,
+    ) -> None: ...
+
+
 class _ChannelAccountSweepService:
     def __init__(self, gateway: MaintenanceGateway, policy: MaintenancePolicy):
         self._gateway = gateway
@@ -174,15 +211,13 @@ class _ChannelAccountSweepService:
         accounts: Sequence[AccountGroupState],
         *,
         already_adjusted: set[str],
-        pool: _MinimumUsablePool,
+        known_group_ids: frozenset[str],
     ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.channel_account_sweep_enabled:
             return [], []
 
-        adjustments: list[MaintenanceAdjustment] = []
         notices: list[MaintenanceNotice] = []
-        test_results: dict[str, AccountTestResult] = {}
-        processed_groups: set[str] = set()
+        failed_groups: dict[str, str] = {}
         for probe in probes:
             if probe.channel.status not in {"failed", "error"}:
                 continue
@@ -195,84 +230,119 @@ class _ChannelAccountSweepService:
                     )
                 )
                 continue
-            if group.group_id in processed_groups:
+            if group.group_id not in known_group_ids:
+                notices.append(
+                    MaintenanceNotice(
+                        code="AMBIGUOUS_GROUP_MAPPING",
+                        group_id=group.group_id,
+                        group_name=group.name,
+                    )
+                )
                 continue
-            processed_groups.add(group.group_id)
-            candidates = [
+            failed_groups[group.group_id] = group.name
+        candidates = sorted(
+            (
                 account
                 for account in accounts
-                if group.group_id in account.group_ids
-                and not account.expired
-                and account.account_id not in already_adjusted
-                and account.status not in {"inactive", "disabled"}
-                and not (account.status == "active" and not account.schedulable)
-            ]
-            candidates.sort(key=lambda item: int(item.account_id))
-            untested = [
-                account
-                for account in candidates
-                if account.account_id not in test_results
-            ]
-            remaining_budget = (
-                self._policy.channel_account_sweep_max_accounts - len(test_results)
+                if set(account.group_ids) & failed_groups.keys()
+                and self._eligible(account, already_adjusted=already_adjusted)
+            ),
+            key=lambda item: int(item.account_id),
+        )
+        if len(candidates) > self._policy.channel_account_sweep_max_accounts:
+            ordered_groups = sorted(
+                failed_groups.items(),
+                key=lambda item: int(item[0]),
             )
-            if len(untested) > remaining_budget:
+            for group_id, group_name in ordered_groups:
                 notices.append(
                     MaintenanceNotice(
                         code="SWEEP_LIMIT_REACHED",
-                        group_id=group.group_id,
-                        group_name=group.name,
+                        group_id=group_id,
+                        group_name=group_name,
                     )
                 )
-                continue
-            for account in untested:
-                test_results[account.account_id] = (
-                    await self._gateway.test_account_availability(account.account_id)
+            return [], notices
+
+        test_results: dict[str, AccountTestResult] = {}
+        for account in candidates:
+            result = await self._gateway.test_account_availability(account.account_id)
+            if (
+                result.account_id != account.account_id
+                or (result.success and result.definitive_failure)
+            ):
+                result = AccountTestResult(
+                    account.account_id,
+                    success=False,
+                    definitive_failure=False,
+                    reason="invalid_test_result",
                 )
-            group_results = [test_results[account.account_id] for account in candidates]
-            if not any(result.success for result in group_results):
+            test_results[account.account_id] = result
+
+        healthy_groups: set[str] = set()
+        for group_id, group_name in sorted(failed_groups.items(), key=lambda item: int(item[0])):
+            if any(
+                test_results[account.account_id].success
+                for account in candidates
+                if group_id in account.group_ids
+            ):
+                healthy_groups.add(group_id)
+            else:
                 notices.append(
                     MaintenanceNotice(
                         code="NO_HEALTHY_ACCOUNT",
-                        group_id=group.group_id,
-                        group_name=group.name,
+                        group_id=group_id,
+                        group_name=group_name,
+                    )
+                )
+
+        adjustments: list[MaintenanceAdjustment] = []
+        for original in candidates:
+            result = test_results[original.account_id]
+            failed_memberships = set(original.group_ids) & failed_groups.keys()
+            if (
+                result.success
+                or not result.definitive_failure
+                or not failed_memberships
+                or not failed_memberships <= healthy_groups
+                or original.account_id in already_adjusted
+            ):
+                continue
+            if not set(original.group_ids) <= known_group_ids:
+                notices.append(
+                    MaintenanceNotice(
+                        code="AMBIGUOUS_GROUP_MAPPING",
+                        account_id=original.account_id,
+                        account_name=original.name or original.account_id,
                     )
                 )
                 continue
-            for account in candidates:
-                result = test_results[account.account_id]
-                if (
-                    result.success
-                    or not result.definitive_failure
-                    or account.account_id in already_adjusted
-                ):
-                    continue
-                if not pool.can_disable(account):
-                    notices.append(
-                        MaintenanceNotice(
-                            code="MINIMUM_POOL_PROTECTED",
-                            group_id=group.group_id,
-                            group_name=group.name,
-                            account_id=account.account_id,
-                            account_name=account.name or account.account_id,
-                            reason="channel_test_failed",
-                        )
-                    )
-                    continue
-                disabled = await self._gateway.disable_account(account.account_id)
-                if disabled.success:
-                    pool.record_disable(account)
-                    already_adjusted.add(account.account_id)
-                    adjustments.append(
-                        MaintenanceAdjustment(
-                            account_id=account.account_id,
-                            account_name=account.name or account.account_id,
-                            reason="channel_test_failed",
-                            group_ids=account.group_ids,
-                            threshold_ms=self._policy.slow_first_token_ms,
-                        )
-                    )
+            adjustments.append(
+                MaintenanceAdjustment(
+                account_id=original.account_id,
+                account_name=original.name or original.account_id,
+                reason="channel_test_failed",
+                group_ids=original.group_ids,
+                threshold_ms=self._policy.slow_first_token_ms,
+                previous_status=original.status,
+                previous_schedulable=original.schedulable,
+                )
+            )
         return adjustments, notices
+
+    @staticmethod
+    def _eligible(
+        account: AccountGroupState,
+        *,
+        already_adjusted: Set[str],
+    ) -> bool:
+        return (
+            bool(account.group_ids)
+            and not account.expired
+            and account.account_id not in already_adjusted
+            and account.status not in {"inactive", "disabled"}
+            and not (account.status == "active" and not account.schedulable)
+        )
 
 
 class _AccountLogGuardService:
@@ -286,7 +356,7 @@ class _AccountLogGuardService:
         *,
         now: datetime,
         already_adjusted: set[str],
-        pool: _MinimumUsablePool,
+        known_group_ids: frozenset[str],
     ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.log_account_guard_enabled:
             return [], []
@@ -298,7 +368,8 @@ class _AccountLogGuardService:
         account_by_id = {
             account.account_id: account
             for account in accounts
-            if account.bucket != "closed"
+            if _MinimumUsablePool._is_usable(account)
+            and account.account_id not in already_adjusted
         }
         slow_counts: dict[str, int] = {}
         for record in usage_logs:
@@ -319,32 +390,29 @@ class _AccountLogGuardService:
                 or account_id in already_adjusted
             ):
                 continue
-            reason = "slow_first_token"
             account = account_by_id[account_id]
-            if not pool.can_disable(account):
+            if not account.group_ids or not set(account.group_ids) <= known_group_ids:
                 notices.append(
                     MaintenanceNotice(
-                        code="MINIMUM_POOL_PROTECTED",
+                        code="AMBIGUOUS_GROUP_MAPPING",
                         account_id=account_id,
                         account_name=account.name or account_id,
-                        reason=reason,
+                        reason="slow_first_token",
                     )
                 )
                 continue
-            disabled = await self._gateway.disable_account(account_id)
-            if disabled.success:
-                pool.record_disable(account)
-                already_adjusted.add(account_id)
-                adjustments.append(
-                    MaintenanceAdjustment(
-                        account_id=account_id,
-                        account_name=account.name or account_id,
-                        reason=reason,
-                        group_ids=account.group_ids,
-                        threshold_ms=self._policy.slow_first_token_ms,
-                        observed_count=slow_counts[account_id],
-                    )
+            adjustments.append(
+                MaintenanceAdjustment(
+                    account_id=account_id,
+                    account_name=account.name or account_id,
+                    reason="slow_first_token",
+                    group_ids=account.group_ids,
+                    threshold_ms=self._policy.slow_first_token_ms,
+                    observed_count=slow_counts[account_id],
+                    previous_status=account.status,
+                    previous_schedulable=account.schedulable,
                 )
+            )
         return adjustments, notices
 
 
@@ -367,6 +435,7 @@ class MaintenanceCoordinator:
         *,
         now: datetime | None = None,
         excluded_account_ids: Set[str] = frozenset(),
+        observer: MaintenanceMutationObserver | None = None,
     ) -> MaintenanceReport:
         if not (
             self._policy.channel_account_sweep_enabled
@@ -378,6 +447,11 @@ class MaintenanceCoordinator:
             raise ValueError("maintenance time must be timezone-aware")
         async with self._lock:
             accounts = await self._gateway.fetch_account_group_states(now=current)
+            known_group_ids = await self._gateway.fetch_known_group_ids()
+            if not known_group_ids:
+                return MaintenanceReport(
+                    notices=(MaintenanceNotice(code="AMBIGUOUS_GROUP_MAPPING"),)
+                )
             current_closed_ids = {
                 account.account_id
                 for account in accounts
@@ -385,21 +459,129 @@ class MaintenanceCoordinator:
             }
             self._disabled_ids.intersection_update(current_closed_ids)
             adjusted_ids = set(self._disabled_ids) | set(excluded_account_ids)
-            pool = _MinimumUsablePool(accounts)
-            adjustments, notices = await self._channel_sweep.run(
+            channel_candidates, notices = await self._channel_sweep.run(
                 probes,
                 accounts,
                 already_adjusted=adjusted_ids,
-                pool=pool,
+                known_group_ids=known_group_ids,
             )
-            log_adjustments, log_notices = await self._log_guard.run(
+            log_candidates, log_notices = await self._log_guard.run(
                 accounts,
                 now=current,
                 already_adjusted=adjusted_ids,
-                pool=pool,
+                known_group_ids=known_group_ids,
             )
-            adjustments.extend(log_adjustments)
             notices.extend(log_notices)
+            candidate_by_id = {
+                candidate.account_id: candidate for candidate in log_candidates
+            }
+            for candidate in channel_candidates:
+                candidate_by_id[candidate.account_id] = candidate
+
+            adjustments: list[MaintenanceAdjustment] = []
+            fresh_accounts = await self._gateway.fetch_account_group_states(
+                now=datetime.now(UTC)
+            )
+            for account_id in sorted(candidate_by_id, key=int):
+                candidate = candidate_by_id[account_id]
+                fresh = next(
+                    (item for item in fresh_accounts if item.account_id == account_id),
+                    None,
+                )
+                is_eligible = bool(
+                    fresh is not None
+                    and (
+                        _MinimumUsablePool._is_usable(fresh)
+                        if candidate.reason == "slow_first_token"
+                        else _ChannelAccountSweepService._eligible(
+                            fresh,
+                            already_adjusted=adjusted_ids,
+                        )
+                    )
+                )
+                if (
+                    fresh is None
+                    or not is_eligible
+                    or fresh.group_ids != candidate.group_ids
+                    or not fresh.group_ids
+                    or not set(fresh.group_ids) <= known_group_ids
+                ):
+                    notices.append(
+                        MaintenanceNotice(
+                            code="AMBIGUOUS_GROUP_MAPPING",
+                            account_id=account_id,
+                            account_name=candidate.account_name,
+                            reason=candidate.reason,
+                        )
+                    )
+                    continue
+                pool = _MinimumUsablePool(
+                    fresh_accounts,
+                    excluded_account_ids=adjusted_ids,
+                )
+                if not pool.can_disable(fresh):
+                    notices.append(
+                        MaintenanceNotice(
+                            code="MIN_POOL_PROTECTED",
+                            account_id=account_id,
+                            account_name=fresh.name or candidate.account_name,
+                            reason=candidate.reason,
+                            group_ids=pool.blocking_group_ids(fresh),
+                        )
+                    )
+                    continue
+                adjustment = MaintenanceAdjustment(
+                    account_id=account_id,
+                    account_name=fresh.name or candidate.account_name,
+                    reason=candidate.reason,
+                    group_ids=fresh.group_ids,
+                    threshold_ms=candidate.threshold_ms,
+                    observed_count=candidate.observed_count,
+                    previous_status=fresh.status,
+                    previous_schedulable=fresh.schedulable,
+                )
+                if observer is not None:
+                    await observer.before_disable(adjustment)
+                raw_result = await self._gateway.disable_account(account_id)
+                result = raw_result
+                if (
+                    raw_result.account_id != account_id
+                    or (raw_result.success and raw_result.state_uncertain)
+                ):
+                    result = AccountDisableResult(
+                        account_id,
+                        success=False,
+                        reason="invalid_disable_result",
+                        state_uncertain=True,
+                    )
+                if observer is not None:
+                    await observer.after_disable(adjustment, result)
+                if result.state_uncertain:
+                    notices.append(
+                        MaintenanceNotice(
+                            code="MUTATION_STATE_UNCERTAIN",
+                            account_id=account_id,
+                            account_name=adjustment.account_name,
+                            reason=candidate.reason,
+                        )
+                    )
+                    break
+                if result.success:
+                    adjusted_ids.add(account_id)
+                    adjustments.append(adjustment)
+                    fresh_accounts = [
+                        (
+                            replace(
+                                item,
+                                bucket="closed",
+                                status="inactive",
+                                schedulable=False,
+                            )
+                            if item.account_id == account_id
+                            else item
+                        )
+                        for item in fresh_accounts
+                    ]
             self._disabled_ids.update(adjusted_ids)
             return MaintenanceReport(tuple(adjustments), tuple(notices))
 

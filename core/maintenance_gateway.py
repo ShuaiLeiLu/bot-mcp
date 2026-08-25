@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from client_errors import MonitorRequestError
 from maintenance import (
     AccountDisableResult,
+    AccountDispatchState,
     AccountRestoreResult,
     AccountTestResult,
     RequestLogRecord,
@@ -300,18 +301,18 @@ class MaintenanceApiAdapter:
         normalized_id = _positive_id_text(account_id, "account id")
         account_url = f"{self._config.accounts_url}/{normalized_id}"
         try:
-            scheduled = self._request_port._request_json(
-                f"{account_url}/schedulable",
-                method="POST",
-                payload={"schedulable": False},
-            )
-            _require_success_envelope(scheduled)
             inactive = self._request_port._request_json(
                 account_url,
                 method="PUT",
                 payload={"status": "inactive"},
             )
             _require_success_envelope(inactive)
+            scheduled = self._request_port._request_json(
+                f"{account_url}/schedulable",
+                method="POST",
+                payload={"schedulable": False},
+            )
+            _require_success_envelope(scheduled)
             verified = self._request_port._request_json(account_url)
             if not isinstance(verified, dict) or verified.get("code") != 0:
                 raise MonitorDataError("account disable verification failed")
@@ -325,6 +326,41 @@ class MaintenanceApiAdapter:
             ):
                 raise MonitorDataError("account disable verification failed")
         except (MonitorRequestError, MonitorDataError):
+            try:
+                current = self._request_port._request_json(account_url)
+                if not isinstance(current, dict) or current.get("code") != 0:
+                    raise MonitorDataError("account disable readback failed")
+                data = current.get("data")
+                if not isinstance(data, dict):
+                    raise MonitorDataError("account disable readback data is invalid")
+                if _positive_id_text(data.get("id"), "account id") != normalized_id:
+                    raise MonitorDataError("account disable readback identity mismatch")
+                status = data.get("status")
+                schedulable = data.get("schedulable")
+                if status not in {"active", "error", "inactive", "disabled"} or not isinstance(
+                    schedulable, bool
+                ):
+                    raise MonitorDataError("account disable readback state is invalid")
+            except (MonitorRequestError, MonitorDataError):
+                return AccountDisableResult(
+                    normalized_id,
+                    success=False,
+                    reason="disable_state_uncertain",
+                    state_uncertain=True,
+                )
+            if schedulable is False and status in {"inactive", "disabled"}:
+                return AccountDisableResult(
+                    normalized_id,
+                    success=True,
+                    reason="partial_disable_verified",
+                )
+            if schedulable is False or status in {"inactive", "disabled"}:
+                return AccountDisableResult(
+                    normalized_id,
+                    success=False,
+                    reason="disable_state_uncertain",
+                    state_uncertain=True,
+                )
             return AccountDisableResult(
                 normalized_id,
                 success=False,
@@ -334,6 +370,46 @@ class MaintenanceApiAdapter:
 
     async def disable_account(self, account_id: str) -> AccountDisableResult:
         return await asyncio.to_thread(self.disable_account_sync, account_id)
+
+    def fetch_account_dispatch_state_sync(
+        self,
+        account_id: str,
+    ) -> AccountDispatchState:
+        normalized_id = _positive_id_text(account_id, "account id")
+        try:
+            payload = self._request_port._request_json(
+                f"{self._config.accounts_url}/{normalized_id}"
+            )
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise MonitorDataError("account state readback failed")
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise MonitorDataError("account state data is invalid")
+            if _positive_id_text(data.get("id"), "account id") != normalized_id:
+                raise MonitorDataError("account state identity mismatch")
+            status = data.get("status")
+            schedulable = data.get("schedulable")
+            if status not in {"active", "error", "inactive", "disabled"} or not isinstance(
+                schedulable, bool
+            ):
+                raise MonitorDataError("account dispatch state is invalid")
+        except (MonitorRequestError, MonitorDataError):
+            return AccountDispatchState(normalized_id, success=False)
+        return AccountDispatchState(
+            normalized_id,
+            success=True,
+            status=status,
+            schedulable=schedulable,
+        )
+
+    async def fetch_account_dispatch_state(
+        self,
+        account_id: str,
+    ) -> AccountDispatchState:
+        return await asyncio.to_thread(
+            self.fetch_account_dispatch_state_sync,
+            account_id,
+        )
 
     def restore_account_sync(
         self,
@@ -350,6 +426,50 @@ class MaintenanceApiAdapter:
         def deadline_active() -> bool:
             return deadline is None or self._clock().astimezone(UTC) < deadline.astimezone(UTC)
 
+        def classify_readback(payload: Any) -> AccountRestoreResult:
+            try:
+                if recovered_account_is_normal(
+                    payload,
+                    expected_account_id=normalized_id,
+                    now=now,
+                ):
+                    return AccountRestoreResult(normalized_id, success=True)
+                if not isinstance(payload, dict) or payload.get("code") != 0:
+                    raise MonitorDataError("account restore readback failed")
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    raise MonitorDataError("account restore readback data is invalid")
+                if _positive_id_text(data.get("id"), "account id") != normalized_id:
+                    raise MonitorDataError("account restore readback identity mismatch")
+                status = data.get("status")
+                schedulable = data.get("schedulable")
+                if status in {"inactive", "disabled"} and schedulable is False:
+                    return AccountRestoreResult(
+                        normalized_id,
+                        success=False,
+                        reason="restore_not_applied",
+                    )
+            except (MonitorDataError, ValueError):
+                pass
+            return AccountRestoreResult(
+                normalized_id,
+                success=False,
+                reason="restore_state_uncertain",
+                state_uncertain=True,
+            )
+
+        def readback_after_failure() -> AccountRestoreResult:
+            try:
+                payload = self._request_port._request_json(account_url)
+            except (MonitorRequestError, MonitorDataError):
+                return AccountRestoreResult(
+                    normalized_id,
+                    success=False,
+                    reason="restore_state_uncertain",
+                    state_uncertain=True,
+                )
+            return classify_readback(payload)
+
         try:
             if not deadline_active():
                 return AccountRestoreResult(
@@ -357,6 +477,7 @@ class MaintenanceApiAdapter:
                     success=False,
                     reason="restore_deadline_expired",
                 )
+            # A failed credential-bearing write can still have reached the upstream.
             activated = self._request_port._request_json(
                 account_url,
                 method="PUT",
@@ -364,11 +485,7 @@ class MaintenanceApiAdapter:
             )
             _require_success_envelope(activated)
             if not deadline_active():
-                return AccountRestoreResult(
-                    normalized_id,
-                    success=False,
-                    reason="restore_deadline_expired",
-                )
+                return readback_after_failure()
             scheduled = self._request_port._request_json(
                 f"{account_url}/schedulable",
                 method="POST",
@@ -376,28 +493,11 @@ class MaintenanceApiAdapter:
             )
             _require_success_envelope(scheduled)
             if not deadline_active():
-                return AccountRestoreResult(
-                    normalized_id,
-                    success=False,
-                    reason="restore_deadline_expired",
-                )
+                return readback_after_failure()
             verified = self._request_port._request_json(account_url)
-            success = recovered_account_is_normal(
-                verified,
-                expected_account_id=normalized_id,
-                now=now,
-            )
+            return classify_readback(verified)
         except (MonitorRequestError, MonitorDataError, ValueError):
-            return AccountRestoreResult(
-                normalized_id,
-                success=False,
-                reason="restore_request_failed",
-            )
-        return AccountRestoreResult(
-            normalized_id,
-            success=success,
-            reason="" if success else "restore_verification_failed",
-        )
+            return readback_after_failure()
 
     async def restore_account(
         self,

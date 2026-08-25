@@ -72,6 +72,74 @@ class StreamingResponse(io.BytesIO):
         self.close()
 
 
+class DripStreamingResponse:
+    headers = {"Content-Type": "text/event-stream"}
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+
+    def __enter__(self) -> DripStreamingResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def read(self, _: int) -> bytes:
+        return self.read1(_)
+
+    def read1(self, _: int) -> bytes:
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+class PartialDisablePort(AccountMutationPort):
+    def __init__(self, *, readback_available: bool) -> None:
+        super().__init__()
+        self.readback_available = readback_available
+
+    def _request_json(self, url: str, **kwargs: object) -> dict[str, object]:
+        method = str(kwargs.get("method", "GET"))
+        payload = kwargs.get("payload")
+        self.requests.append((url, method, payload))
+        if method == "PUT":
+            raise MonitorRequestError("simulated status write failure")
+        if method == "GET":
+            if not self.readback_available:
+                raise MonitorRequestError("simulated readback failure")
+            return {
+                "code": 0,
+                "data": {
+                    "id": 42,
+                    "status": "active",
+                    "schedulable": False,
+                },
+            }
+        return {"code": 0}
+
+
+class PartialRestorePort(AccountMutationPort):
+    def _request_json(self, url: str, **kwargs: object) -> dict[str, object]:
+        method = str(kwargs.get("method", "GET"))
+        payload = kwargs.get("payload")
+        self.requests.append((url, method, payload))
+        if url.endswith("/schedulable"):
+            raise MonitorRequestError("simulated scheduling write failure")
+        if method == "GET":
+            return {
+                "code": 0,
+                "data": {
+                    "id": 42,
+                    "status": "active",
+                    "schedulable": False,
+                    "auto_pause_on_expired": False,
+                    "expires_at": None,
+                    "rate_limit_reset_at": None,
+                    "overload_until": None,
+                    "temp_unschedulable_until": None,
+                },
+            }
+        return {"code": 0}
+
+
 def _adapter(pages: dict[int, dict[str, object]]) -> MaintenanceApiAdapter:
     return MaintenanceApiAdapter(
         DynamicPaginationPort(pages),
@@ -154,6 +222,39 @@ def test_quarantined_account_restore_requires_verified_active_dispatch() -> None
     ]
 
 
+def test_partial_disable_with_only_dispatch_off_remains_uncertain() -> None:
+    adapter = MaintenanceApiAdapter(
+        PartialDisablePort(readback_available=True),
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.disable_account_sync("42")
+
+    assert result.success is False
+    assert result.state_uncertain is True
+    assert result.reason == "disable_state_uncertain"
+
+
+def test_partial_disable_without_readback_is_uncertain() -> None:
+    adapter = MaintenanceApiAdapter(
+        PartialDisablePort(readback_available=False),
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.disable_account_sync("42")
+
+    assert result.success is False
+    assert result.state_uncertain is True
+
+
 def test_quarantined_account_restore_stops_after_deadline() -> None:
     now = datetime(2026, 8, 25, 2, tzinfo=UTC)
     port = AccountMutationPort()
@@ -176,6 +277,29 @@ def test_quarantined_account_restore_stops_after_deadline() -> None:
     assert result.success is False
     assert result.reason == "restore_deadline_expired"
     assert port.requests == []
+
+
+def test_partial_restore_preserves_uncertain_crash_evidence() -> None:
+    now = datetime(2026, 8, 25, 2, tzinfo=UTC)
+    adapter = MaintenanceApiAdapter(
+        PartialRestorePort(),
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+        clock=lambda: now,
+    )
+
+    result = adapter.restore_account_sync(
+        "42",
+        now=now,
+        deadline=now + timedelta(seconds=30),
+    )
+
+    assert result.success is False
+    assert result.state_uncertain is True
+    assert result.reason == "restore_state_uncertain"
 
 
 def test_sub2api_streaming_probe_measures_before_the_response_completes() -> None:
@@ -202,7 +326,7 @@ def test_sub2api_streaming_probe_measures_before_the_response_completes() -> Non
 
 
 def test_sub2api_streaming_probe_uses_ceiling_at_threshold_boundary() -> None:
-    ticks = iter((10.0, 20.0, 40.0004))
+    ticks = iter((10.0, 20.0, 40.0004, 40.5, 40.6))
     response = StreamingResponse(
         b'data: {"type":"test_complete","success":true}\n\n'
     )
@@ -222,12 +346,35 @@ def test_sub2api_streaming_probe_uses_ceiling_at_threshold_boundary() -> None:
     assert first_event_ms == 30_001
 
 
-def test_sub2api_streaming_probe_has_an_absolute_deadline() -> None:
-    ticks = iter((0.0, 0.2, 0.5, 0.8, 1.1))
+def test_sub2api_streaming_probe_allows_exactly_thirty_seconds() -> None:
+    ticks = iter((10.0, 20.0, 40.0, 40.5, 40.6))
     response = StreamingResponse(
-        b': heartbeat\n\n'
-        b': heartbeat\n\n'
         b'data: {"type":"test_complete","success":true}\n\n'
+    )
+    client = Sub2APIClient(
+        "admin-key",
+        opener=lambda *_args, **_kwargs: response,
+        monotonic_provider=lambda: next(ticks),
+    )
+
+    _, first_event_ms = client._request_sse_body_with_first_event(  # pyright: ignore[reportPrivateUsage]
+        "https://zhisuanapi.cn/api/v1/admin/accounts/42/test",
+        method="POST",
+        payload={},
+        timeout_seconds=31,
+    )
+
+    assert first_event_ms == 30_000
+
+
+def test_sub2api_streaming_probe_has_an_absolute_deadline() -> None:
+    ticks = iter((0.0, 0.2, 0.4, 0.6, 1.1))
+    response = DripStreamingResponse(
+        [
+            b": heartbeat\n\n",
+            b": heartbeat\n\n",
+            b'data: {"type":"test_complete","success":true}\n\n',
+        ]
     )
     client = Sub2APIClient(
         "admin-key",

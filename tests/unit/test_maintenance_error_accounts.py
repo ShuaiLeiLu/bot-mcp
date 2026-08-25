@@ -21,6 +21,11 @@ class Gateway:
     tested: list[str] = field(default_factory=lambda: list[str]())
     disabled: list[str] = field(default_factory=lambda: list[str]())
 
+    async def fetch_known_group_ids(self) -> frozenset[str]:
+        return frozenset(
+            group_id for account in self.accounts for group_id in account.group_ids
+        )
+
     async def fetch_account_group_states(
         self, *, now: datetime
     ) -> list[AccountGroupState]:

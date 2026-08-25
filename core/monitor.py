@@ -389,7 +389,7 @@ class Sub2APIClient:
     ADMIN_USAGE_STATS_URL = "https://zhisuanapi.cn/api/v1/admin/usage/stats"
     USAGE_TIMEZONE = "Asia/Shanghai"
     MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-    ACCOUNT_TEST_TIMEOUT_SECONDS = 30
+    ACCOUNT_TEST_TIMEOUT_SECONDS = 31
     MAX_CHANNEL_MONITOR_PAGES = 100
     ACCOUNT_SNAPSHOT_PAGE_SIZE = 100
     MAX_ACCOUNT_SNAPSHOT_PAGES = 100
@@ -523,7 +523,6 @@ class Sub2APIClient:
         timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
         deadline = started + timeout
         chunks: list[bytes] = []
-        event_lines: list[bytes] = []
         first_event_ms: int | None = None
         total = 0
         try:
@@ -539,31 +538,37 @@ class Sub2APIClient:
                     raise MonitorRequestError(
                         "Sub2API returned an unexpected content type"
                 )
+                measured_blocks = 0
                 while True:
-                    line = response.readline(self.MAX_RESPONSE_BYTES + 1)
-                    if not line:
-                        break
-                    observed_at = self._monotonic()
-                    if observed_at >= deadline:
+                    if self._monotonic() > deadline:
                         raise MonitorRequestError(
                             "Sub2API SSE request exceeded its deadline"
                         )
-                    total += len(line)
+                    reader = getattr(response, "read1", response.read)
+                    chunk = reader(min(4096, self.MAX_RESPONSE_BYTES + 1 - total))
+                    observed_at = self._monotonic()
+                    if observed_at > deadline:
+                        raise MonitorRequestError(
+                            "Sub2API SSE request exceeded its deadline"
+                        )
+                    if not chunk:
+                        break
+                    total += len(chunk)
                     if total > self.MAX_RESPONSE_BYTES:
                         raise MonitorRequestError("Sub2API response is too large")
-                    chunks.append(line)
-                    if line in {b"\n", b"\r\n"}:
-                        if (
-                            first_event_ms is None
-                            and _is_valid_sse_data_event(event_lines)
-                        ):
-                            first_event_ms = max(
-                                0,
-                                math.ceil((observed_at - started) * 1000),
-                            )
-                        event_lines = []
-                    else:
-                        event_lines.append(line)
+                    chunks.append(chunk)
+                    normalized = b"".join(chunks).replace(b"\r\n", b"\n")
+                    completed_blocks = normalized.split(b"\n\n")[:-1]
+                    if first_event_ms is None:
+                        for block in completed_blocks[measured_blocks:]:
+                            event_lines = block.split(b"\n")
+                            if _is_valid_sse_data_event(event_lines):
+                                first_event_ms = max(
+                                    0,
+                                    math.ceil((observed_at - started) * 1000),
+                                )
+                                break
+                    measured_blocks = len(completed_blocks)
             return b"".join(chunks), first_event_ms
         except MonitorRequestError:
             raise
@@ -620,6 +625,16 @@ class Sub2APIClient:
     async def fetch_group_account_counts(self) -> list[GroupAccountCounts]:
         return await asyncio.to_thread(self.fetch_group_account_counts_sync)
 
+    def fetch_known_group_ids_sync(self) -> frozenset[str]:
+        try:
+            groups = parse_group_definitions(self._request_json(self.ADMIN_GROUPS_URL))
+        except MonitorDataError as exc:
+            raise MonitorRequestError("Sub2API returned invalid group data") from exc
+        return frozenset(group.group_id for group in groups)
+
+    async def fetch_known_group_ids(self) -> frozenset[str]:
+        return await asyncio.to_thread(self.fetch_known_group_ids_sync)
+
     def fetch_account_group_states_sync(
         self,
         *,
@@ -645,6 +660,12 @@ class Sub2APIClient:
 
     async def disable_account(self, account_id: str):
         return await self._maintenance_adapter.disable_account(account_id)
+
+    def fetch_account_dispatch_state_sync(self, account_id: str):
+        return self._maintenance_adapter.fetch_account_dispatch_state_sync(account_id)
+
+    async def fetch_account_dispatch_state(self, account_id: str):
+        return await self._maintenance_adapter.fetch_account_dispatch_state(account_id)
 
     def restore_account_sync(
         self,
