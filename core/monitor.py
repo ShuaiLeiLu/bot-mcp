@@ -673,6 +673,36 @@ class Sub2APIClient:
     async def fetch_account_dispatch_state(self, account_id: str):
         return await self._maintenance_adapter.fetch_account_dispatch_state(account_id)
 
+    def fetch_account_scheduling_state_sync(self, account_id: str):
+        return self._maintenance_adapter.fetch_account_scheduling_state_sync(account_id)
+
+    async def fetch_account_scheduling_state(self, account_id: str):
+        return await self._maintenance_adapter.fetch_account_scheduling_state(account_id)
+
+    def write_account_scheduling_field_sync(
+        self,
+        account_id: str,
+        field_name: str,
+        value: object,
+    ):
+        return self._maintenance_adapter.write_account_scheduling_field_sync(
+            account_id,
+            field_name,
+            value,
+        )
+
+    async def write_account_scheduling_field(
+        self,
+        account_id: str,
+        field_name: str,
+        value: object,
+    ):
+        return await self._maintenance_adapter.write_account_scheduling_field(
+            account_id,
+            field_name,
+            value,
+        )
+
     def restore_account_sync(
         self,
         account_id: str,

@@ -54,6 +54,19 @@ class AccountSchedulingState:
     load_factor: int | None = None
     concurrency: int | None = None
     effective_load_factor: int | None = None
+    expired: bool = False
+    temporary_unavailable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AccountSchedulingWriteResult:
+    account_id: str
+    field_name: str
+    success: bool
+    before_value: int | bool | None = None
+    verified_value: int | bool | None = None
+    reason: str = ""
+    state_uncertain: bool = False
 
 
 @dataclass(frozen=True, slots=True)

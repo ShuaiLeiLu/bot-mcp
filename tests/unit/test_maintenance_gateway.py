@@ -142,6 +142,44 @@ class PartialRestorePort(AccountMutationPort):
         return {"code": 0}
 
 
+class SchedulingMutationPort:
+    def __init__(
+        self,
+        *,
+        state: dict[str, object],
+        readback_updates: dict[str, object] | None = None,
+        fail_write: bool = False,
+    ) -> None:
+        self.state = dict(state)
+        self.readback_updates = readback_updates
+        self.fail_write = fail_write
+        self.requests: list[tuple[str, str, object]] = []
+        self.write_seen = False
+
+    def _request_body(self, url: str, **_: object) -> bytes:
+        raise AssertionError(f"unexpected body request: {url}")
+
+    def _request_sse_body_with_first_event(
+        self,
+        url: str,
+        **_: object,
+    ) -> tuple[bytes, int | None]:
+        raise AssertionError(f"unexpected SSE request: {url}")
+
+    def _request_json(self, url: str, **kwargs: object) -> dict[str, object]:
+        method = str(kwargs.get("method", "GET"))
+        payload = kwargs.get("payload")
+        self.requests.append((url, method, payload))
+        if method == "GET":
+            if self.write_seen and self.readback_updates is not None:
+                return {"code": 0, "data": {**self.state, **self.readback_updates}}
+            return {"code": 0, "data": self.state}
+        self.write_seen = True
+        if self.fail_write:
+            raise MonitorRequestError("simulated scheduling write failure")
+        return {"code": 0, "data": {"id": 42}}
+
+
 def _adapter(pages: dict[int, dict[str, object]]) -> MaintenanceApiAdapter:
     return MaintenanceApiAdapter(
         DynamicPaginationPort(pages),
@@ -383,6 +421,152 @@ def test_sub2api_redirect_response_is_rejected_before_json_parsing() -> None:
         client._request_json(  # pyright: ignore[reportPrivateUsage]
             "https://zhisuanapi.cn/api/v1/admin/accounts/42"
         )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "desired", "method", "suffix", "payload"),
+    [
+        ("priority", 52, "PUT", "", {"priority": 52}),
+        ("load_factor", 20, "PUT", "", {"load_factor": 20}),
+        (
+            "schedulable",
+            False,
+            "POST",
+            "/schedulable",
+            {"schedulable": False},
+        ),
+    ],
+)
+def test_scheduling_writer_uses_one_official_field_and_exact_readback(
+    field_name: str,
+    desired: int | bool,
+    method: str,
+    suffix: str,
+    payload: dict[str, object],
+) -> None:
+    state: dict[str, object] = {
+        "id": 42,
+        "status": "active",
+        "schedulable": True,
+        "priority": 50,
+        "load_factor": 10,
+        "concurrency": 4,
+    }
+    port = SchedulingMutationPort(
+        state=state,
+        readback_updates={field_name: desired},
+    )
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.write_account_scheduling_field_sync("42", field_name, desired)
+
+    account_url = "https://sub2api.example/api/v1/admin/accounts/42"
+    assert result.success is True
+    assert result.before_value == state[field_name]
+    assert result.verified_value == desired
+    assert port.requests == [
+        (account_url, "GET", None),
+        (account_url + suffix, method, payload),
+        (account_url, "GET", None),
+    ]
+
+
+def test_scheduling_writer_fails_on_readback_mismatch_and_never_writes_another_field() -> None:
+    port = SchedulingMutationPort(
+        state={
+            "id": 42,
+            "status": "active",
+            "schedulable": True,
+            "priority": 50,
+            "load_factor": 10,
+            "concurrency": 4,
+        },
+        readback_updates={"priority": 51},
+    )
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.write_account_scheduling_field_sync("42", "priority", 52)
+
+    assert result.success is False
+    assert result.reason == "scheduling_write_verification_failed"
+    assert result.verified_value == 51
+    assert len(port.requests) == 3
+    assert sum(request[1] != "GET" for request in port.requests) == 1
+
+
+def test_scheduling_writer_blocks_manual_pause_and_invalid_values_without_mutation() -> None:
+    manual = SchedulingMutationPort(
+        state={
+            "id": 42,
+            "status": "active",
+            "schedulable": False,
+            "priority": 50,
+            "load_factor": 10,
+            "concurrency": 4,
+        }
+    )
+    adapter = MaintenanceApiAdapter(
+        manual,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    blocked = adapter.write_account_scheduling_field_sync("42", "priority", 52)
+    invalid = adapter.write_account_scheduling_field_sync("42", "load_factor", 10_001)
+
+    assert blocked.success is False
+    assert blocked.reason == "manual_pause"
+    assert invalid.success is False
+    assert invalid.reason == "invalid_scheduling_write"
+    assert manual.requests == [
+        ("https://sub2api.example/api/v1/admin/accounts/42", "GET", None)
+    ]
+
+
+def test_scheduling_writer_transport_failure_is_failed_and_state_uncertain() -> None:
+    port = SchedulingMutationPort(
+        state={
+            "id": 42,
+            "status": "error",
+            "schedulable": True,
+            "priority": 50,
+            "load_factor": 10,
+            "concurrency": 4,
+        },
+        fail_write=True,
+    )
+    adapter = MaintenanceApiAdapter(
+        port,
+        MaintenanceApiAdapterConfig(
+            accounts_url="https://sub2api.example/api/v1/admin/accounts",
+            usage_url="https://sub2api.example/usage",
+            request_logs_url="https://sub2api.example/requests",
+        ),
+    )
+
+    result = adapter.write_account_scheduling_field_sync("42", "schedulable", False)
+
+    assert result.success is False
+    assert result.state_uncertain is True
+    assert result.reason == "scheduling_write_transport_failed"
+    assert len(port.requests) == 2
 
 
 def test_quarantined_account_restore_requires_verified_active_dispatch() -> None:

@@ -14,6 +14,7 @@ from maintenance import (
     AccountDispatchState,
     AccountRestoreResult,
     AccountSchedulingState,
+    AccountSchedulingWriteResult,
     AccountTestResult,
     RequestLogRecord,
     UsageLogRecord,
@@ -495,6 +496,30 @@ class MaintenanceApiAdapter:
                 or not 0 <= concurrency <= 1_000_000
             ):
                 raise MonitorDataError("account concurrency is invalid")
+            auto_pause = data.get("auto_pause_on_expired", False)
+            expires_at = data.get("expires_at")
+            if not isinstance(auto_pause, bool):
+                raise MonitorDataError("account auto-pause state is invalid")
+            if expires_at is not None and (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or expires_at < 0
+            ):
+                raise MonitorDataError("account expiry is invalid")
+            now = self._clock().astimezone(UTC)
+            expired = bool(
+                auto_pause
+                and expires_at is not None
+                and expires_at <= now.timestamp()
+            )
+            temporary_unavailable = any(
+                _future_epoch(data.get(field), field, now)
+                for field in (
+                    "rate_limit_reset_at",
+                    "overload_until",
+                    "temp_unschedulable_until",
+                )
+            )
             effective_load_factor = (
                 load_factor
                 if load_factor is not None and load_factor > 0
@@ -511,6 +536,8 @@ class MaintenanceApiAdapter:
             load_factor=load_factor,
             concurrency=concurrency,
             effective_load_factor=effective_load_factor,
+            expired=expired,
+            temporary_unavailable=temporary_unavailable,
         )
 
     async def fetch_account_scheduling_state(
@@ -520,6 +547,149 @@ class MaintenanceApiAdapter:
         return await asyncio.to_thread(
             self.fetch_account_scheduling_state_sync,
             account_id,
+        )
+
+    @staticmethod
+    def _validated_scheduling_write(
+        field_name: str,
+        value: object,
+    ) -> tuple[str, int | bool] | None:
+        if field_name == "schedulable":
+            return (field_name, value) if isinstance(value, bool) else None
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        if field_name == "load_factor" and 1 <= value <= 10_000:
+            return field_name, value
+        if field_name == "priority" and 1 <= value <= 1_000_000:
+            return field_name, value
+        return None
+
+    def write_account_scheduling_field_sync(
+        self,
+        account_id: str,
+        field_name: str,
+        value: object,
+    ) -> AccountSchedulingWriteResult:
+        normalized_id = _positive_id_text(account_id, "account id")
+        validated = self._validated_scheduling_write(field_name, value)
+        if validated is None:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                field_name,
+                success=False,
+                reason="invalid_scheduling_write",
+            )
+        normalized_field, desired = validated
+        current = self.fetch_account_scheduling_state_sync(normalized_id)
+        if not current.success:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                reason="scheduling_state_unavailable",
+            )
+        before_values: dict[str, int | bool | None] = {
+            "load_factor": current.load_factor,
+            "priority": current.priority,
+            "schedulable": current.schedulable,
+        }
+        before = before_values[normalized_field]
+        if current.status == "active" and current.schedulable is False:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                before_value=before,
+                verified_value=before,
+                reason="manual_pause",
+            )
+        if current.expired or current.temporary_unavailable:
+            reason = "expired" if current.expired else "temporary_unavailable"
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                before_value=before,
+                verified_value=before,
+                reason=reason,
+            )
+        if before == desired:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=True,
+                before_value=before,
+                verified_value=before,
+                reason="already_at_target",
+            )
+        account_url = f"{self._config.accounts_url}/{normalized_id}"
+        write_url = (
+            f"{account_url}/schedulable"
+            if normalized_field == "schedulable"
+            else account_url
+        )
+        method = "POST" if normalized_field == "schedulable" else "PUT"
+        try:
+            response = self._request_port._request_json(
+                write_url,
+                method=method,
+                payload={normalized_field: desired},
+            )
+            _require_success_envelope(response)
+        except (MonitorRequestError, MonitorDataError):
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                before_value=before,
+                reason="scheduling_write_transport_failed",
+                state_uncertain=True,
+            )
+        verified = self.fetch_account_scheduling_state_sync(normalized_id)
+        if not verified.success:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                before_value=before,
+                reason="scheduling_write_readback_failed",
+                state_uncertain=True,
+            )
+        verified_values: dict[str, int | bool | None] = {
+            "load_factor": verified.load_factor,
+            "priority": verified.priority,
+            "schedulable": verified.schedulable,
+        }
+        verified_value = verified_values[normalized_field]
+        if verified_value != desired:
+            return AccountSchedulingWriteResult(
+                normalized_id,
+                normalized_field,
+                success=False,
+                before_value=before,
+                verified_value=verified_value,
+                reason="scheduling_write_verification_failed",
+            )
+        return AccountSchedulingWriteResult(
+            normalized_id,
+            normalized_field,
+            success=True,
+            before_value=before,
+            verified_value=verified_value,
+            reason="verified",
+        )
+
+    async def write_account_scheduling_field(
+        self,
+        account_id: str,
+        field_name: str,
+        value: object,
+    ) -> AccountSchedulingWriteResult:
+        return await asyncio.to_thread(
+            self.write_account_scheduling_field_sync,
+            account_id,
+            field_name,
+            value,
         )
 
     def restore_account_sync(
