@@ -148,6 +148,31 @@ class GuardianAccountRecoveryRecord(StrictModel):
         return value
 
 
+class GuardianAccountRecoveryDecision(StrictModel):
+    account: GuardianAccountObservation
+    classification: AccountRecoveryClassification
+    selected: bool
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class GuardianAccountRecoverySelection(StrictModel):
+    trigger: AccountRecoveryRunTrigger
+    decisions: tuple[GuardianAccountRecoveryDecision, ...] = Field(
+        max_length=10_000
+    )
+    selected_account_ids: tuple[str, ...] = Field(max_length=10_000)
+    global_block_reason: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_selected_accounts(self) -> GuardianAccountRecoverySelection:
+        expected = tuple(
+            item.account.account_id for item in self.decisions if item.selected
+        )
+        if expected != self.selected_account_ids:
+            raise ValueError("selected account IDs do not match decisions")
+        return self
+
+
 class GuardianFreshness(StrEnum):
     FRESH = "FRESH"
     STALE = "STALE"
