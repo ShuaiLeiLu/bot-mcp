@@ -33,6 +33,8 @@ class AccountRecoveryOperations(Protocol):
     async def guardian_test_account(
         self,
         account_id: str,
+        *,
+        initial_account: GuardianAccountObservation,
     ) -> GuardianAccountTestOutcome: ...
 
     async def guardian_enable_account(
@@ -296,7 +298,7 @@ class AccountRecoveryExecutor:
                     tested = False
                 else:
                     final_result, reason, tested, stop_remaining = (
-                        await self._execute_account(account_id)
+                        await self._execute_account(decision.account)
                     )
                 await self._repository.record_account_recovery_result(
                     run_id=run.run_id,
@@ -339,10 +341,14 @@ class AccountRecoveryExecutor:
 
     async def _execute_account(
         self,
-        account_id: str,
+        initial_account: GuardianAccountObservation,
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
+        account_id = initial_account.account_id
         try:
-            tested = await self._operations.guardian_test_account(account_id)
+            tested = await self._operations.guardian_test_account(
+                account_id,
+                initial_account=initial_account,
+            )
         except Exception:
             return AccountRecoveryResult.INDETERMINATE, "account_test_failed", True, False
         if tested.account_id != account_id:

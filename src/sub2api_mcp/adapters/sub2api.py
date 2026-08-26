@@ -39,6 +39,7 @@ from ..guardian.contracts import (
     AccountMutationResult,
     AccountTestExecutionResult,
     GuardianAccountMutationOutcome,
+    GuardianAccountObservation,
     GuardianAccountSchedulingState,
     GuardianAccountStatus,
     GuardianAccountTestOutcome,
@@ -166,15 +167,60 @@ class LegacySub2APIAdapter:
     async def guardian_test_account(
         self,
         account_id: str,
+        *,
+        initial_account: GuardianAccountObservation,
     ) -> GuardianAccountTestOutcome:
-        state = await self._client.fetch_account_dispatch_state(account_id)
-        observed_status = (
-            GuardianAccountStatus(state.status)
-            if state.success
-            else None
+        if initial_account.account_id != account_id:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.INDETERMINATE,
+                reason="test_context_invalid",
+            )
+        initial_is_manual_pause = (
+            initial_account.status is GuardianAccountStatus.ACTIVE
+            and initial_account.schedulable is False
         )
-        observed_schedulable = state.schedulable if state.success else None
-        blocked = self._guardian_account_block_reason(state)
+        if initial_is_manual_pause:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.SKIPPED,
+                reason="manual_pause",
+                observed_status=initial_account.status,
+                observed_schedulable=initial_account.schedulable,
+            )
+        if initial_account.expired or initial_account.temporary_unavailable:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.SKIPPED,
+                reason=(
+                    "expired"
+                    if initial_account.expired
+                    else "temporary_unavailable"
+                ),
+                observed_status=initial_account.status,
+                observed_schedulable=initial_account.schedulable,
+            )
+        state = await self._client.fetch_account_dispatch_state(account_id)
+        blocked = (
+            self._guardian_account_block_reason(state)
+            if state.success
+            else "account_state_unavailable"
+        )
+        if (
+            blocked == "manual_pause"
+            and initial_account.status
+            in {
+                GuardianAccountStatus.ERROR,
+                GuardianAccountStatus.DISABLED,
+                GuardianAccountStatus.INACTIVE,
+            }
+        ):
+            blocked = None
+        if (
+            blocked == "account_state_unavailable"
+            and initial_account.status is not GuardianAccountStatus.ACTIVE
+        ):
+            blocked = None
         if blocked is not None:
             return GuardianAccountTestOutcome(
                 account_id=account_id,
@@ -184,8 +230,8 @@ class LegacySub2APIAdapter:
                     else AccountTestExecutionResult.SKIPPED
                 ),
                 reason=blocked,
-                observed_status=observed_status,
-                observed_schedulable=observed_schedulable,
+                observed_status=initial_account.status,
+                observed_schedulable=initial_account.schedulable,
             )
         tested = await self._client.test_account_availability(account_id)
         if tested.account_id != account_id:
@@ -206,8 +252,8 @@ class LegacySub2APIAdapter:
             reason=tested.reason,
             first_event_ms=tested.first_event_ms,
             attempted=True,
-            observed_status=observed_status,
-            observed_schedulable=observed_schedulable,
+            observed_status=initial_account.status,
+            observed_schedulable=initial_account.schedulable,
         )
 
     async def guardian_enable_account(

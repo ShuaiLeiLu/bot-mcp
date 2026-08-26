@@ -74,6 +74,9 @@
   manual pauses remain immutable.
 - Bad-state account tests now use a durable 15-minute cross-snapshot cooldown, preventing the
   same disabled account from being tested and disabled again every scheduler snapshot.
+- A validated `error`, `disabled`, or `inactive` account snapshot now remains sufficient evidence
+  to run the system account test when the redundant detail re-read is unavailable. A successful
+  test immediately completes verified enablement instead of waiting for another state cycle.
 
 ## [0.1.0] - 2026-08-23
 
