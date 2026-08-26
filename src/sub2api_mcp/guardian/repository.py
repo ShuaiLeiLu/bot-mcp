@@ -38,7 +38,7 @@ from .contracts import (
     ManualControl,
 )
 
-GUARDIAN_SCHEMA_VERSION = 7
+GUARDIAN_SCHEMA_VERSION = 8
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -246,7 +246,9 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_runs (
     run_id TEXT PRIMARY KEY,
     dedup_key TEXT NOT NULL UNIQUE,
     trigger TEXT NOT NULL CHECK (
-        trigger IN ('BAD_ACCOUNT_STATE', 'CHANNEL_ERROR', 'MANUAL')
+        trigger IN (
+            'BAD_ACCOUNT_STATE', 'CHANNEL_ERROR', 'HOURLY_ACTIVE_CHECK', 'MANUAL'
+        )
     ),
     snapshot_id TEXT,
     episode_id TEXT,
@@ -403,6 +405,8 @@ class GuardianRepository:
                 self._migrate_v5_to_v6_sync(connection)
             if current_version < 7:
                 self._migrate_v6_to_v7_sync(connection)
+            if current_version < 8:
+                self._migrate_v7_to_v8_sync(connection, now=now)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -623,6 +627,107 @@ class GuardianRepository:
             "CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent "
             "ON guardian_account_recovery_ledger(occurred_at, account_id) "
             "WHERE tested = 1"
+        )
+
+    @staticmethod
+    def _migrate_v7_to_v8_sync(
+        connection: sqlite3.Connection,
+        *,
+        now: str,
+    ) -> None:
+        for index_name in (
+            "idx_guardian_account_recovery_runs_recent",
+            "idx_guardian_recovery_runs_retention",
+            "idx_guardian_account_recovery_ledger_run",
+            "idx_guardian_account_recovery_ledger_recent",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+        connection.execute(
+            "ALTER TABLE guardian_account_recovery_ledger "
+            "RENAME TO guardian_account_recovery_ledger_v7"
+        )
+        connection.execute(
+            "ALTER TABLE guardian_account_recovery_runs "
+            "RENAME TO guardian_account_recovery_runs_v7"
+        )
+        connection.execute(
+            "CREATE TABLE guardian_account_recovery_runs ("
+            "run_id TEXT PRIMARY KEY, dedup_key TEXT NOT NULL UNIQUE, "
+            "trigger TEXT NOT NULL CHECK (trigger IN ("
+            "'BAD_ACCOUNT_STATE', 'CHANNEL_ERROR', 'HOURLY_ACTIVE_CHECK', 'MANUAL')), "
+            "snapshot_id TEXT, episode_id TEXT, "
+            "policy_revision INTEGER NOT NULL CHECK(policy_revision > 0), "
+            "status TEXT NOT NULL CHECK(status IN "
+            "('RUNNING', 'SUCCEEDED', 'FAILED', 'INTERRUPTED')), "
+            "result_json TEXT, started_at TEXT NOT NULL, finished_at TEXT, "
+            "updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE guardian_account_recovery_ledger ("
+            "ledger_id TEXT PRIMARY KEY, run_id TEXT NOT NULL "
+            "REFERENCES guardian_account_recovery_runs(run_id) ON DELETE CASCADE, "
+            "dedup_key TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, "
+            "channel_id TEXT, group_id TEXT, "
+            "classification TEXT NOT NULL CHECK(classification IN ("
+            "'AVAILABLE', 'MANUAL_PAUSE', 'UPSTREAM_ERROR', 'DISABLED', "
+            "'SYSTEM_QUARANTINE', 'EXCLUDED')), "
+            "result TEXT NOT NULL CHECK(result IN "
+            "('ENABLED', 'DISABLED', 'INDETERMINATE', 'SKIPPED')), "
+            "reason TEXT NOT NULL, tested INTEGER NOT NULL CHECK(tested IN (0, 1)), "
+            "occurred_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO guardian_account_recovery_runs "
+            "SELECT * FROM guardian_account_recovery_runs_v7"
+        )
+        connection.execute(
+            "INSERT INTO guardian_account_recovery_ledger "
+            "SELECT * FROM guardian_account_recovery_ledger_v7"
+        )
+        connection.execute("DROP TABLE guardian_account_recovery_ledger_v7")
+        connection.execute("DROP TABLE guardian_account_recovery_runs_v7")
+        connection.execute(
+            "CREATE INDEX idx_guardian_account_recovery_runs_recent "
+            "ON guardian_account_recovery_runs(started_at DESC, run_id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_guardian_recovery_runs_retention "
+            "ON guardian_account_recovery_runs(updated_at, run_id) "
+            "WHERE status <> 'RUNNING'"
+        )
+        connection.execute(
+            "CREATE INDEX idx_guardian_account_recovery_ledger_run "
+            "ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_guardian_account_recovery_ledger_recent "
+            "ON guardian_account_recovery_ledger(occurred_at, account_id) "
+            "WHERE tested = 1"
+        )
+
+        row = connection.execute(
+            "SELECT policy_json, revision FROM guardian_policy WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            return
+        raw_policy = cast(dict[str, Any], json.loads(row["policy_json"]))
+        raw_probe = raw_policy.get("probe")
+        probe = dict(cast(dict[str, Any], raw_probe)) if isinstance(raw_probe, dict) else {}
+        probe.update(
+            {
+                "enabled": True,
+                "interval_seconds": 3600,
+                "model": "",
+                "prompt": "hi",
+            }
+        )
+        raw_policy["probe"] = probe
+        revision = int(row["revision"]) + 1
+        raw_policy["revision"] = revision
+        connection.execute(
+            "UPDATE guardian_policy SET policy_json = ?, revision = ?, updated_at = ? "
+            "WHERE singleton = 1",
+            (_json(raw_policy), revision, now),
         )
 
     @staticmethod
@@ -1370,6 +1475,27 @@ class GuardianRepository:
                 (limit,),
             ).fetchall()
         return [self._account_recovery_run_from_row(row) for row in rows]
+
+    async def latest_account_recovery_run(
+        self,
+        trigger: AccountRecoveryRunTrigger,
+    ) -> GuardianAccountRecoveryRun | None:
+        return await asyncio.to_thread(
+            self._latest_account_recovery_run_sync,
+            trigger,
+        )
+
+    def _latest_account_recovery_run_sync(
+        self,
+        trigger: AccountRecoveryRunTrigger,
+    ) -> GuardianAccountRecoveryRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM guardian_account_recovery_runs WHERE trigger = ? "
+                "ORDER BY started_at DESC, run_id DESC LIMIT 1",
+                (trigger.value,),
+            ).fetchone()
+        return self._account_recovery_run_from_row(row) if row is not None else None
 
     async def record_account_recovery_result(
         self,

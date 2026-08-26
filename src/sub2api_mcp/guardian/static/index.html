@@ -160,13 +160,16 @@
                   <label><span>扫描间隔（秒）</span><input id="p-scan" type="number" min="5" max="3600"></label>
                   <label><span>调度策略</span><select id="p-strategy"><option value="PRICE">价格优先</option><option value="SPEED">速度优先</option><option value="BALANCED">均衡</option></select></label>
                 </div></article>
-                <article class="panel form-panel"><div class="panel-heading"><div><h3>共享采样</h3><p>默认消费现有监控快照；普通主动探测保持关闭。</p></div><span class="badge success">零额外正常探测</span></div><div class="form-grid three-cols">
+                <article class="panel form-panel"><div class="panel-heading"><div><h3>共享采样与账号测活</h3><p>健康评分继续复用监控快照；正常可调度账号按小时使用低消耗模板测活，人工暂停账号不测试。</p></div><span class="badge success">每小时低消耗测活</span></div><div class="form-grid three-cols">
                   <label><span>采样模式</span><select id="p-sampling-mode"><option value="SHARED">共享快照</option><option value="ACTIVE">主动模式（不推荐）</option></select></label>
                   <label><span>快照周期（秒）</span><input id="p-snapshot-interval" type="number" min="30" max="3600"></label>
                   <label><span>聚合桶（秒）</span><input id="p-bucket-seconds" type="number" min="30" max="300"></label>
                   <label><span>新鲜阈值（秒）</span><input id="p-fresh-seconds" type="number" min="30" max="3600"></label>
                   <label><span>过期阈值（秒）</span><input id="p-expire-seconds" type="number" min="60" max="86400"></label>
                   <label><span>预热桶数</span><input id="p-warmup-buckets" type="number" min="1" max="60"></label>
+                  <label class="toggle-row"><span><strong>启用小时测活</strong><small>仅测试正常且可调度账号</small></span><input id="p-probe-enabled" type="checkbox"></label>
+                  <label><span>账号测活间隔（秒）</span><input id="p-probe-interval" type="number" min="3600" max="86400" step="3600"></label>
+                  <label><span>低消耗模板</span><input value="账号默认模型 + hi" disabled aria-label="当前账号测活模板"></label>
                 </div></article>
                 <article class="panel form-panel"><div class="panel-heading"><div><h3>恢复探测硬预算</h3><p>只允许 Guardian 自己熔断且能唯一映射账号的渠道进入恢复探测。</p></div></div><div class="form-grid three-cols">
                   <label class="toggle-row"><span><strong>启用恢复探测</strong><small>默认关闭，需显式开启</small></span><input id="p-recovery-budget-enabled" type="checkbox"></label>

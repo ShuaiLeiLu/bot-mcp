@@ -80,6 +80,23 @@ def _positive_id_text(value: Any, field: str) -> str:
     return text
 
 
+def _account_test_text(
+    value: Any,
+    field: str,
+    *,
+    max_length: int,
+    required: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise MonitorDataError(f"invalid {field}")
+    text = value.strip()
+    if required and not text:
+        raise MonitorDataError(f"invalid {field}")
+    if len(text) > max_length or any(ord(character) < 32 for character in text):
+        raise MonitorDataError(f"invalid {field}")
+    return text
+
+
 def _optional_non_negative_int(value: Any, field: str) -> int | None:
     if value is None:
         return None
@@ -270,13 +287,40 @@ class MaintenanceApiAdapter:
             now=now,
         )
 
-    def test_account_availability_sync(self, account_id: str) -> AccountTestResult:
+    def test_account_availability_sync(
+        self,
+        account_id: str,
+        *,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
+    ) -> AccountTestResult:
         normalized_id = _positive_id_text(account_id, "account id")
+        normalized_model = _account_test_text(
+            model_id,
+            "account test model",
+            max_length=200,
+        )
+        normalized_prompt = _account_test_text(
+            prompt,
+            "account test prompt",
+            max_length=2000,
+            required=True,
+        )
+        normalized_mode = _account_test_text(
+            mode,
+            "account test mode",
+            max_length=50,
+        )
         try:
             body, first_event_ms = self._request_port._request_sse_body_with_first_event(
                 f"{self._config.accounts_url}/{normalized_id}/test",
                 method="POST",
-                payload={},
+                payload={
+                    "model_id": normalized_model,
+                    "prompt": normalized_prompt,
+                    "mode": normalized_mode,
+                },
                 timeout_seconds=self._config.account_test_timeout_seconds,
             )
             completed = account_test_result(body)
@@ -301,10 +345,20 @@ class MaintenanceApiAdapter:
             first_event_ms=first_event_ms,
         )
 
-    async def test_account_availability(self, account_id: str) -> AccountTestResult:
+    async def test_account_availability(
+        self,
+        account_id: str,
+        *,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
+    ) -> AccountTestResult:
         return await asyncio.to_thread(
             self.test_account_availability_sync,
             account_id,
+            model_id=model_id,
+            prompt=prompt,
+            mode=mode,
         )
 
     def disable_account_sync(self, account_id: str) -> AccountDisableResult:

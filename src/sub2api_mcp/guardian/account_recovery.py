@@ -119,6 +119,10 @@ def select_account_recovery_candidates(
             AccountRecoveryClassification.EXCLUDED,
         }:
             selected = False
+        elif trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
+            selected = classification is AccountRecoveryClassification.AVAILABLE
+            if selected:
+                reason = "hourly_active_check"
         elif channel_scope:
             selected = True
             reason = "channel_error"
@@ -187,6 +191,8 @@ class AccountRecoveryExecutor:
             return f"episode:{episode_id}:channel-error"
         if trigger is AccountRecoveryRunTrigger.MANUAL:
             return f"snapshot:{snapshot_id}:manual:{group_id or 'all'}"
+        if trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
+            return f"snapshot:{snapshot_id}:hourly-active-check"
         return f"snapshot:{snapshot_id}:bad-account-state"
 
     async def execute(
@@ -201,6 +207,7 @@ class AccountRecoveryExecutor:
         group_id: str | None = None,
         quarantined_account_ids: frozenset[str] = frozenset(),
         already_processed_account_ids: frozenset[str] = frozenset(),
+        probe_interval_seconds: int = 3600,
     ) -> GuardianAccountRecoveryRun:
         if not policy.enabled or policy.owner is not AccountRecoveryOwner.GUARDIAN:
             raise ServiceError(
@@ -246,12 +253,22 @@ class AccountRecoveryExecutor:
                 return run
             stored = await self._repository.list_account_recovery_results(run.run_id)
             stored_account_ids = frozenset(item.account_id for item in stored)
+            if not 3600 <= probe_interval_seconds <= 86_400:
+                raise ValueError("account probe interval is outside the safe range")
+            cooldown_seconds = (
+                probe_interval_seconds
+                if trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+                else policy.retry_cooldown_seconds
+            )
             recently_tested_account_ids: frozenset[str] = (
                 await self._repository.list_recent_tested_account_ids(
-                    since=started_at
-                    - timedelta(seconds=policy.retry_cooldown_seconds)
+                    since=started_at - timedelta(seconds=cooldown_seconds)
                 )
-                if trigger is AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE
+                if trigger
+                in {
+                    AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE,
+                    AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK,
+                }
                 else frozenset[str]()
             )
             observations = await self._repository.list_account_observations(snapshot_id)
@@ -298,14 +315,23 @@ class AccountRecoveryExecutor:
                     tested = False
                 else:
                     final_result, reason, tested, stop_remaining = (
-                        await self._execute_account(decision.account)
+                        await self._execute_account(decision.account, trigger=trigger)
                     )
                 await self._repository.record_account_recovery_result(
                     run_id=run.run_id,
                     dedup_key=f"{dedup_key}:account:{account_id}",
                     account_id=account_id,
                     channel_id=channel_id,
-                    group_id=group_id,
+                    group_id=(
+                        group_id
+                        if group_id is not None
+                        else decision.account.group_ids[0]
+                        if (
+                            trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+                            and len(decision.account.group_ids) == 1
+                        )
+                        else None
+                    ),
                     classification=decision.classification,
                     result=final_result,
                     reason=(reason or final_result.value.casefold())[:200],
@@ -342,6 +368,8 @@ class AccountRecoveryExecutor:
     async def _execute_account(
         self,
         initial_account: GuardianAccountObservation,
+        *,
+        trigger: AccountRecoveryRunTrigger,
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
         account_id = initial_account.account_id
         try:
@@ -357,6 +385,16 @@ class AccountRecoveryExecutor:
             return AccountRecoveryResult.SKIPPED, tested.reason, tested.attempted, False
         if tested.result is AccountTestExecutionResult.INDETERMINATE:
             return AccountRecoveryResult.INDETERMINATE, tested.reason, tested.attempted, False
+        if (
+            trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+            and tested.result is AccountTestExecutionResult.SUCCESS
+        ):
+            return (
+                AccountRecoveryResult.ENABLED,
+                "healthy_no_change",
+                tested.attempted,
+                False,
+            )
         expected = (
             AccountRecoveryResult.ENABLED
             if tested.result is AccountTestExecutionResult.SUCCESS

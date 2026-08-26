@@ -934,8 +934,9 @@ class GuardianEngine:
             if group_id is not None:
                 by_group[group_id].append(item)
         account_budget = policy.writes.max_channels_per_run
-        accounts_started = 0
+        accounts_applied = 0
         stop = False
+        budget_exhausted = False
         for group_id in sorted(by_group, key=int):
             group_entries = by_group[group_id]
             if len(group_entries) != 1:
@@ -983,10 +984,10 @@ class GuardianEngine:
                 key=lambda account: int(account.account_id),
             )
             for account in accounts:
-                if accounts_started >= account_budget:
+                if accounts_applied >= account_budget:
                     count("per_run_account_cap")
+                    budget_exhausted = True
                     break
-                accounts_started += 1
                 state = await self._scheduling_operations.read_account_scheduling_state(
                     account.account_id
                 )
@@ -1030,6 +1031,7 @@ class GuardianEngine:
                         "baseline_relative_health",
                     ),
                 )
+                account_applied = False
                 for field_name, current, desired, reason in targets:
                     if current == desired:
                         continue
@@ -1057,6 +1059,7 @@ class GuardianEngine:
                         outcomes.get(decision.outcome.value, 0) + 1
                     )
                     if decision.outcome is GuardianWriteOutcome.APPLIED:
+                        account_applied = True
                         result["applied"] = int(result["applied"]) + 1
                         applied = cast(dict[str, int], result["applied_by_channel"])
                         applied[entry.monitor_id] = applied.get(entry.monitor_id, 0) + 1
@@ -1068,11 +1071,13 @@ class GuardianEngine:
                         break
                     else:
                         count(decision.reason)
+                if account_applied:
+                    accounts_applied += 1
                 if state.schedulable != should_schedule:
                     count("schedulable_owned_by_verified_recovery")
                 if stop:
                     break
-            if stop:
+            if stop or budget_exhausted:
                 break
         if stop:
             result["global_reason"] = "verification_failed"

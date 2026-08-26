@@ -39,6 +39,11 @@
 - Conditional recovery reuses the existing inventory, tests only abnormal accounts per new
   snapshot, broadens once for a new failed-channel episode, protects manual pauses, and persists
   verified enable/disable/indeterminate outcomes.
+- Normal schedulable accounts now receive one durable active health check per hour. The check is
+  de-duplicated across fast Guardian scans and restarts, skips human pauses and protected states,
+  and keeps ordinary successful checks silent.
+- All system-owned account tests now send the same explicit low-token Sub2API template using the
+  account default model, prompt `hi`, and default text mode.
 - Direct scheduling resolves unique monitor→group→account mappings and applies bounded
   `load_factor` plus baseline-relative `priority` through current-read, one-field write, exact
   read-back verification. A failed verification stops the remaining run.
@@ -65,6 +70,8 @@
   Beijing trigger time, account identity, localized reason, and explicit result.
 - Retention migrations add time-oriented indexes, checkpoint the WAL after each bounded cleanup,
   and expose cleanup outcome, deleted-row, and database-size metrics.
+- The Guardian policy page now exposes the hourly account-check switch and interval instead of
+  claiming that all normal active probes are disabled.
 
 ### Fixed
 
@@ -77,6 +84,8 @@
 - A validated `error`, `disabled`, or `inactive` account snapshot now remains sufficient evidence
   to run the system account test when the redundant detail re-read is unavailable. A successful
   test immediately completes verified enablement instead of waiting for another state cycle.
+- Direct-write limits now count accounts that actually received a verified write. Accounts with
+  no change or a cooldown-blocked proposal no longer starve later accounts and groups.
 
 ## [0.1.0] - 2026-08-23
 

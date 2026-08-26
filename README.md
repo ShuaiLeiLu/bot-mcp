@@ -12,12 +12,17 @@ server, domain, public port, or reverse proxy is assumed.
 
 - All Sub2API channel/provider values are treated as data; no provider allowlist.
 - Channel/group-account probing with latency-only change suppression.
-- The existing 60-second inventory read is reused by Guardian without an extra account test.
+- The existing 60-second inventory read is reused by Guardian for scoring and account discovery;
+  normal schedulable accounts receive one durable low-token health check per hour rather than a
+  test on every inventory scan.
 - Each new snapshot tests only error/disabled/inactive accounts; a new failed channel episode
   tests its uniquely mapped group once. `active + schedulable=false` is always protected as a
   human pause.
 - Explicit test success enables with exact read-back; definitive failure disables with exact
   read-back; indeterminate results preserve state and stop unsafe follow-up writes.
+- Every system-owned account test uses the same Sub2API request template: the account's default
+  model, prompt `hi`, and default text mode. Manual pauses, expiry, and temporary unavailability
+  are filtered before any test request.
 - Durable video jobs with user-selected length, steps, and resolution.
 - Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
 - Multi-target fan-out across different LangBot adapters.
@@ -44,6 +49,10 @@ require confirmation, policy revision, and an idempotency key. When enabled, Gua
 unique monitor→group→account mapping, applies bounded `load_factor` and baseline-relative
 `priority` changes one field at a time, then performs an independent exact read-back. Account
 `schedulable` changes remain tied to explicit conditional account tests.
+The policy page exposes the hourly health-check switch and interval. Its durable recovery ledger
+prevents repeat tests across the 15-second Guardian scan loop and across service restarts; routine
+successful checks are silent, while failures and state changes remain auditable and notify the
+recovery administrator.
 State transitions are queued to existing `STATUS` delivery targets, so the same
 LangBot fan-out can notify WeChat and every other configured adapter.
 

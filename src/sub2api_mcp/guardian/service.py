@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -86,6 +87,7 @@ _RECOVERY_REASON_LABELS = {
     "verified_disabled": "已禁用并完成精确回读",
     "already_enabled": "原状态已启用",
     "already_disabled": "原状态已禁用",
+    "healthy_no_change": "测活通过，账号状态保持不变",
     "manual_pause": "人工暂停，保持不变",
     "expired": "账号已过期，保持不变",
     "temporary_unavailable": "临时不可调度，保持不变",
@@ -103,6 +105,7 @@ class GuardianService:
         metrics: Metrics | None = None,
         notification_repository: SqliteRepository | None = None,
         account_operations: AccountRecoveryOperations | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.engine = engine
@@ -111,8 +114,9 @@ class GuardianService:
         self._logger = logging.getLogger("sub2api_mcp.guardian")
         self._metrics = metrics
         self._notification_repository = notification_repository
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._account_recovery = (
-            AccountRecoveryExecutor(repository, account_operations)
+            AccountRecoveryExecutor(repository, account_operations, clock=self._clock)
             if account_operations is not None
             else None
         )
@@ -277,11 +281,24 @@ class GuardianService:
         policy = await self.repository.get_policy()
         episodes = await self.repository.list_open_channel_error_episodes(limit=limit)
         runs = await self.repository.list_account_recovery_runs(limit=limit)
+        latest_active_check = await self.repository.latest_account_recovery_run(
+            AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+        )
         return {
             "enabled": policy.enabled,
             "owner": policy.account_recovery.owner.value,
             "trigger": policy.account_recovery.trigger.value,
             "retry_cooldown_seconds": policy.account_recovery.retry_cooldown_seconds,
+            "active_check": {
+                "enabled": policy.probe.enabled,
+                "interval_seconds": policy.probe.interval_seconds,
+                "template": "default_model_hi",
+                "last_run_at": (
+                    latest_active_check.started_at.isoformat()
+                    if latest_active_check is not None
+                    else None
+                ),
+            },
             "latest_abnormal_snapshot": (
                 await self.repository.latest_abnormal_account_snapshot()
             ),
@@ -407,6 +424,7 @@ class GuardianService:
             group_id=group_id,
             quarantined_account_ids=await self._quarantined_account_ids(),
             already_processed_account_ids=already_processed_account_ids,
+            probe_interval_seconds=policy.probe.interval_seconds,
         )
         records = await self.repository.list_account_recovery_results(run.run_id)
         if run.status is not AccountRecoveryRunStatus.RUNNING:
@@ -416,6 +434,11 @@ class GuardianService:
             ):
                 allowed_results = {item.value for item in AccountRecoveryResult}
                 for record in records:
+                    if (
+                        run.trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+                        and record.reason == "healthy_no_change"
+                    ):
+                        continue
                     if record.result.value in allowed_results:
                         self._metrics.guardian_account_recovery_results.labels(
                             result=record.result.value
@@ -567,9 +590,41 @@ class GuardianService:
             already_processed_account_ids=frozenset(processed),
         )
         completed_runs.append(bad_state_run)
+        bad_state_records = await self.repository.list_account_recovery_results(
+            bad_state_run.run_id
+        )
+        processed.update(item.account_id for item in bad_state_records if item.tested)
+        if policy.probe.enabled and await self._hourly_active_check_due(
+            interval_seconds=policy.probe.interval_seconds
+        ):
+            completed_runs.append(
+                await self.execute_account_recovery(
+                    snapshot_id=snapshot_id,
+                    trigger=AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK,
+                    already_processed_account_ids=frozenset(processed),
+                )
+            )
         result["account_recovery_runs"] = [
             item.model_dump(mode="json") for item in completed_runs
         ]
+
+    async def _hourly_active_check_due(self, *, interval_seconds: int) -> bool:
+        latest = await self.repository.latest_account_recovery_run(
+            AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+        )
+        if latest is None:
+            return True
+        if latest.status in {
+            AccountRecoveryRunStatus.FAILED,
+            AccountRecoveryRunStatus.INTERRUPTED,
+        }:
+            return True
+        if latest.status is AccountRecoveryRunStatus.RUNNING:
+            return False
+        now = self._clock()
+        if now.tzinfo is None:
+            raise ValueError("Guardian clock must be timezone-aware")
+        return (now.astimezone(UTC) - latest.started_at).total_seconds() >= interval_seconds
 
     async def _quarantined_account_ids(self) -> frozenset[str]:
         if self._notification_repository is None:
@@ -601,6 +656,15 @@ class GuardianService:
         run: GuardianAccountRecoveryRun,
         records: list[GuardianAccountRecoveryRecord],
     ) -> bool:
+        if run.trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
+            records = [
+                item
+                for item in records
+                if not (
+                    item.result is AccountRecoveryResult.ENABLED
+                    and item.reason in {"already_enabled", "healthy_no_change"}
+                )
+            ]
         if (
             self._notification_repository is None
             or run.run_id in self._notified_account_recovery_run_ids

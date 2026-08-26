@@ -169,6 +169,9 @@ class LegacySub2APIAdapter:
         account_id: str,
         *,
         initial_account: GuardianAccountObservation,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
     ) -> GuardianAccountTestOutcome:
         if initial_account.account_id != account_id:
             return GuardianAccountTestOutcome(
@@ -233,7 +236,12 @@ class LegacySub2APIAdapter:
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
             )
-        tested = await self._client.test_account_availability(account_id)
+        tested = await self._client.test_account_availability(
+            account_id,
+            model_id=model_id,
+            prompt=prompt,
+            mode=mode,
+        )
         if tested.account_id != account_id:
             return GuardianAccountTestOutcome(
                 account_id=account_id,

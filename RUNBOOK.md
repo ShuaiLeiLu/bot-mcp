@@ -36,6 +36,19 @@ workers, and the scheduler have started.
 - Deletion frees SQLite pages for reuse and checkpoints the WAL; the main database file may not
   immediately shrink on disk. Do not run `VACUUM` against a live service.
 
+## Hourly account health checks
+
+- Guardian scoring still consumes the shared channel snapshot; it does not issue an account test
+  on every 15-second scan.
+- Eligible `active + schedulable=true` accounts are tested at most once per configured interval,
+  which defaults to 3,600 seconds. The durable ledger survives restarts.
+- All automatic test paths use the account default model with the `hi` prompt. An account marked
+  `active + schedulable=false` is treated as a human pause and never tested automatically.
+- Query `guardian_get_recovery_status` and inspect `active_check.enabled`,
+  `active_check.interval_seconds`, and `active_check.last_run_at` when verifying the schedule.
+- Healthy hourly checks do not generate administrator messages. Definitive failures,
+  indeterminate results, and verified state changes still use the recovery notification path.
+
 ## Safe recovery
 
 - Restarting marks `RUNNING` jobs `INTERRUPTED`; non-resumable video jobs are not duplicated.

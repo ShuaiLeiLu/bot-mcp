@@ -32,6 +32,8 @@ const policyFields = [
   ["#p-fresh-seconds", "sampling.fresh_seconds", "number"],
   ["#p-expire-seconds", "sampling.expire_seconds", "number"],
   ["#p-warmup-buckets", "sampling.min_warmup_buckets", "number"],
+  ["#p-probe-enabled", "probe.enabled", "boolean"],
+  ["#p-probe-interval", "probe.interval_seconds", "number"],
   ["#p-recovery-budget-enabled", "recovery_budget.enabled", "boolean"],
   ["#p-recovery-budget-interval", "recovery_budget.interval_seconds", "number"],
   ["#p-recovery-budget-concurrency", "recovery_budget.concurrency", "number"],

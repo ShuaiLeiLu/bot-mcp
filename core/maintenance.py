@@ -198,6 +198,10 @@ class MaintenanceGateway(Protocol):
     async def test_account_availability(
         self,
         account_id: str,
+        *,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
     ) -> AccountTestResult: ...
 
     async def disable_account(self, account_id: str) -> AccountDisableResult: ...

@@ -655,11 +655,35 @@ class Sub2APIClient:
     ) -> list[AccountGroupState]:
         return await self._maintenance_adapter.fetch_account_group_states(now=now)
 
-    def test_account_availability_sync(self, account_id: str):
-        return self._maintenance_adapter.test_account_availability_sync(account_id)
+    def test_account_availability_sync(
+        self,
+        account_id: str,
+        *,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
+    ):
+        return self._maintenance_adapter.test_account_availability_sync(
+            account_id,
+            model_id=model_id,
+            prompt=prompt,
+            mode=mode,
+        )
 
-    async def test_account_availability(self, account_id: str):
-        return await self._maintenance_adapter.test_account_availability(account_id)
+    async def test_account_availability(
+        self,
+        account_id: str,
+        *,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
+    ):
+        return await self._maintenance_adapter.test_account_availability(
+            account_id,
+            model_id=model_id,
+            prompt=prompt,
+            mode=mode,
+        )
 
     def disable_account_sync(self, account_id: str):
         return self._maintenance_adapter.disable_account_sync(account_id)

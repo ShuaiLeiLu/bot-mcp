@@ -54,6 +54,7 @@ class AccountRecoveryTrigger(StrEnum):
 class AccountRecoveryRunTrigger(StrEnum):
     BAD_ACCOUNT_STATE = "BAD_ACCOUNT_STATE"
     CHANNEL_ERROR = "CHANNEL_ERROR"
+    HOURLY_ACTIVE_CHECK = "HOURLY_ACTIVE_CHECK"
     MANUAL = "MANUAL"
 
 
@@ -401,8 +402,8 @@ class WeightsPolicy(StrictModel):
 
 
 class ProbePolicy(StrictModel):
-    enabled: bool = False
-    interval_seconds: int = Field(default=60, ge=30, le=86400)
+    enabled: bool = True
+    interval_seconds: int = Field(default=3600, ge=3600, le=86400)
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     concurrency: int = Field(default=4, ge=1, le=32)
     traffic_fresh_seconds: int = Field(default=180, ge=10, le=86400)
@@ -543,6 +544,20 @@ class GuardianPolicy(StrictModel):
         for deprecated in ("observe_only", "auto_apply", "rollout"):
             migrated.pop(deprecated, None)
         migrated["scheduling_mode"] = GuardianSchedulingMode.DIRECT.value
+        raw_probe = migrated.get("probe")
+        probe: dict[str, object] = (
+            dict(cast(dict[str, object], raw_probe))
+            if isinstance(raw_probe, dict)
+            else {}
+        )
+        raw_interval = probe.get("interval_seconds")
+        if (
+            isinstance(raw_interval, (int, float))
+            and not isinstance(raw_interval, bool)
+            and raw_interval < 3600
+        ):
+            probe["interval_seconds"] = 3600
+        migrated["probe"] = probe
         raw_recovery = migrated.get("account_recovery")
         account_recovery: dict[str, object] = (
             dict(cast(dict[str, object], raw_recovery))
