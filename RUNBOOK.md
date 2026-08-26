@@ -49,6 +49,19 @@ workers, and the scheduler have started.
 - Healthy hourly checks do not generate administrator messages. Definitive failures,
   indeterminate results, and verified state changes still use the recovery notification path.
 
+## Slow-first-token protection
+
+- Detection reads the Sub2API usage log for only the latest three minutes. It does not issue an
+  extra account test before quarantine.
+- An eligible account is quarantined after three log records whose `first_token_ms` is greater
+  than 30,000. Human pauses, expired/temporary accounts, and the last usable account in a group
+  remain protected.
+- A quarantined slow account stays disabled after its first successful probe at or below 30,000
+  ms. The result is persisted as `PASSING` with streak `1`; a second consecutive passing probe is
+  required before verified restore. `SLOW`, `FAILED`, or `INVALID` resets the streak to zero.
+- Inspect `sub2api_list_account_quarantines`: `last_probe_result` and
+  `recovery_success_streak` show the current recovery progress.
+
 ## Safe recovery
 
 - Restarting marks `RUNNING` jobs `INTERRUPTED`; non-resumable video jobs are not duplicated.

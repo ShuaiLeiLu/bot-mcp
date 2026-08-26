@@ -153,6 +153,7 @@ class AccountQuarantineReason(StrEnum):
 
 class QuarantineProbeResult(StrEnum):
     NEVER = "NEVER"
+    PASSING = "PASSING"
     RECOVERED = "RECOVERED"
     FAILED = "FAILED"
     SLOW = "SLOW"
@@ -169,8 +170,11 @@ class QuarantineProbeAttempt(StrictModel):
     def validate_probe_attempt(self) -> QuarantineProbeAttempt:
         if self.result is QuarantineProbeResult.NEVER:
             raise ValueError("a probe attempt cannot use NEVER")
-        if self.result is QuarantineProbeResult.SLOW and self.latency_ms is None:
-            raise ValueError("slow probe attempts require measured latency")
+        if self.result in {
+            QuarantineProbeResult.PASSING,
+            QuarantineProbeResult.SLOW,
+        } and self.latency_ms is None:
+            raise ValueError("latency probe attempts require measured latency")
         if self.recovered != (self.result is QuarantineProbeResult.RECOVERED):
             raise ValueError("successful probe attempts require verified recovery")
         return self
@@ -186,6 +190,7 @@ class AccountQuarantineRecord(StrictModel):
     last_probe_at: datetime | None = None
     last_probe_latency_ms: int | None = Field(default=None, ge=0, le=3_600_000)
     last_probe_result: QuarantineProbeResult = QuarantineProbeResult.NEVER
+    recovery_success_streak: int = Field(default=0, ge=0, le=1)
 
     @field_validator("group_ids")
     @classmethod
@@ -216,6 +221,16 @@ class AccountQuarantineRecord(StrictModel):
             and self.last_probe_latency_ms is None
         ):
             raise ValueError("slow quarantine probes require measured latency")
+        if self.last_probe_result is QuarantineProbeResult.PASSING:
+            if (
+                self.reason is not AccountQuarantineReason.SLOW_FIRST_TOKEN
+                or self.recovery_success_streak != 1
+                or self.last_probe_latency_ms is None
+                or self.last_probe_latency_ms > self.threshold_ms
+            ):
+                raise ValueError("passing slow probes require one verified fast result")
+        elif self.recovery_success_streak != 0:
+            raise ValueError("only a passing slow probe can retain a success streak")
         return self
 
 

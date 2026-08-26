@@ -576,6 +576,12 @@ class LegacySub2APIAdapter:
                     result=QuarantineProbeResult.SLOW,
                     latency_ms=tested.first_event_ms,
                 )
+            if marker.recovery_success_streak == 0:
+                return QuarantineProbeAttempt(
+                    account_id=marker.account_id,
+                    result=QuarantineProbeResult.PASSING,
+                    latency_ms=tested.first_event_ms,
+                )
         restore_started = datetime.now(UTC)
         if before_restore is not None:
             await before_restore(marker.account_id)
@@ -678,9 +684,9 @@ def build_sub2api_adapter(settings: Settings) -> LegacySub2APIAdapter:
         channel_account_sweep_max_accounts=settings.channel_account_sweep_max_accounts,
         log_account_guard_enabled=settings.log_account_guard_enabled,
         log_error_threshold=settings.log_error_threshold,
-        log_slow_first_token_threshold=settings.log_slow_first_token_threshold,
+        slow_first_token_event_threshold=settings.slow_first_token_event_threshold,
         slow_first_token_ms=settings.slow_first_token_ms,
-        log_window_minutes=settings.log_window_minutes,
+        slow_first_token_window_minutes=settings.slow_first_token_window_minutes,
     )
     return LegacySub2APIAdapter(
         client,

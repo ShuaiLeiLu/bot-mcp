@@ -94,6 +94,8 @@ class SqliteRepository:
             connection.executescript(SCHEMA_SQL)
             if current_version == 2:
                 self._migrate_quarantine_probe_result(connection)
+            if current_version < 7:
+                self._migrate_quarantine_recovery_streak(connection)
             connection.executescript(ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL)
             connection.execute(
                 "INSERT INTO service_metadata(key, value) VALUES('schema_version', ?) "
@@ -166,6 +168,66 @@ class SqliteRepository:
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _migrate_quarantine_recovery_streak(
+        connection: sqlite3.Connection,
+    ) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(account_quarantines)"
+            ).fetchall()
+        }
+        if "recovery_success_streak" in columns:
+            return
+        restore_table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("account_quarantine_restore_intents",),
+        ).fetchone() is not None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DROP INDEX IF EXISTS idx_account_quarantines_probe")
+            if restore_table_exists:
+                connection.execute(
+                    "DROP INDEX IF EXISTS idx_account_quarantine_restores_created"
+                )
+                connection.execute(
+                    "ALTER TABLE account_quarantine_restore_intents "
+                    "RENAME TO account_quarantine_restore_intents_v6"
+                )
+            connection.execute(
+                "ALTER TABLE account_quarantines RENAME TO account_quarantines_v6"
+            )
+            connection.execute(ACCOUNT_QUARANTINE_TABLE_DDL)
+            connection.execute(ACCOUNT_QUARANTINE_INDEX_DDL)
+            connection.execute(
+                "INSERT INTO account_quarantines("
+                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
+                "quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "last_probe_result, recovery_success_streak, updated_at"
+                ") SELECT account_id, reason, group_ids_json, threshold_ms, "
+                "observed_count, quarantined_at, last_probe_at, last_probe_latency_ms, "
+                "last_probe_result, 0, updated_at FROM account_quarantines_v6"
+            )
+            if restore_table_exists:
+                for statement in ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL.split(";"):
+                    if statement.strip():
+                        connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO account_quarantine_restore_intents(account_id, created_at) "
+                    "SELECT account_id, created_at "
+                    "FROM account_quarantine_restore_intents_v6"
+                )
+                connection.execute(
+                    "DROP TABLE account_quarantine_restore_intents_v6"
+                )
+            connection.execute("DROP TABLE account_quarantines_v6")
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
             raise
 
     async def create_job(self, job_type: JobType, payload: dict[str, Any]) -> JobRecord:
@@ -661,8 +723,8 @@ class SqliteRepository:
                 "INSERT INTO account_quarantines("
                 "account_id, reason, group_ids_json, threshold_ms, observed_count, "
                 "quarantined_at, last_probe_at, last_probe_latency_ms, "
-                "last_probe_result, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "last_probe_result, recovery_success_streak, updated_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.account_id,
                     record.reason.value,
@@ -673,6 +735,7 @@ class SqliteRepository:
                     _iso(record.last_probe_at) if record.last_probe_at is not None else None,
                     record.last_probe_latency_ms,
                     record.last_probe_result.value,
+                    record.recovery_success_streak,
                     _iso(self._clock()),
                 ),
             )
@@ -1200,7 +1263,8 @@ class SqliteRepository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT last_probe_at FROM account_quarantines WHERE account_id = ?",
+                "SELECT reason, threshold_ms, last_probe_at, recovery_success_streak "
+                "FROM account_quarantines WHERE account_id = ?",
                 (account_id,),
             ).fetchone()
             if existing is None:
@@ -1212,14 +1276,27 @@ class SqliteRepository:
             effective_probed_at = probed_at
             if previous_probe is not None and effective_probed_at <= previous_probe:
                 effective_probed_at = previous_probe + timedelta(seconds=1)
+            success_streak = 0
+            if result is QuarantineProbeResult.PASSING:
+                if existing["reason"] != AccountQuarantineReason.SLOW_FIRST_TOKEN.value:
+                    raise ValueError("only slow-first-token quarantines can be passing")
+                if latency_ms is None or latency_ms > int(existing["threshold_ms"]):
+                    raise ValueError("a passing probe must satisfy the latency threshold")
+                success_streak = int(existing["recovery_success_streak"]) + 1
+                if success_streak != 1:
+                    raise ValueError("a second passing probe must restore the account")
+            elif result is QuarantineProbeResult.SLOW and latency_ms is None:
+                raise ValueError("a slow probe requires measured latency")
             updated = connection.execute(
                 "UPDATE account_quarantines SET last_probe_at = ?, "
-                "last_probe_latency_ms = ?, last_probe_result = ?, updated_at = ? "
+                "last_probe_latency_ms = ?, last_probe_result = ?, "
+                "recovery_success_streak = ?, updated_at = ? "
                 "WHERE account_id = ?",
                 (
                     _iso(effective_probed_at),
                     latency_ms,
                     result.value,
+                    success_streak,
                     _iso(self._clock()),
                     account_id,
                 ),
@@ -1933,6 +2010,7 @@ class SqliteRepository:
                     "last_probe_at": _datetime(row["last_probe_at"]),
                     "last_probe_latency_ms": row["last_probe_latency_ms"],
                     "last_probe_result": row["last_probe_result"],
+                    "recovery_success_streak": row["recovery_success_streak"],
                 }
             )
         except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:

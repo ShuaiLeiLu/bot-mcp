@@ -20,6 +20,9 @@ server, domain, public port, or reverse proxy is assumed.
   human pause.
 - Explicit test success enables with exact read-back; definitive failure disables with exact
   read-back; indeterminate results preserve state and stop unsafe follow-up writes.
+- Slow-first-token protection reads Sub2API usage logs directly: three responses above 30 seconds
+  within the latest three minutes quarantine the account immediately, subject to the minimum-pool
+  guard. Recovery requires two consecutive successful probes at or below 30 seconds.
 - Every system-owned account test uses the same Sub2API request template: the account's default
   model, prompt `hi`, and default text mode. Manual pauses, expiry, and temporary unavailability
   are filtered before any test request.

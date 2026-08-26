@@ -88,9 +88,9 @@ class Settings(BaseSettings):
     channel_account_sweep_max_accounts: int = Field(default=1000, ge=1, le=1000)
     log_account_guard_enabled: bool = False
     log_error_threshold: int = Field(default=3, ge=1, le=1000)
-    log_slow_first_token_threshold: int = Field(default=3, ge=1, le=1000)
+    slow_first_token_event_threshold: int = Field(default=3, ge=3, le=3)
     slow_first_token_ms: int = Field(default=30000, ge=1, le=600000)
-    log_window_minutes: int = Field(default=30, ge=1, le=1440)
+    slow_first_token_window_minutes: int = Field(default=3, ge=3, le=3)
 
     langbot_base_url: str | None = None
     langbot_api_key: SecretStr | None = None

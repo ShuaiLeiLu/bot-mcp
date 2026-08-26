@@ -34,7 +34,7 @@ _RESULT_LABELS = {
 _MAINTENANCE_LABELS = {
     "channel_test_failed": "渠道异常测试失败，已关闭",
     "repeated_errors": "30 分钟内重复错误，已关闭",
-    "slow_first_token": "首字延迟超 30 秒，已关闭",
+    "slow_first_token": "3 分钟内 3 次首字超 30 秒，已关闭",
 }
 _MAX_CHANNEL_ROWS = 200
 

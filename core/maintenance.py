@@ -92,21 +92,21 @@ class MaintenancePolicy:
     channel_account_sweep_max_accounts: int = 1000
     log_account_guard_enabled: bool = False
     log_error_threshold: int = 3
-    log_slow_first_token_threshold: int = 3
+    slow_first_token_event_threshold: int = 3
     slow_first_token_ms: int = 30_000
-    log_window_minutes: int = 30
+    slow_first_token_window_minutes: int = 3
 
     def __post_init__(self) -> None:
         if self.channel_account_sweep_max_accounts < 1:
             raise ValueError("channel account sweep limit must be positive")
         if self.log_error_threshold < 1:
             raise ValueError("log error threshold must be positive")
-        if self.log_slow_first_token_threshold < 1:
-            raise ValueError("slow first token threshold must be positive")
+        if self.slow_first_token_event_threshold != 3:
+            raise ValueError("slow first token event threshold must be three")
         if self.slow_first_token_ms < 1:
             raise ValueError("slow first token threshold must be positive")
-        if self.log_window_minutes < 1:
-            raise ValueError("log window must be positive")
+        if self.slow_first_token_window_minutes != 3:
+            raise ValueError("slow first token log window must be three minutes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,7 +394,9 @@ class _AccountLogGuardService:
         if now.tzinfo is None:
             raise ValueError("maintenance time must be timezone-aware")
         end = now.astimezone(UTC)
-        start = end - timedelta(minutes=self._policy.log_window_minutes)
+        start = end - timedelta(
+            minutes=self._policy.slow_first_token_window_minutes
+        )
         usage_logs = await self._gateway.fetch_recent_usage_logs(start=start, end=end)
         account_by_id = {
             account.account_id: account
@@ -417,7 +419,7 @@ class _AccountLogGuardService:
         for account_id in sorted(slow_counts, key=int):
             if (
                 slow_counts[account_id]
-                < self._policy.log_slow_first_token_threshold
+                < self._policy.slow_first_token_event_threshold
                 or account_id in already_adjusted
             ):
                 continue
@@ -632,7 +634,7 @@ def format_maintenance_adjustments(
     labels = {
         "channel_test_failed": "渠道异常测试失败",
         "repeated_errors": "30分钟内重复上游错误",
-        "slow_first_token": "首字延迟超过30秒",
+        "slow_first_token": "最近3分钟3次首字超过30秒",
     }
     lines = ["账号自动处理"]
     for adjustment in adjustments:

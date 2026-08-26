@@ -36,7 +36,7 @@ from .repository import SqliteRepository
 
 _MAINTENANCE_REASON_LABELS = {
     AccountQuarantineReason.CHANNEL_TEST_FAILED: "渠道异常且可用性测试失败",
-    AccountQuarantineReason.SLOW_FIRST_TOKEN: "首字响应延迟连续超过 30 秒",
+    AccountQuarantineReason.SLOW_FIRST_TOKEN: "最近 3 分钟内 3 次首字响应超过 30 秒",
 }
 _LOGGER = logging.getLogger("sub2api_mcp.scheduler")
 
@@ -740,6 +740,8 @@ class SchedulerService:
             )
             if result == QuarantineProbeResult.RECOVERED.value:
                 result_label = "恢复回池：测试及账号状态读回均成功"
+            elif result == QuarantineProbeResult.PASSING.value:
+                result_label = "继续隔离：第 1 次复测达标，等待第 2 次连续达标"
             elif result == QuarantineProbeResult.SLOW.value:
                 result_label = "继续隔离：首字延迟仍高于阈值"
             elif result == QuarantineProbeResult.FAILED.value:

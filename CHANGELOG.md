@@ -56,6 +56,9 @@
 
 ### Changed
 
+- Slow-first-token protection now counts only the latest three minutes of Sub2API usage logs and
+  quarantines after exactly three over-30-second observations. Recovery now requires two
+  consecutive at-or-below-30-second successful probes, with a restart-safe persisted streak.
 - Error accounts whose dispatch switch is off are now probed; a successful probe restores both
   account status and dispatch, while non-error paused accounts remain excluded.
 - Equal recovery-window start and end times now represent a true 24-hour window.

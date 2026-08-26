@@ -75,7 +75,8 @@ class MonitorConfig:
     channel_account_sweep_max_accounts: int = 1000
     log_account_guard_enabled: bool = False
     log_error_threshold: int = 3
-    log_slow_first_token_threshold: int = 3
+    slow_first_token_event_threshold: int = 3
+    slow_first_token_window_minutes: int = 3
     recovery_enabled: bool = False
     recovery_admin_id: str = ""
     recovery_window_start: str = "02:00"
@@ -149,12 +150,7 @@ class MonitorConfig:
                 1,
                 1000,
             ),
-            log_slow_first_token_threshold=_bounded_int(
-                values.get("log_slow_first_token_threshold"),
-                3,
-                1,
-                1000,
-            ),
+            slow_first_token_event_threshold=3,
             recovery_enabled=values.get("recovery_enabled", False) is True,
             recovery_admin_id=recovery_admin_id,
             recovery_window_start=recovery_window_start,
@@ -217,7 +213,8 @@ class MonitorConfig:
             channel_account_sweep_max_accounts=self.channel_account_sweep_max_accounts,
             log_account_guard_enabled=self.log_account_guard_enabled,
             log_error_threshold=self.log_error_threshold,
-            log_slow_first_token_threshold=self.log_slow_first_token_threshold,
+            slow_first_token_event_threshold=self.slow_first_token_event_threshold,
+            slow_first_token_window_minutes=self.slow_first_token_window_minutes,
         )
 
 

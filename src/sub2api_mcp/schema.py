@@ -1,6 +1,6 @@
 """SQLite schema for the Sub2API MCP service."""
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 ACCOUNT_QUARANTINE_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS account_quarantines (
@@ -17,7 +17,12 @@ CREATE TABLE IF NOT EXISTS account_quarantines (
         last_probe_latency_ms IS NULL OR last_probe_latency_ms >= 0
     ),
     last_probe_result TEXT NOT NULL CHECK (
-        last_probe_result IN ('NEVER', 'RECOVERED', 'FAILED', 'SLOW', 'INVALID')
+        last_probe_result IN (
+            'NEVER', 'PASSING', 'RECOVERED', 'FAILED', 'SLOW', 'INVALID'
+        )
+    ),
+    recovery_success_streak INTEGER NOT NULL DEFAULT 0 CHECK (
+        recovery_success_streak BETWEEN 0 AND 1
     ),
     updated_at TEXT NOT NULL
 )
