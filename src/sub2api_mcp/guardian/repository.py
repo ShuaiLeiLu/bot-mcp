@@ -899,6 +899,51 @@ class GuardianRepository:
             ).fetchone()
         return int(row["count"] if row is not None else 0)
 
+    async def supersede_expired_input_snapshots(
+        self,
+        *,
+        captured_before: datetime,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._supersede_expired_input_snapshots_sync,
+            captured_before,
+        )
+
+    def _supersede_expired_input_snapshots_sync(
+        self,
+        captured_before: datetime,
+    ) -> int:
+        if captured_before.tzinfo is None:
+            raise ValueError("snapshot expiry cutoff must be timezone-aware")
+        now = _iso(self._clock().astimezone(UTC))
+        cutoff = _iso(captured_before.astimezone(UTC))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute(
+                "SELECT snapshot_id FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NULL "
+                "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
+            ).fetchone()
+            if latest is None:
+                connection.execute("COMMIT")
+                return 0
+            result = connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET consumed_at = ?, claim_owner = NULL, claim_expires_at = NULL "
+                "WHERE consumed_at IS NULL AND captured_at < ? AND snapshot_id <> ? "
+                "AND (claim_owner IS NULL OR claim_expires_at <= ?)",
+                (now, cutoff, latest["snapshot_id"], now),
+            )
+            connection.execute("COMMIT")
+            return result.rowcount
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
     async def shared_sampling_started(self) -> bool:
         return await asyncio.to_thread(self._shared_sampling_started_sync)
 

@@ -171,6 +171,7 @@ class GuardianEngine:
         owner = f"run:{run_id}:{uuid.uuid4()}"
         leased = False
         claimed_snapshot: dict[str, Any] | None = None
+        superseded_snapshots = 0
         try:
             policy = await self.repository.get_policy()
             leased = await self.repository.acquire_lease(
@@ -187,6 +188,24 @@ class GuardianEngine:
                 policy.sampling.mode is SamplingMode.SHARED
                 and await self.repository.shared_sampling_started()
             ):
+                superseded_snapshots = (
+                    await self.repository.supersede_expired_input_snapshots(
+                        captured_before=(
+                            self._clock()
+                            - timedelta(seconds=policy.sampling.expire_seconds)
+                        ),
+                    )
+                )
+                if superseded_snapshots:
+                    await self.repository.add_event(
+                        event_type="SNAPSHOT_BACKLOG_COMPACTED",
+                        severity="WARNING",
+                        message="Expired Guardian input snapshots were superseded",
+                        details={
+                            "superseded_count": superseded_snapshots,
+                            "expire_seconds": policy.sampling.expire_seconds,
+                        },
+                    )
                 claimed_snapshot = await self.repository.claim_input_snapshot(
                     owner,
                     lease_seconds=max(policy.scan_interval_seconds * 2, 30),
@@ -208,6 +227,7 @@ class GuardianEngine:
                             "writeback_blocked_reason": "no_new_evidence",
                             "no_new_evidence": True,
                             "snapshot_id": None,
+                            "superseded_snapshots": superseded_snapshots,
                             "duplicate_observations": 0,
                             "traffic_buckets_processed": 0,
                         },
@@ -248,6 +268,7 @@ class GuardianEngine:
                 claimed_snapshot["snapshot_id"] if claimed_snapshot is not None else None
             )
             result["account_observations_ingested"] = account_observations_ingested
+            result["superseded_snapshots"] = superseded_snapshots
             if claimed_snapshot is not None:
                 snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
                 if cancelled:
