@@ -188,13 +188,10 @@ class GuardianEngine:
                 policy.sampling.mode is SamplingMode.SHARED
                 and await self.repository.shared_sampling_started()
             ):
-                superseded_snapshots = (
-                    await self.repository.supersede_expired_input_snapshots(
-                        captured_before=(
-                            self._clock()
-                            - timedelta(seconds=policy.sampling.expire_seconds)
-                        ),
-                    )
+                superseded_snapshots = await self.repository.supersede_expired_input_snapshots(
+                    captured_before=(
+                        self._clock() - timedelta(seconds=policy.sampling.expire_seconds)
+                    ),
                 )
                 if superseded_snapshots:
                     await self.repository.add_event(
@@ -247,12 +244,10 @@ class GuardianEngine:
                 captured_at = datetime.fromisoformat(
                     cast(str, claimed_snapshot["captured_at"]).replace("Z", "+00:00")
                 )
-                account_observations_ingested = (
-                    await self.repository.upsert_account_observations(
-                        snapshot_id=snapshot_id,
-                        observed_at=captured_at,
-                        observations=list(snapshot.accounts),
-                    )
+                account_observations_ingested = await self.repository.upsert_account_observations(
+                    snapshot_id=snapshot_id,
+                    observed_at=captured_at,
+                    observations=list(snapshot.accounts),
                 )
             result = await self._evaluate(
                 snapshot,
@@ -364,15 +359,10 @@ class GuardianEngine:
                     and entry.status in {"failed", "error"}
                     and entry.group_id is not None
                 ):
-                    existing_episode = (
-                        await self.repository.get_open_channel_error_episode(
-                            entry.monitor_id
-                        )
+                    existing_episode = await self.repository.get_open_channel_error_episode(
+                        entry.monitor_id
                     )
-                    if (
-                        existing_episode is not None
-                        and existing_episode.group_id != entry.group_id
-                    ):
+                    if existing_episode is not None and existing_episode.group_id != entry.group_id:
                         channel_mapping_conflicts += 1
                         await self.repository.add_event(
                             event_type="CHANNEL_GROUP_MAPPING_CONFLICT",
@@ -444,8 +434,7 @@ class GuardianEngine:
                 if snapshot_id is not None and captured_at is not None:
                     bucket_timestamp = int(captured_at.timestamp())
                     bucket_at = datetime.fromtimestamp(
-                        bucket_timestamp
-                        - bucket_timestamp % policy.sampling.bucket_seconds,
+                        bucket_timestamp - bucket_timestamp % policy.sampling.bucket_seconds,
                         tz=UTC,
                     )
                     inserted = await self.repository.append_evidence(
@@ -506,16 +495,10 @@ class GuardianEngine:
                 long_score_value = assessment.long_score
                 sample_count_value = assessment.evidence_bucket_count
                 evidence_sources = sorted(
-                    {
-                        source.value
-                        for bucket in fused_buckets
-                        for source in bucket.sources
-                    }
+                    {source.value for bucket in fused_buckets for source in bucket.sources}
                 )
                 recent_events = tuple(item.event_type for item in evidence)
-                recent_ttfb = tuple(
-                    item.ttfb_ms for item in evidence if item.ttfb_ms is not None
-                )
+                recent_ttfb = tuple(item.ttfb_ms for item in evidence if item.ttfb_ms is not None)
                 score = None
             else:
                 samples = await self.repository.list_samples(
@@ -539,9 +522,7 @@ class GuardianEngine:
                 sample_count_value = score.sample_count
                 evidence_sources = ["PROBE"]
                 recent_events = tuple(item.event_type for item in samples)
-                recent_ttfb = tuple(
-                    item.ttfb_ms for item in samples if item.ttfb_ms is not None
-                )
+                recent_ttfb = tuple(item.ttfb_ms for item in samples if item.ttfb_ms is not None)
             current_health = GuardianHealth(
                 existing["health"] if existing else GuardianHealth.PENDING.value
             )
@@ -610,17 +591,13 @@ class GuardianEngine:
                         recent_events=recent_events,
                         recent_ttfb_ms=recent_ttfb,
                         current_health=current_health,
-                        confidence=(
-                            assessment.confidence if assessment is not None else 1.0
-                        ),
+                        confidence=(assessment.confidence if assessment is not None else 1.0),
                         freshness=(
                             assessment.freshness
                             if assessment is not None
                             else GuardianFreshness.FRESH
                         ),
-                        warming_up=(
-                            assessment.warming_up if assessment is not None else False
-                        ),
+                        warming_up=(assessment.warming_up if assessment is not None else False),
                         fatal_confirmed=fatal_confirmed,
                         guardian_owned_fuse=bool(
                             existing_details.get("fuse_owner", "GUARDIAN") == "GUARDIAN"
@@ -682,9 +659,7 @@ class GuardianEngine:
                             "evidence_age_seconds": (
                                 max(
                                     0,
-                                    int(
-                                        (now - assessment.last_evidence_at).total_seconds()
-                                    ),
+                                    int((now - assessment.last_evidence_at).total_seconds()),
                                 )
                                 if assessment is not None
                                 and assessment.last_evidence_at is not None
@@ -806,12 +781,8 @@ class GuardianEngine:
                 seen_at=now,
                 confidence=confidence_value,
                 freshness_state=freshness_value,
-                last_evidence_at=(
-                    assessment.last_evidence_at if assessment is not None else now
-                ),
-                warmup_buckets=(
-                    assessment.evidence_bucket_count if assessment is not None else 0
-                ),
+                last_evidence_at=(assessment.last_evidence_at if assessment is not None else now),
+                warmup_buckets=(assessment.evidence_bucket_count if assessment is not None else 0),
             )
             evaluated.append(
                 (
@@ -1014,9 +985,7 @@ class GuardianEngine:
             if freshness is not GuardianFreshness.FRESH:
                 count("stale_evidence")
                 continue
-            desired_weight = int(
-                weights.get(group_id, {}).get(entry.monitor_id, 0)
-            )
+            desired_weight = int(weights.get(group_id, {}).get(entry.monitor_id, 0))
             if desired_weight <= 0:
                 count("no_positive_weight")
                 continue
@@ -1104,9 +1073,7 @@ class GuardianEngine:
                         result["field_outcomes"],
                     )
                     outcomes = field_outcomes.setdefault(field_name.value, {})
-                    outcomes[decision.outcome.value] = (
-                        outcomes.get(decision.outcome.value, 0) + 1
-                    )
+                    outcomes[decision.outcome.value] = outcomes.get(decision.outcome.value, 0) + 1
                     if decision.outcome is GuardianWriteOutcome.APPLIED:
                         account_applied = True
                         result["applied"] = int(result["applied"]) + 1

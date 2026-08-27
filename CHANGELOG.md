@@ -78,6 +78,11 @@
 
 ### Fixed
 
+- A transient monitor-to-group remapping no longer aborts every Guardian cycle or expands
+  recovery into the wrong group; the conflict is recorded and the existing episode is kept.
+- Guardian now supersedes expired shared snapshots during backlog recovery while retaining the
+  newest pending snapshot, preventing stale head-of-line data from blocking current scheduling.
+
 - Conditional account recovery now carries the tested pre-mutation state through verified
   enablement, so an upstream `active + schedulable=false` transition created during a successful
   error recovery is completed instead of being misclassified as a human pause. True pre-test

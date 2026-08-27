@@ -329,9 +329,7 @@ def _json(value: object) -> str:
 
 def _snapshot_id(value: str) -> str:
     normalized = value.strip().lower()
-    invalid_character = any(
-        character not in "0123456789abcdef" for character in normalized
-    )
+    invalid_character = any(character not in "0123456789abcdef" for character in normalized)
     if len(normalized) != 64 or invalid_character:
         raise ValueError("snapshot ID must be a SHA-256 hex digest")
     return normalized
@@ -552,15 +550,12 @@ class GuardianRepository:
     def _migrate_v4_to_v5_sync(connection: sqlite3.Connection) -> None:
         columns = {
             row["name"]
-            for row in connection.execute(
-                "PRAGMA table_info(guardian_field_ownership)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(guardian_field_ownership)").fetchall()
         }
         if "account_id" in columns:
             return
         connection.execute(
-            "ALTER TABLE guardian_field_ownership "
-            "RENAME TO guardian_field_ownership_v4"
+            "ALTER TABLE guardian_field_ownership RENAME TO guardian_field_ownership_v4"
         )
         connection.execute(
             "CREATE TABLE guardian_field_ownership ("
@@ -647,8 +642,7 @@ class GuardianRepository:
             "RENAME TO guardian_account_recovery_ledger_v7"
         )
         connection.execute(
-            "ALTER TABLE guardian_account_recovery_runs "
-            "RENAME TO guardian_account_recovery_runs_v7"
+            "ALTER TABLE guardian_account_recovery_runs RENAME TO guardian_account_recovery_runs_v7"
         )
         connection.execute(
             "CREATE TABLE guardian_account_recovery_runs ("
@@ -738,8 +732,7 @@ class GuardianRepository:
         definition: str,
     ) -> None:
         columns = {
-            row["name"]
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -802,9 +795,7 @@ class GuardianRepository:
             owner=row["owner"],
             baseline_value=(json.loads(row["baseline_json"]) if row["baseline_json"] else None),
             last_guardian_value=(
-                json.loads(row["last_guardian_json"])
-                if row["last_guardian_json"]
-                else None
+                json.loads(row["last_guardian_json"]) if row["last_guardian_json"] else None
             ),
             last_write_at=_dt(row["last_write_at"]),
         )
@@ -894,8 +885,7 @@ class GuardianRepository:
     def _pending_input_snapshot_count_sync(self) -> int:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM guardian_input_snapshots "
-                "WHERE consumed_at IS NULL"
+                "SELECT COUNT(*) AS count FROM guardian_input_snapshots WHERE consumed_at IS NULL"
             ).fetchone()
         return int(row["count"] if row is not None else 0)
 
@@ -950,8 +940,7 @@ class GuardianRepository:
     def _shared_sampling_started_sync(self) -> bool:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT value FROM guardian_metadata "
-                "WHERE key = 'shared_sampling_started'"
+                "SELECT value FROM guardian_metadata WHERE key = 'shared_sampling_started'"
             ).fetchone()
         return bool(row is not None and row["value"] == "true")
 
@@ -1085,10 +1074,9 @@ class GuardianRepository:
                     (normalized_snapshot_id, observation.account_id),
                 ).fetchone()
                 if existing is not None:
-                    if (
-                        self._account_observation_from_row(existing) != observation
-                        or existing["observed_at"] != _iso(observed_at)
-                    ):
+                    if self._account_observation_from_row(existing) != observation or existing[
+                        "observed_at"
+                    ] != _iso(observed_at):
                         raise ServiceError(
                             "ACCOUNT_OBSERVATION_CONFLICT",
                             "The account observation changed for the same snapshot",
@@ -1359,9 +1347,7 @@ class GuardianRepository:
     ) -> GuardianAccountRecoveryRun:
         if not 1 <= len(dedup_key) <= 512:
             raise ValueError("account recovery dedup key is outside the safe range")
-        normalized_snapshot_id = (
-            _snapshot_id(snapshot_id) if snapshot_id is not None else None
-        )
+        normalized_snapshot_id = _snapshot_id(snapshot_id) if snapshot_id is not None else None
         if episode_id is not None and not 1 <= len(episode_id) <= 128:
             raise ValueError("episode ID is outside the safe range")
         if policy_revision < 1:
@@ -1605,9 +1591,8 @@ class GuardianRepository:
             ).fetchone()
             if existing is not None:
                 stored = self._account_recovery_record_from_row(existing)
-                if (
-                    stored.model_dump(exclude={"ledger_id"})
-                    != record.model_dump(exclude={"ledger_id"})
+                if stored.model_dump(exclude={"ledger_id"}) != record.model_dump(
+                    exclude={"ledger_id"}
                 ):
                     raise ServiceError(
                         "ACCOUNT_RECOVERY_RESULT_CONFLICT",
@@ -2657,8 +2642,7 @@ class GuardianRepository:
                 "MAX(captured_at) AS latest FROM guardian_input_snapshots"
             ).fetchone()
             traffic = connection.execute(
-                "SELECT COUNT(*) AS count, MAX(bucket_at) AS latest "
-                "FROM guardian_traffic_buckets"
+                "SELECT COUNT(*) AS count, MAX(bucket_at) AS latest FROM guardian_traffic_buckets"
             ).fetchone()
             freshness = connection.execute(
                 "SELECT freshness_state, COUNT(*) AS count FROM guardian_channels "
@@ -2681,8 +2665,7 @@ class GuardianRepository:
     def _list_field_ownership_sync(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM guardian_field_ownership "
-                "ORDER BY channel_id, field_name"
+                "SELECT * FROM guardian_field_ownership ORDER BY channel_id, field_name"
             ).fetchall()
         return [
             {
@@ -2694,9 +2677,7 @@ class GuardianRepository:
                     json.loads(row["baseline_json"]) if row["baseline_json"] else None
                 ),
                 "last_guardian_value": (
-                    json.loads(row["last_guardian_json"])
-                    if row["last_guardian_json"]
-                    else None
+                    json.loads(row["last_guardian_json"]) if row["last_guardian_json"] else None
                 ),
                 "last_write_at": row["last_write_at"],
             }
@@ -3150,9 +3131,7 @@ class GuardianRepository:
                     "policy_revision": row["policy_revision"],
                     "status": row["status"],
                     "result": (
-                        json.loads(row["result_json"])
-                        if row["result_json"] is not None
-                        else None
+                        json.loads(row["result_json"]) if row["result_json"] is not None else None
                     ),
                     "started_at": _dt(row["started_at"]),
                     "finished_at": _dt(row["finished_at"]),
