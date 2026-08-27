@@ -312,6 +312,7 @@ class GuardianEngine:
         duplicate_observations = 0
         traffic_buckets_processed = 0
         account_recovery_triggers: list[dict[str, str]] = []
+        channel_mapping_conflicts = 0
 
         for entry in snapshot.entries:
             active_run = await self.repository.get_run(run_id)
@@ -342,20 +343,46 @@ class GuardianEngine:
                     and entry.status in {"failed", "error"}
                     and entry.group_id is not None
                 ):
-                    episode = await self.repository.open_channel_error_episode(
-                        channel_id=entry.monitor_id,
-                        group_id=entry.group_id,
-                        snapshot_id=snapshot_id,
-                        opened_at=captured_at,
-                    )
-                    if episode.opened_snapshot_id == snapshot_id:
-                        account_recovery_triggers.append(
-                            {
-                                "episode_id": episode.episode_id,
-                                "channel_id": episode.channel_id,
-                                "group_id": entry.group_id,
-                            }
+                    existing_episode = (
+                        await self.repository.get_open_channel_error_episode(
+                            entry.monitor_id
                         )
+                    )
+                    if (
+                        existing_episode is not None
+                        and existing_episode.group_id != entry.group_id
+                    ):
+                        channel_mapping_conflicts += 1
+                        await self.repository.add_event(
+                            event_type="CHANNEL_GROUP_MAPPING_CONFLICT",
+                            severity="WARNING",
+                            channel_id=entry.monitor_id,
+                            group_id=entry.group_id,
+                            message=(
+                                "Skipped channel-error expansion because the open "
+                                "episode has a different group mapping"
+                            ),
+                            details={
+                                "episode_group_id": existing_episode.group_id,
+                                "observed_group_id": entry.group_id,
+                                "snapshot_id": snapshot_id,
+                            },
+                        )
+                    else:
+                        episode = await self.repository.open_channel_error_episode(
+                            channel_id=entry.monitor_id,
+                            group_id=entry.group_id,
+                            snapshot_id=snapshot_id,
+                            opened_at=captured_at,
+                        )
+                        if episode.opened_snapshot_id == snapshot_id:
+                            account_recovery_triggers.append(
+                                {
+                                    "episode_id": episode.episode_id,
+                                    "channel_id": episode.channel_id,
+                                    "group_id": entry.group_id,
+                                }
+                            )
                 else:
                     await self.repository.close_channel_error_episode(
                         entry.monitor_id,
@@ -878,6 +905,7 @@ class GuardianEngine:
             "duplicate_observations": duplicate_observations,
             "traffic_buckets_processed": traffic_buckets_processed,
             "account_recovery_triggers": account_recovery_triggers,
+            "channel_mapping_conflicts": channel_mapping_conflicts,
             "writeback_blocked_reason": writeback["global_reason"],
         }
 
