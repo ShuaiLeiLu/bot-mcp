@@ -39,6 +39,7 @@ class Metrics:
     retention_rows: Counter
     database_size_bytes: Gauge
     outbox_backlog: Gauge
+    outbox_terminal_failures: Gauge
     outbox_oldest_age_seconds: Gauge
 
     @classmethod
@@ -213,6 +214,11 @@ class Metrics:
             outbox_backlog=Gauge(
                 "sub2api_outbox_backlog",
                 "Undelivered notification count",
+                registry=registry,
+            ),
+            outbox_terminal_failures=Gauge(
+                "sub2api_outbox_terminal_failures",
+                "Notifications stopped after a non-retryable delivery failure",
                 registry=registry,
             ),
             outbox_oldest_age_seconds=Gauge(

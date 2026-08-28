@@ -100,7 +100,10 @@ Use `sub2api_list_delivery_bots` to discover bots and
 `sub2api_upsert_delivery_target` to configure targets. `AUTO` media policy tries
 the requested image/file first and falls back to text plus an HTTPS link only
 when LangBot explicitly reports that media type as unsupported. Transient
-errors retry the original representation.
+errors retry the original representation with bounded exponential backoff.
+Non-retryable payload errors are terminal and exposed separately from the live
+outbox backlog. Coalesced status and Guardian recovery streams retain only the
+latest pending notification per target after an outage.
 
 ## Tools
 

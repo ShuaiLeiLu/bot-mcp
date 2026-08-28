@@ -70,6 +70,9 @@ class Sub2APIService:
             "scheduler_enabled": await self._scheduler.is_enabled(),
             "active_jobs": job_counts,
             "outbox_backlog": await self.repository.outbox_backlog(),
+            "outbox_terminal_failures": (
+                await self.repository.outbox_terminal_failure_count()
+            ),
             "delivery_targets": len(await self.repository.list_delivery_targets()),
             "account_quarantine_count": await self.repository.account_quarantine_count(),
             "account_quarantine_counts": {

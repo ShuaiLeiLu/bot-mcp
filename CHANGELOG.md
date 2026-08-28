@@ -56,6 +56,11 @@
 
 ### Changed
 
+- Notification payloads are now validated before persistence. Retryable LangBot failures use
+  bounded exponential backoff, while non-retryable payload failures stop immediately and remain
+  visible in a rollback-safe `DISCARDED` state until retention removes their history.
+- Guardian account-recovery notices now coalesce to the latest pending summary per target, so a
+  temporary messaging outage cannot release a stale notification burst after recovery.
 - Slow-first-token protection now counts only the latest three minutes of Sub2API usage logs and
   quarantines after exactly three over-30-second observations. Recovery now requires two
   consecutive at-or-below-30-second successful probes, with a restart-safe persisted streak.
@@ -78,6 +83,9 @@
 
 ### Fixed
 
+- Legacy Guardian recovery notifications containing unsupported persistence metadata are
+  terminalized by an idempotent startup repair instead of being retried indefinitely. The
+  supported deduplication key is now part of the strict outbox contract.
 - A transient monitor-to-group remapping no longer aborts every Guardian cycle or expands
   recovery into the wrong group; the conflict is recorded and the existing episode is kept.
 - Guardian now supersedes expired shared snapshots during backlog recovery while retaining the

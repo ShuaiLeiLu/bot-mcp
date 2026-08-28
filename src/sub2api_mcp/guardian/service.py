@@ -714,8 +714,7 @@ class GuardianService:
                 OutboxEventType.RECOVERY_RESULT,
                 {
                     "dedupKey": f"guardian:account-recovery:{run.run_id}",
-                    "coalesceKey": f"guardian:account-recovery:{run.run_id}",
-                    "recoveryRunId": run.run_id,
+                    "coalesceKey": "guardian:account-recovery",
                     "notification": notification.model_dump(mode="json", exclude_none=True),
                 },
                 targets,

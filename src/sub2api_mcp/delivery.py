@@ -97,6 +97,9 @@ class DeliveryService:
 
 
 class OutboxWorker:
+    RETRY_BASE_SECONDS = 30
+    RETRY_MAX_SECONDS = 900
+
     def __init__(
         self,
         repository: SqliteRepository,
@@ -122,25 +125,34 @@ class OutboxWorker:
         except (ServiceError, ValidationError) as exc:
             error_code = exc.code if isinstance(exc, ServiceError) else "OUTBOX_PAYLOAD_INVALID"
             retryable = exc.retryable if isinstance(exc, ServiceError) else False
-            await self._repository.mark_delivery_failed(
-                claimed.delivery_id,
-                error_code,
-                retry_after_seconds=10 if retryable else 300,
-            )
+            retry_after_seconds: int | None = None
+            if retryable:
+                retry_after_seconds = self._retry_delay_seconds(claimed.attempt)
+                await self._repository.mark_delivery_failed(
+                    claimed.delivery_id,
+                    error_code,
+                    retry_after_seconds=retry_after_seconds,
+                )
+            else:
+                await self._repository.mark_delivery_terminal(
+                    claimed.delivery_id,
+                    error_code,
+                )
             self._metrics.upstream_calls.labels(
-                dependency="langbot", status="error"
+                dependency="langbot", status="retry" if retryable else "discarded"
             ).inc()
-            backlog = await self._repository.outbox_backlog()
-            self._metrics.outbox_backlog.set(backlog)
+            backlog, terminal_failures = await self._refresh_outbox_metrics()
             log_event(
                 self._logger,
                 logging.WARNING,
                 "delivery_failed",
                 eventId=claimed.event_id,
-                status="retrying",
+                status="retrying" if retryable else "discarded",
                 errorCode=error_code,
                 attempt=claimed.attempt,
                 queueDepth=backlog,
+                terminalFailures=terminal_failures,
+                nextRetrySeconds=retry_after_seconds,
             )
             return True
         await self._repository.mark_delivery_succeeded(claimed.delivery_id)
@@ -149,8 +161,7 @@ class OutboxWorker:
             dependency="langbot",
             status="fallback" if result.used_fallback else "ok",
         ).inc()
-        backlog = await self._repository.outbox_backlog()
-        self._metrics.outbox_backlog.set(backlog)
+        backlog, terminal_failures = await self._refresh_outbox_metrics()
         log_event(
             self._logger,
             logging.INFO,
@@ -159,13 +170,27 @@ class OutboxWorker:
             status="fallback" if result.used_fallback else "ok",
             attempt=claimed.attempt,
             queueDepth=backlog,
+            terminalFailures=terminal_failures,
         )
         return True
+
+    @classmethod
+    def _retry_delay_seconds(cls, attempt: int) -> int:
+        exponent = max(0, min(attempt - 1, 5))
+        return min(cls.RETRY_BASE_SECONDS * (2**exponent), cls.RETRY_MAX_SECONDS)
+
+    async def _refresh_outbox_metrics(self) -> tuple[int, int]:
+        backlog = await self._repository.outbox_backlog()
+        terminal_failures = await self._repository.outbox_terminal_failure_count()
+        self._metrics.outbox_backlog.set(backlog)
+        self._metrics.outbox_terminal_failures.set(terminal_failures)
+        return backlog, terminal_failures
 
     async def start(self) -> None:
         if self._task is not None:
             return
         self._stop.clear()
+        await self._refresh_outbox_metrics()
         worker_id = f"delivery-{uuid.uuid4()}"
         self._task = asyncio.create_task(self._loop(worker_id), name=worker_id)
 

@@ -128,6 +128,7 @@ class DeliveryStatus(StrEnum):
     LEASED = "LEASED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    DISCARDED = "DISCARDED"
 
 
 class ClaimedDelivery(StrictModel):
@@ -471,6 +472,13 @@ class ProbeResult(StrictModel):
 
 class OutboxPayload(StrictModel):
     notification: NotificationPayload
+    dedup_key: str | None = Field(
+        default=None,
+        alias="dedupKey",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
     coalesce_key: str | None = Field(
         default=None,
         alias="coalesceKey",

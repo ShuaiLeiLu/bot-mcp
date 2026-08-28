@@ -25,6 +25,8 @@ SAFE_FIELDS = frozenset(
         "durationMs",
         "attempt",
         "queueDepth",
+        "terminalFailures",
+        "nextRetrySeconds",
         "principal",
         "store",
         "processedRows",
