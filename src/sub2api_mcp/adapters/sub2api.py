@@ -152,6 +152,15 @@ class LegacySub2APIAdapter:
         self._last_probes = probes
         return self._build_guardian_snapshot(probes)
 
+    async def _monitored_group_ids(self) -> frozenset[str]:
+        probes = self._last_probes or await self._client.fetch_probe()
+        self._last_probes = probes
+        return frozenset(
+            probe.accounts.group_id
+            for probe in probes
+            if probe.accounts is not None
+        )
+
     @staticmethod
     def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
         if not state.success:
@@ -506,6 +515,8 @@ class LegacySub2APIAdapter:
         self,
         intent: AccountQuarantineIntent,
     ) -> str:
+        if not set(intent.group_ids) <= await self._monitored_group_ids():
+            return "KEEP"
         state = await self._client.fetch_account_dispatch_state(intent.account_id)
         if not state.success:
             return "KEEP"
@@ -542,6 +553,11 @@ class LegacySub2APIAdapter:
     ) -> QuarantineProbeAttempt:
         if (before_restore is None) != (after_restore is None):
             raise ValueError("both quarantine restore callbacks are required")
+        if not set(marker.group_ids) <= await self._monitored_group_ids():
+            return QuarantineProbeAttempt(
+                account_id=marker.account_id,
+                result=QuarantineProbeResult.INVALID,
+            )
         state = await self._client.fetch_account_dispatch_state(marker.account_id)
         if not state.success:
             return QuarantineProbeAttempt(
@@ -611,6 +627,8 @@ class LegacySub2APIAdapter:
         self,
         marker: AccountQuarantineRecord,
     ) -> str:
+        if not set(marker.group_ids) <= await self._monitored_group_ids():
+            return "KEEP"
         account_id = marker.account_id
         state = await self._client.fetch_account_dispatch_state(account_id)
         if not state.success:

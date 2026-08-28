@@ -243,6 +243,7 @@ class _ChannelAccountSweepService:
         *,
         already_adjusted: set[str],
         known_group_ids: frozenset[str],
+        monitored_group_ids: frozenset[str],
     ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.channel_account_sweep_enabled:
             return [], []
@@ -271,12 +272,27 @@ class _ChannelAccountSweepService:
                 )
                 continue
             failed_groups[group.group_id] = group.name
+        candidate_pool = [
+            account
+            for account in accounts
+            if set(account.group_ids) & failed_groups.keys()
+            and self._eligible(account, already_adjusted=already_adjusted)
+        ]
+        for account in candidate_pool:
+            if not set(account.group_ids) <= known_group_ids:
+                notices.append(
+                    MaintenanceNotice(
+                        code="AMBIGUOUS_GROUP_MAPPING",
+                        account_id=account.account_id,
+                        account_name=account.name or account.account_id,
+                    )
+                )
         candidates = sorted(
             (
                 account
-                for account in accounts
-                if set(account.group_ids) & failed_groups.keys()
-                and self._eligible(account, already_adjusted=already_adjusted)
+                for account in candidate_pool
+                if set(account.group_ids) <= known_group_ids
+                and set(account.group_ids) <= monitored_group_ids
             ),
             key=lambda item: int(item.account_id),
         )
@@ -388,6 +404,7 @@ class _AccountLogGuardService:
         now: datetime,
         already_adjusted: set[str],
         known_group_ids: frozenset[str],
+        monitored_group_ids: frozenset[str],
     ) -> tuple[list[MaintenanceAdjustment], list[MaintenanceNotice]]:
         if not self._policy.log_account_guard_enabled:
             return [], []
@@ -402,6 +419,8 @@ class _AccountLogGuardService:
             account.account_id: account
             for account in accounts
             if _MinimumUsablePool._is_usable(account)
+            and bool(account.group_ids)
+            and set(account.group_ids) <= monitored_group_ids
             and account.account_id not in already_adjusted
         }
         slow_counts: dict[str, int] = {}
@@ -485,6 +504,11 @@ class MaintenanceCoordinator:
                 return MaintenanceReport(
                     notices=(MaintenanceNotice(code="AMBIGUOUS_GROUP_MAPPING"),)
                 )
+            monitored_group_ids = frozenset(
+                probe.accounts.group_id
+                for probe in probes
+                if probe.accounts is not None
+            )
             current_closed_ids = {
                 account.account_id
                 for account in accounts
@@ -497,12 +521,14 @@ class MaintenanceCoordinator:
                 accounts,
                 already_adjusted=adjusted_ids,
                 known_group_ids=known_group_ids,
+                monitored_group_ids=monitored_group_ids,
             )
             log_candidates, log_notices = await self._log_guard.run(
                 accounts,
                 now=current,
                 already_adjusted=adjusted_ids,
                 known_group_ids=known_group_ids,
+                monitored_group_ids=monitored_group_ids,
             )
             notices.extend(log_notices)
             candidate_by_id = {
@@ -538,6 +564,7 @@ class MaintenanceCoordinator:
                     or fresh.group_ids != candidate.group_ids
                     or not fresh.group_ids
                     or not set(fresh.group_ids) <= known_group_ids
+                    or not set(fresh.group_ids) <= monitored_group_ids
                 ):
                     notices.append(
                         MaintenanceNotice(

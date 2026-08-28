@@ -81,6 +81,7 @@ def select_account_recovery_candidates(
     *,
     trigger: AccountRecoveryRunTrigger,
     policy: AccountRecoveryPolicy,
+    monitored_group_ids: frozenset[str],
     group_id: str | None = None,
     quarantined_account_ids: frozenset[str] = frozenset(),
     already_processed_account_ids: frozenset[str] = frozenset(),
@@ -111,7 +112,11 @@ def select_account_recovery_candidates(
             account,
             quarantined_account_ids=quarantined_account_ids,
         )
-        if account.account_id in already_processed_account_ids:
+        account_groups = frozenset(account.group_ids)
+        if not account_groups or not account_groups.issubset(monitored_group_ids):
+            selected = False
+            reason = "outside_monitored_scope"
+        elif account.account_id in already_processed_account_ids:
             selected = False
             reason = "already_processed"
         elif classification in {
@@ -202,6 +207,7 @@ class AccountRecoveryExecutor:
         trigger: AccountRecoveryRunTrigger,
         policy: AccountRecoveryPolicy,
         policy_revision: int,
+        monitored_group_ids: frozenset[str],
         episode_id: str | None = None,
         channel_id: str | None = None,
         group_id: str | None = None,
@@ -276,6 +282,7 @@ class AccountRecoveryExecutor:
                 observations,
                 trigger=trigger,
                 policy=policy,
+                monitored_group_ids=monitored_group_ids,
                 group_id=group_id,
                 quarantined_account_ids=quarantined_account_ids,
                 already_processed_account_ids=(

@@ -414,11 +414,20 @@ class GuardianService:
                 "GUARDIAN_DISABLED",
                 "Guardian scheduling is disabled",
             )
+        monitored_group_ids = await self.repository.monitored_group_ids_for_snapshot(
+            snapshot_id
+        )
+        if monitored_group_ids is None:
+            raise ServiceError(
+                "GUARDIAN_MONITORED_SCOPE_UNAVAILABLE",
+                "The monitored channel scope is unavailable for this account snapshot",
+            )
         run = await self._account_recovery.execute(
             snapshot_id=snapshot_id,
             trigger=trigger,
             policy=policy.account_recovery,
             policy_revision=policy.revision,
+            monitored_group_ids=monitored_group_ids,
             episode_id=episode_id,
             channel_id=channel_id,
             group_id=group_id,

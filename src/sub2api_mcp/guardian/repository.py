@@ -36,6 +36,7 @@ from .contracts import (
     GuardianSample,
     GuardianSampleSource,
     ManualControl,
+    UpstreamProbeSnapshot,
 )
 
 GUARDIAN_SCHEMA_VERSION = 8
@@ -888,6 +889,36 @@ class GuardianRepository:
                 "SELECT COUNT(*) AS count FROM guardian_input_snapshots WHERE consumed_at IS NULL"
             ).fetchone()
         return int(row["count"] if row is not None else 0)
+
+    async def monitored_group_ids_for_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> frozenset[str] | None:
+        return await asyncio.to_thread(
+            self._monitored_group_ids_for_snapshot_sync,
+            snapshot_id,
+        )
+
+    def _monitored_group_ids_for_snapshot_sync(
+        self,
+        snapshot_id: str,
+    ) -> frozenset[str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = ?",
+                (_snapshot_id(snapshot_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
+        except ValidationError:
+            return None
+        return frozenset(
+            entry.group_id
+            for entry in snapshot.entries
+            if entry.group_id is not None
+        )
 
     async def supersede_expired_input_snapshots(
         self,
