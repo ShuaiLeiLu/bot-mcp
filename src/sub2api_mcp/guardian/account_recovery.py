@@ -113,7 +113,20 @@ def select_account_recovery_candidates(
             quarantined_account_ids=quarantined_account_ids,
         )
         account_groups = frozenset(account.group_ids)
-        if not account_groups or not account_groups.issubset(monitored_group_ids):
+        monitored_memberships = account_groups & monitored_group_ids
+        shared_with_unmonitored_group = bool(
+            account_groups - monitored_group_ids
+        )
+        writeback_allowed = (
+            bool(monitored_memberships)
+            and not shared_with_unmonitored_group
+            and classification
+            not in {
+                AccountRecoveryClassification.MANUAL_PAUSE,
+                AccountRecoveryClassification.EXCLUDED,
+            }
+        )
+        if not monitored_memberships:
             selected = False
             reason = "outside_monitored_scope"
         elif account.account_id in already_processed_account_ids:
@@ -125,12 +138,23 @@ def select_account_recovery_candidates(
         }:
             selected = False
         elif trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
-            selected = classification is AccountRecoveryClassification.AVAILABLE
+            # Hourly checks are deliberately limited to accounts Guardian can
+            # safely write.  Abnormal shared accounts are still selected by the
+            # BAD_ACCOUNT_STATE/CHANNEL_ERROR paths below, where the test is
+            # useful even though the account-level write must be withheld.
+            selected = (
+                classification is AccountRecoveryClassification.AVAILABLE
+                and writeback_allowed
+            )
             if selected:
                 reason = "hourly_active_check"
         elif channel_scope:
             selected = True
-            reason = "channel_error"
+            reason = (
+                "channel_error_shared_scope"
+                if shared_with_unmonitored_group
+                else "channel_error"
+            )
         else:
             selected = classification in {
                 AccountRecoveryClassification.UPSTREAM_ERROR,
@@ -138,13 +162,18 @@ def select_account_recovery_candidates(
                 AccountRecoveryClassification.SYSTEM_QUARANTINE,
             }
             if selected:
-                reason = "abnormal_state"
+                reason = (
+                    "abnormal_state_shared_scope"
+                    if shared_with_unmonitored_group
+                    else "abnormal_state"
+                )
         decisions.append(
             GuardianAccountRecoveryDecision(
                 account=account,
                 classification=classification,
                 selected=selected,
                 reason=reason,
+                writeback_allowed=writeback_allowed,
             )
         )
 
@@ -321,8 +350,10 @@ class AccountRecoveryExecutor:
                     reason = "run_stopped_after_unverified_mutation"
                     tested = False
                 else:
-                    final_result, reason, tested, stop_remaining = (
-                        await self._execute_account(decision.account, trigger=trigger)
+                    final_result, reason, tested, stop_remaining = await self._execute_account(
+                        decision.account,
+                        trigger=trigger,
+                        writeback_allowed=decision.writeback_allowed,
                     )
                 await self._repository.record_account_recovery_result(
                     run_id=run.run_id,
@@ -377,6 +408,7 @@ class AccountRecoveryExecutor:
         initial_account: GuardianAccountObservation,
         *,
         trigger: AccountRecoveryRunTrigger,
+        writeback_allowed: bool = True,
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
         account_id = initial_account.account_id
         try:
@@ -388,6 +420,19 @@ class AccountRecoveryExecutor:
             return AccountRecoveryResult.INDETERMINATE, "account_test_failed", True, False
         if tested.account_id != account_id:
             return AccountRecoveryResult.INDETERMINATE, "test_identity_mismatch", True, False
+        if not writeback_allowed:
+            test_result = tested.result.value.casefold()
+            result = (
+                AccountRecoveryResult.INDETERMINATE
+                if tested.result is AccountTestExecutionResult.INDETERMINATE
+                else AccountRecoveryResult.SKIPPED
+            )
+            return (
+                result,
+                f"shared_unmonitored_scope_test_{test_result}",
+                tested.attempted,
+                False,
+            )
         if tested.result is AccountTestExecutionResult.SKIPPED:
             return AccountRecoveryResult.SKIPPED, tested.reason, tested.attempted, False
         if tested.result is AccountTestExecutionResult.INDETERMINATE:

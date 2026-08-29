@@ -33,6 +33,12 @@
 - Guardian recovery probing now selects only uniquely mapped Guardian-owned fuses and enforces
   interval, concurrency, per-channel hourly, global daily request, and daily Token budgets with
   durable request, cost, Token, and blocked-attempt accounting.
+
+### Fixed
+
+- Guardian now tests abnormal accounts that belong to a monitored group even when the same
+  account is also shared with an unmonitored group; account-level enable/disable writes remain
+  blocked and the recovery ledger records the test-only outcome.
 - Guardian REST and MCP surfaces now expose direct scheduling status/start/stop, sampling status,
   channel score explanations, write ownership, open recovery episodes, and confirmed pending
   recovery submission. Legacy rollout endpoints return a stable deprecation error.

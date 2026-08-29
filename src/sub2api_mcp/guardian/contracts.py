@@ -212,6 +212,10 @@ class GuardianAccountRecoveryDecision(StrictModel):
     classification: AccountRecoveryClassification
     selected: bool
     reason: str = Field(min_length=1, max_length=200)
+    # Sub2API scheduling mutations are account-scoped.  A shared account may be
+    # tested because it belongs to a monitored group, but a write must be
+    # withheld when any of its other groups are outside Guardian's scope.
+    writeback_allowed: bool = True
 
 
 class GuardianAccountRecoverySelection(StrictModel):

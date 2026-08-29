@@ -93,6 +93,14 @@ _RECOVERY_REASON_LABELS = {
     "temporary_unavailable": "临时不可调度，保持不变",
     "account_state_unavailable": "账号状态无法确认",
     "account_test_failed": "账号测试结果不确定",
+    "shared_unmonitored_scope_test_success": "探测通过；账号还属于未监控分组，未改动",
+    "shared_unmonitored_scope_test_definitive_failure": (
+        "探测失败；账号还属于未监控分组，未改动"
+    ),
+    "shared_unmonitored_scope_test_indeterminate": (
+        "探测结果不确定；账号还属于未监控分组，未改动"
+    ),
+    "shared_unmonitored_scope_test_skipped": "探测跳过；账号还属于未监控分组，未改动",
     "run_stopped_after_unverified_mutation": "前项回读失败，本轮已安全停止",
 }
 
