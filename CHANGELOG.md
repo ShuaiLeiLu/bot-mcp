@@ -34,11 +34,6 @@
   interval, concurrency, per-channel hourly, global daily request, and daily Token budgets with
   durable request, cost, Token, and blocked-attempt accounting.
 
-### Fixed
-
-- Guardian now tests abnormal accounts that belong to a monitored group even when the same
-  account is also shared with an unmonitored group; account-level enable/disable writes remain
-  blocked and the recovery ledger records the test-only outcome.
 - Guardian REST and MCP surfaces now expose direct scheduling status/start/stop, sampling status,
   channel score explanations, write ownership, open recovery episodes, and confirmed pending
   recovery submission. Legacy rollout endpoints return a stable deprecation error.
@@ -108,6 +103,9 @@
   test immediately completes verified enablement instead of waiting for another state cycle.
 - Direct-write limits now count accounts that actually received a verified write. Accounts with
   no change or a cooldown-blocked proposal no longer starve later accounts and groups.
+- Guardian now tests abnormal accounts that belong to a monitored group even when the same
+  account is also shared with an unmonitored group; account-level enable/disable writes remain
+  blocked and the recovery ledger records the test-only outcome.
 
 ## [0.1.0] - 2026-08-23
 
