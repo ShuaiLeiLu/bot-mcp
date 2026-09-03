@@ -43,11 +43,15 @@
 - Normal schedulable accounts now receive one durable active health check per hour. The check is
   de-duplicated across fast Guardian scans and restarts, skips human pauses and protected states,
   and keeps ordinary successful checks silent.
-- All system-owned account tests now send the same explicit low-token Sub2API template using the
-  account default model, prompt `hi`, and default text mode.
+- System-owned account tests now use the matching channel monitor's primary model with prompt `hi`
+  and default text mode; durable shared snapshots preserve the model selection across restarts, while
+  ambiguous shared accounts safely fall back to the Sub2API account default. Explicit channel or
+  group probe-model overrides remain available for deliberate exceptions.
 - Direct scheduling resolves unique monitor→group→account mappings and applies bounded
   `load_factor` plus baseline-relative `priority` through current-read, one-field write, exact
   read-back verification. A failed verification stops the remaining run.
+- Monitor-to-group binding now consults the probe API-key usage record even when a channel exposes a
+  stale display group name, so account tests still use the correct channel monitor model.
 - The Guardian console is now a light, responsive operations dashboard with explicit scheduling
   controls and redacted recovery status.
 - SQLite retention now runs every ten minutes even when direct scheduling is stopped. It removes
@@ -106,6 +110,7 @@
 - Guardian now tests abnormal accounts that belong to a monitored group even when the same
   account is also shared with an unmonitored group; account-level enable/disable writes remain
   blocked and the recovery ledger records the test-only outcome.
+- Scoring cycles no longer fail when retention has redacted an old evidence `source_event_id`.
 
 ## [0.1.0] - 2026-08-23
 

@@ -81,6 +81,12 @@ def _positive_id_text(value: Any, field: str) -> str:
     return text
 
 
+def _optional_positive_id_text(value: Any, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    return _positive_id_text(value, field)
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelHealth:
     monitor_id: str
@@ -93,6 +99,12 @@ class ChannelHealth:
     last_checked_at: str
     enabled: bool
     group_name: str = ""
+    # The channel monitor's effective request protocol/template are retained so
+    # Guardian account recovery can use the same primary model.  Unknown
+    # protocol values are intentionally normalized to an empty string for
+    # forward compatibility with newer Sub2API providers.
+    api_mode: str = ""
+    template_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +341,12 @@ def parse_channel_monitors(payload: Any) -> list[ChannelHealth]:
         if monitor_id in seen_ids:
             raise MonitorDataError("duplicate channel monitor")
         seen_ids.add(monitor_id)
+        raw_api_mode = _bounded_text(item.get("api_mode"), "api_mode").lower()
+        api_mode = (
+            raw_api_mode
+            if raw_api_mode in {"chat_completions", "responses"}
+            else ""
+        )
         channels.append(
             ChannelHealth(
                 monitor_id=monitor_id,
@@ -352,6 +370,11 @@ def parse_channel_monitors(payload: Any) -> list[ChannelHealth]:
                 ),
                 enabled=item.get("enabled") is True,
                 group_name=_bounded_text(item.get("group_name"), "group_name"),
+                api_mode=api_mode,
+                template_id=_optional_positive_id_text(
+                    item.get("template_id"),
+                    "template id",
+                ),
             )
         )
     return channels
@@ -760,8 +783,11 @@ def format_status_report(
         probe.channel.status == "operational" for probe in probe_list
     )
     blocks = [
-        f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜异常 {len(probe_list) - normal_count}\n"
-        f"{trigger_line}"
+        (
+            f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜"
+            f"异常 {len(probe_list) - normal_count}\n"
+            f"{trigger_line}"
+        )
     ]
     for probe in probe_list:
         channel = probe.channel
@@ -779,7 +805,8 @@ def format_status_report(
             group_line = f"分组：{probe.accounts.name} (#{probe.accounts.group_id})"
             account_line = (
                 f"账号：可用 {probe.accounts.available_count}｜错误 {probe.accounts.error_count}｜"
-                f"临时不可调度 {probe.accounts.temporary_unavailable_count}｜关闭 {probe.accounts.closed_count}"
+                f"临时不可调度 {probe.accounts.temporary_unavailable_count}｜"
+                f"关闭 {probe.accounts.closed_count}"
             )
         blocks.append(
             f"{icon} {channel.name}\n"

@@ -23,9 +23,13 @@ server, domain, public port, or reverse proxy is assumed.
 - Slow-first-token protection reads Sub2API usage logs directly: three responses above 30 seconds
   within the latest three minutes quarantine the account immediately, subject to the minimum-pool
   guard. Recovery requires two consecutive successful probes at or below 30 seconds.
-- Every system-owned account test uses the same Sub2API request template: the account's default
-  model, prompt `hi`, and default text mode. Manual pauses, expiry, and temporary unavailability
-  are filtered before any test request.
+- Every Guardian-managed account test uses the matching channel monitor's primary model, prompt `hi`,
+  and default text mode. The model is carried in the durable shared snapshot, so recovery after a
+  restart uses the same monitor model. If one account is shared by channels with different
+  models and no channel-specific trigger identifies the target, Guardian safely falls back to the
+  Sub2API account default instead of guessing. An explicit channel/group probe-model override is
+  still honored. Manual pauses, expiry, and temporary unavailability are filtered before any test
+  request.
 - Durable video jobs with user-selected length, steps, and resolution.
 - Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
 - Multi-target fan-out across different LangBot adapters.
@@ -49,7 +53,8 @@ scheduling guide, events, policy, connections, and information/notifications.
 
 Guardian has one direct scheduling switch and no observe/rollout mode. Start and emergency stop
 require confirmation, policy revision, and an idempotency key. When enabled, Guardian resolves a
-unique monitor→group→account mapping, applies bounded `load_factor` and baseline-relative
+unique monitor→group→account mapping (stable API-key usage bindings take precedence over display
+names), applies bounded `load_factor` and baseline-relative
 `priority` changes one field at a time, then performs an independent exact read-back. Account
 `schedulable` changes remain tied to explicit conditional account tests.
 The policy page exposes the hourly health-check switch and interval. Its durable recovery ledger

@@ -48,8 +48,12 @@ workers, and the scheduler have started.
   on every 15-second scan.
 - Eligible `active + schedulable=true` accounts are tested at most once per configured interval,
   which defaults to 3,600 seconds. The durable ledger survives restarts.
-- All automatic test paths use the account default model with the `hi` prompt. An account marked
-  `active + schedulable=false` is treated as a human pause and never tested automatically.
+- All Guardian-managed automatic test paths use the matching channel monitor's primary model with
+  the `hi` prompt.
+  If an account is shared by channels that use different models and no channel-specific trigger
+  identifies the target, Guardian falls back to the Sub2API account default instead of guessing.
+  An account marked `active + schedulable=false` is treated as a human pause and never tested
+  automatically.
 - Query `guardian_get_recovery_status` and inspect `active_check.enabled`,
   `active_check.interval_seconds`, and `active_check.last_run_at` when verifying the schedule.
 - Healthy hourly checks do not generate administrator messages. Definitive failures,

@@ -300,7 +300,8 @@ class GuardianService:
             "active_check": {
                 "enabled": policy.probe.enabled,
                 "interval_seconds": policy.probe.interval_seconds,
-                "template": "default_model_hi",
+                "template": "channel_monitor_primary_model",
+                "model_source": "channel_monitor.primary_model",
                 "last_run_at": (
                     latest_active_check.started_at.isoformat()
                     if latest_active_check is not None
@@ -442,6 +443,8 @@ class GuardianService:
             quarantined_account_ids=await self._quarantined_account_ids(),
             already_processed_account_ids=already_processed_account_ids,
             probe_interval_seconds=policy.probe.interval_seconds,
+            probe_model=policy.probe.model,
+            probe_prompt=policy.probe.prompt,
         )
         records = await self.repository.list_account_recovery_results(run.run_id)
         if run.status is not AccountRecoveryRunStatus.RUNNING:

@@ -773,6 +773,9 @@ class GuardianEngine:
                     "desired_concurrency": (
                         channel_override.concurrency if channel_override is not None else None
                     ),
+                    "probe_model": entry.probe_model,
+                    "probe_api_mode": entry.probe_api_mode,
+                    "probe_template_id": entry.probe_template_id,
                     "probe_model_override": (
                         channel_override.probe_model if channel_override is not None else None
                     ),

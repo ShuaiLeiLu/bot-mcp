@@ -22,6 +22,7 @@ from .contracts import (
     AccountRecoveryRunStatus,
     AccountRecoveryRunTrigger,
     ChannelPolicyOverride,
+    GroupPolicyOverride,
     GuardianAccountObservation,
     GuardianAccountRecoveryRecord,
     GuardianAccountRecoveryRun,
@@ -33,6 +34,7 @@ from .contracts import (
     GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
+    GuardianProbeTemplate,
     GuardianSample,
     GuardianSampleSource,
     ManualControl,
@@ -898,6 +900,95 @@ class GuardianRepository:
             self._monitored_group_ids_for_snapshot_sync,
             snapshot_id,
         )
+
+    async def probe_templates_for_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> tuple[GuardianProbeTemplate, ...]:
+        """Return the channel monitor models captured in one shared snapshot.
+
+        The snapshot is the single source of truth for recovery runs.  Reading
+        it here keeps account tests aligned with the monitor that produced the
+        account observations, including after a process restart.
+        """
+
+        return await asyncio.to_thread(
+            self._probe_templates_for_snapshot_sync,
+            snapshot_id,
+        )
+
+    def _probe_templates_for_snapshot_sync(
+        self,
+        snapshot_id: str,
+    ) -> tuple[GuardianProbeTemplate, ...]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = ?",
+                (_snapshot_id(snapshot_id),),
+            ).fetchone()
+            if row is None:
+                return ()
+            try:
+                snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
+            except ValidationError as exc:
+                raise ServiceError(
+                    "GUARDIAN_SNAPSHOT_DATA_INVALID",
+                    "Persisted Guardian probe snapshot data is invalid",
+                ) from exc
+            channel_rows = connection.execute(
+                "SELECT channel_id, override_json FROM guardian_channel_overrides"
+            ).fetchall()
+            group_rows = connection.execute(
+                "SELECT group_id, policy_json FROM guardian_group_overrides"
+            ).fetchall()
+        channel_overrides = {
+            str(row["channel_id"]): ChannelPolicyOverride.model_validate_json(
+                row["override_json"]
+            )
+            for row in channel_rows
+        }
+        group_overrides = {
+            str(row["group_id"]): GroupPolicyOverride.model_validate_json(
+                row["policy_json"]
+            )
+            for row in group_rows
+        }
+        templates: list[GuardianProbeTemplate] = []
+        for entry in snapshot.entries:
+            channel_override = channel_overrides.get(entry.monitor_id)
+            group_override = (
+                group_overrides.get(entry.group_id)
+                if entry.group_id is not None
+                else None
+            )
+            effective_model = (entry.probe_model or "").strip()
+            channel_model = (
+                channel_override.probe_model.strip()
+                if channel_override is not None and channel_override.probe_model
+                else ""
+            )
+            group_model = (
+                group_override.probe_model.strip()
+                if group_override is not None and group_override.probe_model
+                else ""
+            )
+            if channel_model:
+                effective_model = channel_model
+            elif group_model:
+                effective_model = group_model
+            if not effective_model:
+                continue
+            templates.append(
+                GuardianProbeTemplate(
+                    channel_id=entry.monitor_id,
+                    group_id=entry.group_id,
+                    model_id=effective_model,
+                    api_mode=entry.probe_api_mode,
+                    template_id=entry.probe_template_id,
+                )
+            )
+        templates.sort(key=lambda item: (item.group_id or "", item.channel_id))
+        return tuple(templates)
 
     def _monitored_group_ids_for_snapshot_sync(
         self,
@@ -2210,9 +2301,13 @@ class GuardianRepository:
         for row in rows:
             occurred_at = _dt(row["occurred_at"])
             assert occurred_at is not None
+            # Retention intentionally redacts old source_event_id values.  A
+            # stable local identity keeps those samples readable and avoids a
+            # scoring-cycle failure after redaction.
+            source_event_id = row["source_event_id"] or f"stored:{row['sample_id']}"
             evidence.append(
                 GuardianEvidence(
-                    source_event_id=row["source_event_id"],
+                    source_event_id=source_event_id,
                     channel_id=row["channel_id"],
                     source=row["source"],
                     event_type=row["event_type"],

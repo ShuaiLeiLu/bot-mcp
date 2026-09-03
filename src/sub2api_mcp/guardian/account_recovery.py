@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -25,6 +25,7 @@ from .contracts import (
     GuardianAccountRecoverySelection,
     GuardianAccountStatus,
     GuardianAccountTestOutcome,
+    GuardianProbeTemplate,
 )
 from .repository import GuardianRepository
 
@@ -35,6 +36,9 @@ class AccountRecoveryOperations(Protocol):
         account_id: str,
         *,
         initial_account: GuardianAccountObservation,
+        model_id: str = "",
+        prompt: str = "hi",
+        mode: str = "",
     ) -> GuardianAccountTestOutcome: ...
 
     async def guardian_enable_account(
@@ -243,6 +247,10 @@ class AccountRecoveryExecutor:
         quarantined_account_ids: frozenset[str] = frozenset(),
         already_processed_account_ids: frozenset[str] = frozenset(),
         probe_interval_seconds: int = 3600,
+        probe_model: str = "",
+        probe_prompt: str = "hi",
+        probe_mode: str = "",
+        probe_templates: Sequence[GuardianProbeTemplate] | None = None,
     ) -> GuardianAccountRecoveryRun:
         if not policy.enabled or policy.owner is not AccountRecoveryOwner.GUARDIAN:
             raise ServiceError(
@@ -307,6 +315,11 @@ class AccountRecoveryExecutor:
                 else frozenset[str]()
             )
             observations = await self._repository.list_account_observations(snapshot_id)
+            templates = (
+                tuple(probe_templates)
+                if probe_templates is not None
+                else await self._repository.probe_templates_for_snapshot(snapshot_id)
+            )
             selection = select_account_recovery_candidates(
                 observations,
                 trigger=trigger,
@@ -354,6 +367,15 @@ class AccountRecoveryExecutor:
                         decision.account,
                         trigger=trigger,
                         writeback_allowed=decision.writeback_allowed,
+                        probe_model=self._probe_model_for_account(
+                            decision.account,
+                            channel_id=channel_id,
+                            group_id=group_id,
+                            templates=templates,
+                            fallback=probe_model,
+                        ),
+                        probe_prompt=probe_prompt,
+                        probe_mode=probe_mode,
                     )
                 await self._repository.record_account_recovery_result(
                     run_id=run.run_id,
@@ -409,12 +431,18 @@ class AccountRecoveryExecutor:
         *,
         trigger: AccountRecoveryRunTrigger,
         writeback_allowed: bool = True,
+        probe_model: str = "",
+        probe_prompt: str = "hi",
+        probe_mode: str = "",
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
         account_id = initial_account.account_id
         try:
             tested = await self._operations.guardian_test_account(
                 account_id,
                 initial_account=initial_account,
+                model_id=probe_model,
+                prompt=probe_prompt,
+                mode=probe_mode,
             )
         except Exception:
             return AccountRecoveryResult.INDETERMINATE, "account_test_failed", True, False
@@ -488,6 +516,46 @@ class AccountRecoveryExecutor:
             tested.attempted,
             mutation.attempted,
         )
+
+    @staticmethod
+    def _probe_model_for_account(
+        account: GuardianAccountObservation,
+        *,
+        channel_id: str | None,
+        group_id: str | None,
+        templates: Sequence[GuardianProbeTemplate],
+        fallback: str,
+    ) -> str:
+        """Select a monitor model without guessing across shared channels."""
+
+        fallback = fallback.strip()
+        if channel_id is not None:
+            channel_models = {
+                template.model_id
+                for template in templates
+                if template.channel_id == channel_id
+                and (group_id is None or template.group_id == group_id)
+            }
+            if len(channel_models) == 1:
+                return next(iter(channel_models))
+
+        candidate_groups = (
+            (group_id,)
+            if group_id is not None
+            else tuple(account.group_ids)
+        )
+        models = sorted(
+            {
+                template.model_id
+                for template in templates
+                if template.group_id is not None
+                and template.group_id in candidate_groups
+            }
+        )
+        # A shared account can belong to channels with different models.  In
+        # that case the account-scoped Sub2API default is the only non-guessing
+        # choice; channel-error runs still use their exact channel above.
+        return models[0] if len(models) == 1 else fallback
 
     def _now(self) -> datetime:
         value = self._clock()

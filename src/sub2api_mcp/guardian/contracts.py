@@ -767,6 +767,30 @@ class WeightAllocation(StrictModel):
     blocked_reason: str | None = None
 
 
+class GuardianProbeTemplate(StrictModel):
+    """Safe, channel-scoped probe metadata copied from Sub2API monitoring."""
+
+    channel_id: str = Field(min_length=1, max_length=128)
+    group_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
+    model_id: str = Field(min_length=1, max_length=200)
+    api_mode: str | None = Field(
+        default=None,
+        pattern=r"^(chat_completions|responses)$",
+    )
+    template_id: str | None = Field(
+        default=None,
+        pattern=r"^[1-9][0-9]{0,19}$",
+    )
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("probe model cannot be empty")
+        return normalized
+
+
 class UpstreamProbeEntry(StrictModel):
     monitor_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
@@ -780,6 +804,27 @@ class UpstreamProbeEntry(StrictModel):
     latency_ms: int | None = Field(default=None, ge=0, le=3_600_000)
     effective_rate: float | None = Field(default=None, ge=0)
     upstream_schedulable: bool = True
+    # These fields are optional to keep already-persisted V1 snapshots valid.
+    # They contain no credentials or request bodies.
+    # Empty strings are treated as "not provided" for snapshots produced by
+    # older adapters; the validator below normalizes them to ``None``.
+    probe_model: str | None = Field(default=None, max_length=200)
+    probe_api_mode: str | None = Field(
+        default=None,
+        pattern=r"^(chat_completions|responses)$",
+    )
+    probe_template_id: str | None = Field(
+        default=None,
+        pattern=r"^[1-9][0-9]{0,19}$",
+    )
+
+    @field_validator("probe_model")
+    @classmethod
+    def normalize_probe_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_group_counts(self) -> UpstreamProbeEntry:

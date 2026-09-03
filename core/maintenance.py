@@ -231,6 +231,22 @@ class MaintenanceMutationObserver(Protocol):
     ) -> None: ...
 
 
+def _unique_probe_model(
+    probes: Sequence[ChannelProbe],
+    group_ids: Set[str],
+) -> str:
+    """Return a monitor model only when all matching channels agree."""
+
+    models = {
+        probe.channel.model.strip()
+        for probe in probes
+        if probe.accounts is not None
+        and probe.accounts.group_id in group_ids
+        and probe.channel.model.strip()
+    }
+    return next(iter(models)) if len(models) == 1 else ""
+
+
 class _ChannelAccountSweepService:
     def __init__(self, gateway: MaintenanceGateway, policy: MaintenancePolicy):
         self._gateway = gateway
@@ -250,6 +266,7 @@ class _ChannelAccountSweepService:
 
         notices: list[MaintenanceNotice] = []
         failed_groups: dict[str, str] = {}
+        failed_group_probes: dict[str, list[ChannelProbe]] = {}
         for probe in probes:
             if probe.channel.status not in {"failed", "error"}:
                 continue
@@ -272,6 +289,7 @@ class _ChannelAccountSweepService:
                 )
                 continue
             failed_groups[group.group_id] = group.name
+            failed_group_probes.setdefault(group.group_id, []).append(probe)
         candidate_pool = [
             account
             for account in accounts
@@ -313,7 +331,19 @@ class _ChannelAccountSweepService:
 
         test_results: dict[str, AccountTestResult] = {}
         for account in candidates:
-            result = await self._gateway.test_account_availability(account.account_id)
+            failed_memberships = set(account.group_ids) & failed_groups.keys()
+            probe_model = _unique_probe_model(
+                [
+                    probe
+                    for group_id in failed_memberships
+                    for probe in failed_group_probes.get(group_id, [])
+                ],
+                failed_memberships,
+            )
+            result = await self._gateway.test_account_availability(
+                account.account_id,
+                model_id=probe_model,
+            )
             if (
                 result.account_id != account.account_id
                 or (result.success and result.definitive_failure)

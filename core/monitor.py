@@ -809,7 +809,6 @@ class Sub2APIClient:
         for channel in channels:
             if (
                 not channel.enabled
-                or channel.group_name
                 or not channel.model
                 or not channel.last_checked_at
             ):

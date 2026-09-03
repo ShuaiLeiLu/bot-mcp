@@ -663,6 +663,7 @@ async function showChannel(channelId) {
   const root = $("#channel-detail");
   root.replaceChildren();
   const summary = make("div", "channel-summary");
+  const probeDetails = channel.details || {};
   for (const [label, value] of [
     ["渠道 ID", channel.channel_id],
     ["分组", channel.group_id || "未分组"],
@@ -671,6 +672,8 @@ async function showChannel(channelId) {
     ["证据状态", explanation.freshness_state],
     ["证据来源", (explanation.evidence_sources || []).join("、") || "暂无"],
     ["预热桶数", explanation.warmup_buckets ?? 0],
+    ["监控探测模型", probeDetails.probe_model || "未提供"],
+    ["监控协议", probeDetails.probe_api_mode || "默认"],
     ["决策原因", explanation.reason || "暂无"],
   ]) {
     const item = make("div");

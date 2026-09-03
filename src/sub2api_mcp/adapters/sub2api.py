@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -173,6 +173,45 @@ class LegacySub2APIAdapter:
             return "temporary_unavailable"
         return None
 
+    def _monitor_model_for_account(
+        self,
+        initial_account: GuardianAccountObservation,
+    ) -> str:
+        """Resolve a model from the latest channel-monitor inventory.
+
+        Account tests are account-scoped while the monitor is channel-scoped.
+        Use the monitor model only when the account maps unambiguously to one
+        model; falling back to Sub2API's account default is safer than sending
+        a model from an unrelated channel for shared accounts.
+        """
+
+        group_ids = frozenset(initial_account.group_ids)
+        if not group_ids:
+            return ""
+        models = {
+            probe.channel.model.strip()
+            for probe in self._last_probes
+            if probe.accounts is not None
+            and probe.accounts.group_id in group_ids
+            and probe.channel.model.strip()
+        }
+        return next(iter(models)) if len(models) == 1 else ""
+
+    def _monitor_model_for_groups(self, group_ids: Iterable[str]) -> str:
+        """Resolve one monitor model for a set of quarantined account groups."""
+
+        target_groups = frozenset(group_ids)
+        if not target_groups:
+            return ""
+        models = {
+            probe.channel.model.strip()
+            for probe in self._last_probes
+            if probe.accounts is not None
+            and probe.accounts.group_id in target_groups
+            and probe.channel.model.strip()
+        }
+        return next(iter(models)) if len(models) == 1 else ""
+
     async def guardian_test_account(
         self,
         account_id: str,
@@ -245,6 +284,9 @@ class LegacySub2APIAdapter:
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
             )
+        model_id = model_id.strip()
+        if not model_id:
+            model_id = self._monitor_model_for_account(initial_account)
         tested = await self._client.test_account_availability(
             account_id,
             model_id=model_id,
@@ -430,23 +472,30 @@ class LegacySub2APIAdapter:
         for probe in probes:
             channel = probe.channel
             accounts = probe.accounts
-            entries.append(
-                {
-                    "monitor_id": channel.monitor_id,
-                    "name": channel.name,
-                    "status": channel.status,
-                    "group_id": accounts.group_id if accounts is not None else None,
-                    "group_name": accounts.name if accounts is not None else None,
-                    "available_count": (accounts.available_count if accounts is not None else None),
-                    "error_count": accounts.error_count if accounts is not None else None,
-                    "temporary_unavailable_count": (
-                        accounts.temporary_unavailable_count if accounts is not None else None
-                    ),
-                    "closed_count": accounts.closed_count if accounts is not None else None,
-                    "latency_ms": channel.latency_ms,
-                    "upstream_schedulable": channel.enabled,
-                }
-            )
+            entry: dict[str, Any] = {
+                "monitor_id": channel.monitor_id,
+                "name": channel.name,
+                "status": channel.status,
+                "group_id": accounts.group_id if accounts is not None else None,
+                "group_name": accounts.name if accounts is not None else None,
+                "available_count": (
+                    accounts.available_count if accounts is not None else None
+                ),
+                "error_count": accounts.error_count if accounts is not None else None,
+                "temporary_unavailable_count": (
+                    accounts.temporary_unavailable_count if accounts is not None else None
+                ),
+                "closed_count": accounts.closed_count if accounts is not None else None,
+                "latency_ms": channel.latency_ms,
+                "upstream_schedulable": channel.enabled,
+            }
+            if channel.model:
+                entry["probe_model"] = channel.model
+            if channel.api_mode:
+                entry["probe_api_mode"] = channel.api_mode
+            if channel.template_id is not None:
+                entry["probe_template_id"] = channel.template_id
+            entries.append(entry)
         entries.sort(key=lambda item: (str(item["monitor_id"]), str(item["name"])))
         snapshot = UpstreamProbeSnapshot.model_validate(
             {"version": 1, "entries": entries}
@@ -569,7 +618,10 @@ class LegacySub2APIAdapter:
                 account_id=marker.account_id,
                 result=QuarantineProbeResult.INVALID,
             )
-        tested = await self._client.test_account_availability(marker.account_id)
+        tested = await self._client.test_account_availability(
+            marker.account_id,
+            model_id=self._monitor_model_for_groups(marker.group_ids),
+        )
         if not tested.success:
             return QuarantineProbeAttempt(
                 account_id=marker.account_id,
@@ -637,7 +689,10 @@ class LegacySub2APIAdapter:
             return "RECOVERED"
         if state.status in {"inactive", "disabled"} and state.schedulable is False:
             return "CANCEL"
-        tested = await self._client.test_account_availability(account_id)
+        tested = await self._client.test_account_availability(
+            account_id,
+            model_id=self._monitor_model_for_groups(marker.group_ids),
+        )
         if not tested.success:
             return "KEEP"
         if marker.reason is AccountQuarantineReason.SLOW_FIRST_TOKEN and (
